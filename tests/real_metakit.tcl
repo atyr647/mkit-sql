@@ -8,6 +8,8 @@ source $here/loadengine.tcl
 set f [expr {[info exists ::env(TMPDIR)] ? $::env(TMPDIR) : "/tmp"}]/mkitsql_real_[pid].mk ; file delete $f
 set db [store::openFile $f -create]
 set pass 0 ; set fail 0
+# Windows cannot delete a file another handle (Metakit's mapping) still has open for a moment after close: retry for up to 5 s
+proc rmfile {f} { for {set i 0} {$i < 50} {incr i} { if {![catch {file delete $f}]} return ; after 100 } ; file delete $f }
 proc chk {n got want} { global pass fail ; if {$got eq $want} {incr pass} else {incr fail ; puts "FAIL $n\n  got:  $got\n  want: $want"} }
 proc q {sql} { mkitsql::run $sql $::db }
 proc rows {sql} { dict get [q $sql] rows }
@@ -57,7 +59,7 @@ chk readonly_write [catch {q "INSERT INTO t (a) VALUES (1)"} m] 1
 # On real Metakit, DROP TABLE t; CREATE TABLE t (x TEXT) after t had x INT made writes fail and reads return 0, and the
 # file could hang on close.  The storage layer now refuses (or, when nothing is pending and it owns the file, reopens first).
 store::closeFile $db
-file delete $f
+rmfile $f
 set db [store::openFile $f -create]
 set standalone [expr {$::mkitsql::backend eq "standalone"}]
 q "CREATE TABLE ty (id INT, x INT)"
@@ -110,6 +112,6 @@ q "UPDATE rn SET name = 'zz', qty = 99 WHERE id = 1"
 chk renames_still_writable [rows "SELECT name, qty FROM rn WHERE id = 1"] {{zz 99}}
 q "COMMIT"
 
-file delete $f
+catch {store::closeFile $db} ; rmfile $f
 puts "real-Metakit checks: $pass passed, $fail failed"
 exit [expr {$fail ? 1 : 0}]
