@@ -227,7 +227,9 @@ def main():
     with open(script, "w", encoding="utf-8") as f:
         for s in setup: f.write("S " + s + "\n")
         for q in queries: f.write("Q " + q.replace("\n", " ") + "\n")
-    subprocess.run(["tclsh", os.path.join(HERE, "run_tcl.tcl"), script, out], check=True)
+    # MKIT_TCLSH picks the Tcl runtime (e.g. "tclkit/tclkit-8.6.3"); default is the system tclsh
+    tclsh = os.environ.get("MKIT_TCLSH", "tclsh").split()
+    subprocess.run(tclsh + [os.path.join(HERE, "run_tcl.tcl"), script, out], check=True)
     mine = [json.loads(l) for l in open(out, encoding="utf-8")]
     assert len(mine) == len(queries), (len(mine), len(queries))
     con = sqlite3.connect(":memory:")

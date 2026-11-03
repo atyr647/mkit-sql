@@ -184,7 +184,7 @@ proc ::mkitsql::rt::inlist {v list kind hasNull} {
     if {![regexp {^\s*(\d{4})-(\d{1,2})-(\d{1,2})} $v -> y m d]} {
         ::mkitsql::fail "Invalid date: '[string range $v 0 40]' (expected YYYY-MM-DD)"
     }
-    return [format %04d-%02d-%02d $y [scan $m %d] [scan $d %d]]
+    return [format %04d-%02d-%02d [scan $y %d] [scan $m %d] [scan $d %d]]
 }
 ::mkitsql::defstrict cast_timestamp {v} {
     if {![regexp {^\s*(\d{4})-(\d{1,2})-(\d{1,2})(?:[ T](\d{1,2}):(\d{2})(?::(\d{2}(?:\.\d+)?))?)?} $v -> y m d hh mi ss]} {
@@ -193,9 +193,9 @@ proc ::mkitsql::rt::inlist {v list kind hasNull} {
     if {$hh eq ""} { set hh 0 ; set mi 0 ; set ss 0 }
     if {$ss eq ""} { set ss 0 }
     if {[string first . $ss] >= 0} {
-        return [format "%04d-%02d-%02d %02d:%02d:%s" $y [scan $m %d] [scan $d %d] [scan $hh %d] [scan $mi %d] $ss]
+        return [format "%04d-%02d-%02d %02d:%02d:%s" [scan $y %d] [scan $m %d] [scan $d %d] [scan $hh %d] [scan $mi %d] $ss]
     }
-    return [format "%04d-%02d-%02d %02d:%02d:%02d" $y [scan $m %d] [scan $d %d] [scan $hh %d] [scan $mi %d] [scan $ss %d]]
+    return [format "%04d-%02d-%02d %02d:%02d:%02d" [scan $y %d] [scan $m %d] [scan $d %d] [scan $hh %d] [scan $mi %d] [scan $ss %d]]
 }
 ::mkitsql::defstrict cast_time {v} {
     if {![regexp {^\s*(\d{1,2}):(\d{2})(?::(\d{2}))?} $v -> hh mi ss]} {
@@ -353,27 +353,22 @@ proc ::mkitsql::rt::fn_CURRENT_TIME {} { clock format [clock seconds] -format %H
 proc ::mkitsql::rt::fn_CURRENT_TIMESTAMP {} { clock format [clock seconds] -format "%Y-%m-%d %H:%M:%S" }
 ::mkitsql::defstrict fn_EXTRACT {field v} {
     if {[string match ivl:* $v]} { return [::mkitsql::ivExtract $field $v] }
-    if {![regexp {^\s*(\d{4})-(\d{1,2})-(\d{1,2})(?:[ T](\d{1,2}):(\d{2})(?::(\d{2}(?:\.\d+)?))?)?} $v -> y m d hh mi ss]} {
-        if {[regexp {^\s*(\d{1,2}):(\d{2})(?::(\d{2}(?:\.\d+)?))?} $v -> hh mi ss]} {
-            set y "" ; set m "" ; set d ""
-        } else {
-            ::mkitsql::fail "Cannot extract from '[string range $v 0 40]': not a date or time"
-        }
+    set p [::mkitsql::dtParse $v]
+    dict with p {}
+    if {$kind eq "time" && $field in {YEAR MONTH DAY DOW DOY}} {
+        ::mkitsql::fail "Cannot extract $field from a TIME"
     }
-    foreach x {hh mi ss} { if {[set $x] eq ""} { set $x 0 } }
+    set sec [expr {$ss == int($ss) ? int($ss) : $ss}]
     switch -- $field {
-        YEAR   { return [scan $y %d] }
-        MONTH  { return [scan $m %d] }
-        DAY    { return [scan $d %d] }
-        HOUR   { return [scan $hh %d] }
-        MINUTE { return [scan $mi %d] }
-        SECOND { return $ss }
-        DOW    { return [clock format [clock scan "$y-$m-$d" -format %Y-%m-%d -gmt 1] -format %w -gmt 1] }
-        DOY    { return [scan [clock format [clock scan "$y-$m-$d" -format %Y-%m-%d -gmt 1] -format %j -gmt 1] %d] }
-        EPOCH  {
-            return [clock scan [format "%04d-%02d-%02d %02d:%02d:%02d" $y [scan $m %d] [scan $d %d] [scan $hh %d] [scan $mi %d] [expr {int($ss)}]] \
-                -format "%Y-%m-%d %H:%M:%S" -gmt 1]
-        }
+        YEAR   { return $y }
+        MONTH  { return $m }
+        DAY    { return $d }
+        HOUR   { return $hh }
+        MINUTE { return $mi }
+        SECOND { return $sec }
+        DOW    { return [expr {([::mkitsql::daysFromCivil $y $m $d] + 4) % 7}] }        ;# Sunday = 0
+        DOY    { return [expr {[::mkitsql::daysFromCivil $y $m $d] - [::mkitsql::daysFromCivil $y 1 1] + 1}] }
+        EPOCH  { return [::mkitsql::dtEpoch $p] }
     }
     ::mkitsql::fail "Unknown EXTRACT field '$field'"
 }

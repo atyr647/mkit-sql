@@ -517,8 +517,9 @@ proc ::mkitsql::bindCol {q name} {
 proc ::mkitsql::inferType {v} {
     variable N
     if {$v eq $N} { return null }
-    if {[string is wideinteger -strict $v]} { return int }
-    if {[string is double -strict $v]} { return real }
+    # canonical numbers only: "08" or " 5" stay text (they compare numerically against numbers anyway)
+    if {[regexp {^-?(0|[1-9]\d*)$} $v] && [string is wideinteger -strict $v]} { return int }
+    if {[regexp {^-?(0|[1-9]\d*)?\.?\d*([eE][-+]?\d+)?$} $v] && [string is double -strict $v]} { return real }
     return text
 }
 

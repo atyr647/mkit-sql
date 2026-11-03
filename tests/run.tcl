@@ -474,6 +474,27 @@ q "DROP TABLE stock"
 q "DROP TABLE incoming"
 
 # ============================================================================
+#  Leading zeros are decimal (Tcl would read 08 as invalid octal), and the calendar maths
+# ============================================================================
+check zero_lit    [rows "SELECT 08 + 1, 007, 09.5 + 1, 0010 * 2, 00, 0.5, 00.5"] {{9 7 10.5 20 0 0.5 0.5}}
+check zero_limit  [col0 "SELECT id FROM employees ORDER BY id LIMIT 08 OFFSET 07"] {8 9 10 11 12 13 14 15}
+check zero_where  [col0 "SELECT id FROM employees WHERE id IN (08, 09) OR id BETWEEN 011 AND 012 ORDER BY id"] {8 9 11 12}
+check zero_text   [rows "SELECT CAST('08' AS INT), '09' + 1, CAST('007' AS DOUBLE PRECISION)"] {{8 10 7.0}}
+check zero_func   [rows "SELECT SUBSTR('abcdefghij', 08, 02), LEFT('abcdef', 03), LPAD('x', 05, '0')"] {{hi abc 0000x}}
+check zero_param  [rows "SELECT id FROM employees WHERE id = ?" {08}] {8}
+check zero_param_text [rows "SELECT ?, ? + 1" {09 08}] {{09 9}}
+check zero_iv     [rows "SELECT INTERVAL '08' DAY, INTERVAL '08 days', INTERVAL '09:05' HOUR TO MINUTE, INTERVAL '08-09' YEAR TO MONTH, INTERVAL '00:30:00'"] [list [list {8 days} {8 days} 09:05:00 {8 years 9 mons} 00:30:00]]
+check zero_time   [one "SELECT TIME '08:09:08' + INTERVAL '01' HOUR"] 09:09:08
+check zero_date   [one "SELECT DATE '2026-08-09' + INTERVAL '08' MONTH"] 2027-04-09
+check zero_year   [rows "SELECT CAST('0370-10-04' AS DATE), CAST('0892-11-24' AS DATE), CAST('0005-01-02 03:04:05' AS TIMESTAMP)"] {{0370-10-04 0892-11-24 {0005-01-02 03:04:05}}}
+check cal_dow     [rows "SELECT EXTRACT(DOW FROM DATE '2026-11-03'), EXTRACT(DOW FROM DATE '1969-12-31'), EXTRACT(DOW FROM DATE '1970-01-01'), EXTRACT(DOW FROM DATE '2000-02-29'), EXTRACT(DOW FROM '2026-3-8')"] {{2 3 4 2 0}}
+check cal_doy     [rows "SELECT EXTRACT(DOY FROM DATE '2026-03-05'), EXTRACT(DOY FROM DATE '2024-03-01'), EXTRACT(DOY FROM DATE '2026-12-31'), EXTRACT(DOY FROM DATE '2024-12-31')"] {{64 61 365 366}}
+check cal_epoch   [rows "SELECT EXTRACT(EPOCH FROM TIMESTAMP '1970-01-01 00:00:00'), EXTRACT(EPOCH FROM TIMESTAMP '1969-12-31 00:00:00'), EXTRACT(EPOCH FROM TIMESTAMP '2026-03-05 14:30:00')"] {{0 -86400 1772721000}}
+check cal_old     [rows "SELECT DATE '0001-01-01' + INTERVAL '1' DAY, DATE '1600-02-29' + INTERVAL '1' YEAR, DATE '1900-02-28' + INTERVAL '1' DAY, DATE '2000-02-28' + INTERVAL '1' DAY"] {{0001-01-02 1601-02-28 1900-03-01 2000-02-29}}
+check cal_diff    [one "SELECT DATE '2026-03-05' - DATE '1970-01-01'"] {20517 days}
+check cal_roundtrip [one "SELECT DATE '2026-03-05' + (DATE '9999-12-31' - DATE '2026-03-05')"] 9999-12-31
+
+# ============================================================================
 #  Subviews (Metakit's nested tables)
 # ============================================================================
 set r [q "SELECT id, skills FROM employees WHERE id = 1"]

@@ -162,12 +162,19 @@ proc ::mkitsql::parseName {{what name}} {
     }
     err "Expected a $what, found [describe $t]" $t
 }
+# Tcl reads 08 or 007 as (invalid) octal; SQL reads them as 8 and 7.  Every number that enters
+# the engine as text goes through here before any arithmetic.
+proc ::mkitsql::normNum {s} {
+    regsub {^([-+]?)0+(?=\d)} $s {\1} s
+    return $s
+}
+
 proc ::mkitsql::parseInt {what} {
     set t [peek]
-    if {$t eq "" || [lindex $t 0] ne "number" || ![string is integer -strict [lindex $t 1]]} {
+    if {$t eq "" || [lindex $t 0] ne "number" || ![regexp {^\d+$} [lindex $t 1]]} {
         err "Expected a whole number for $what" $t
     }
-    advance ; return [lindex $t 1]
+    advance ; return [normNum [lindex $t 1]]
 }
 proc ::mkitsql::srcText {a b} {
     variable SRC
@@ -403,6 +410,7 @@ proc ::mkitsql::parsePrimary {} {
     switch -- $kind {
         number {
             advance
+            set v [normNum $v]
             if {[regexp {^\d+$} $v]} {
                 if {[string is wideinteger -strict $v]} { return [list lit int [expr {$v + 0}]] }
                 return [list lit real [expr {double($v)}]]

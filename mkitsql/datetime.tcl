@@ -54,6 +54,8 @@ proc ::mkitsql::ivFormat {v} {
 proc ::mkitsql::ivParse {str from to} {
     variable ivUnitSecs
     set str [string trim $str]
+    # leading zeros are decimal here ('08' DAY is 8 days), never octal
+    regsub -all {(^|[^0-9.])0+(?=[0-9])} $str {\1} str
     set from [string tolower $from] ; set to [string tolower $to]
     set bad "Invalid interval '$str'"
     if {$from ne ""} {
@@ -119,11 +121,11 @@ proc ::mkitsql::dtParse {v} {
         set kind [expr {$hh eq "" ? "date" : "timestamp"}]
         if {$hh eq ""} { set hh 0 ; set mi 0 } 
         if {$ss eq ""} { set ss 0 }
-        return [dict create kind $kind y [scan $y %d] m [scan $m %d] d [scan $d %d] hh [scan $hh %d] mi [scan $mi %d] ss $ss]
+        return [dict create kind $kind y [scan $y %d] m [scan $m %d] d [scan $d %d] hh [scan $hh %d] mi [scan $mi %d] ss [normNum $ss]]
     }
     if {[regexp {^\s*(\d{1,2}):(\d{2})(?::(\d{2}(?:\.\d+)?))?\s*$} $v -> hh mi ss]} {
         if {$ss eq ""} { set ss 0 }
-        return [dict create kind time y 1970 m 1 d 1 hh [scan $hh %d] mi [scan $mi %d] ss $ss]
+        return [dict create kind time y 1970 m 1 d 1 hh [scan $hh %d] mi [scan $mi %d] ss [normNum $ss]]
     }
     fail "'[string range $v 0 40]' is not a date or time (expected YYYY-MM-DD, YYYY-MM-DD HH:MM:SS or HH:MM:SS)"
 }
@@ -131,11 +133,34 @@ proc ::mkitsql::daysInMonth {y m} {
     switch -- $m { 4 - 6 - 9 - 11 { return 30 } 2 { return [expr {($y % 4 == 0 && ($y % 100 != 0 || $y % 400 == 0)) ? 29 : 28}] } }
     return 31
 }
+# Days since 1970-01-01 for a calendar date (proleptic Gregorian).  Plain integer arithmetic:
+# nothing here depends on [clock], so results are identical on every Tcl version.
+proc ::mkitsql::daysFromCivil {y m d} {
+    if {$m <= 2} { incr y -1 }
+    set era [expr {$y / 400}]                      ;# integer division floors, as needed for y < 0
+    set yoe [expr {$y - $era * 400}]
+    set doy [expr {(153 * ($m + ($m > 2 ? -3 : 9)) + 2) / 5 + $d - 1}]
+    set doe [expr {$yoe * 365 + $yoe / 4 - $yoe / 100 + $doy}]
+    return [expr {$era * 146097 + $doe - 719468}]
+}
+# {y m d} for a day count
+proc ::mkitsql::civilFromDays {z} {
+    incr z 719468
+    set era [expr {$z / 146097}]
+    set doe [expr {$z - $era * 146097}]
+    set yoe [expr {($doe - $doe / 1460 + $doe / 36524 - $doe / 146096) / 365}]
+    set y [expr {$yoe + $era * 400}]
+    set doy [expr {$doe - (365 * $yoe + $yoe / 4 - $yoe / 100)}]
+    set mp [expr {(5 * $doy + 2) / 153}]
+    set d [expr {$doy - (153 * $mp + 2) / 5 + 1}]
+    set m [expr {$mp + ($mp < 10 ? 3 : -9)}]
+    if {$m <= 2} { incr y }
+    return [list $y $m $d]
+}
 proc ::mkitsql::dtEpoch {p} {
     dict with p {}
-    if {$d < 1 || $d > [daysInMonth $y $m] || $m < 1 || $m > 12} { fail "Invalid date [format %04d-%02d-%02d $y $m $d]" }
-    return [expr {[clock scan [format "%04d-%02d-%02d %02d:%02d:%02d" $y $m $d $hh $mi [expr {int($ss)}]] \
-        -format "%Y-%m-%d %H:%M:%S" -gmt 1] + ($ss - int($ss))}]
+    if {$m < 1 || $m > 12 || $d < 1 || $d > [daysInMonth $y $m]} { fail "Invalid date [format %04d-%02d-%02d $y $m $d]" }
+    return [expr {[daysFromCivil $y $m $d] * 86400 + $hh * 3600 + $mi * 60 + $ss}]
 }
 # value + (months, seconds); month arithmetic clamps to the end of the month (Jan 31 + 1 month = Feb 28)
 proc ::mkitsql::dtAdd {v months secs} {
@@ -157,10 +182,15 @@ proc ::mkitsql::dtAdd {v months secs} {
     }
     set e [expr {[dtEpoch $p] + $secs}]
     set whole [expr {$kind eq "date" && $secs == int($secs) && int($secs) % 86400 == 0}]
-    set fmt [expr {$whole ? "%Y-%m-%d" : "%Y-%m-%d %H:%M:%S"}]
-    set out [clock format [expr {int(floor($e))}] -format $fmt -gmt 1]
-    set frac [expr {$e - floor($e)}]
-    if {!$whole && $frac > 0} { append out [string trimleft [format %.6f $frac] 0] }
+    set ef [expr {int(floor($e))}]
+    set days [expr {$ef / 86400}] ; set rem [expr {$ef - $days * 86400}]
+    lassign [civilFromDays $days] y m d
+    set out [format %04d-%02d-%02d $y $m $d]
+    if {!$whole} {
+        append out [format " %02d:%02d:%02d" [expr {$rem / 3600}] [expr {$rem % 3600 / 60}] [expr {$rem % 60}]]
+        set frac [expr {$e - floor($e)}]
+        if {$frac > 0} { append out [string trimleft [format %.6f $frac] 0] }
+    }
     return $out
 }
 proc ::mkitsql::fmtSecs {t} {

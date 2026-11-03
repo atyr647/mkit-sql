@@ -10,8 +10,11 @@ set builtin {after append apply array binary break catch chan clock close concat
     namespace open package pid proc puts pwd read regexp regsub rename return scan seek set socket source
     split string subst switch tell time trace unset update uplevel upvar variable vwait while}
 set only86 {lmap try finally throw tailcall lseq}
+# commands newer than MK Studio's runtimes (tclkit 8.6.3, and 8.5.17 for old kits) - none may be used
 set only86pairs {{string cat} {string reverse} {dict getdef} {dict getwithdefault} {binary encode} {binary decode}
-    {lsort -stride} {chan configure} {info cmdcount} {string is entier}}
+    {lsort -stride} {chan configure} {info cmdcount} {string is entier} {string insert} {dict map}
+    {tcl::prefix} {tcl::unsupported} {info coroutine} {file tempdir} {file tempfile} {interp cancel}
+    {lpop} {lremove}}
 set fails 0
 foreach f [lsort [concat [glob -directory $root/mkitsql *.tcl] [glob -directory $root/tests *.tcl]]] {
     set in [open $f r] ; fconfigure $in -encoding binary ; set bin [read $in] ; close $in

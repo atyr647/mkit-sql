@@ -37,6 +37,21 @@ Things that differ from what you may be used to: Metakit has **no NULL** (NULLs 
 storing one writes `0` / empty text), `DECIMAL` is a double (not exact), integer `/` truncates (`7 / 2` is `3`),
 `LIKE` is case-sensitive, and a column rename moves the column to the end (a Metakit limitation).
 
+## Runtimes
+
+mkit-sql targets the **same Tcl runtimes as MK Studio**: **tclkit 8.6.3** (what MK Studio is built and tested on, with
+Mk4tcl 2.4.9.7 inside) as the primary, and **tclkit 8.5.17** for classic tclkits. The code is written in Tcl 8.5
+syntax and `package require Tcl 8.5` is enforced; `tests/lint.tcl` rejects anything newer than those runtimes
+(`lmap`, `try`, `string cat`, `lsort -stride`, `dict getdef`, ...). Dates are computed with plain integer arithmetic,
+not `[clock]`, so results cannot differ between Tcl versions. `tests/fetch-tclkit.sh` downloads exactly those two
+kits (verified against the SHA1s MK Studio publishes), and CI runs every suite on both:
+
+```sh
+tests/fetch-tclkit.sh
+MKIT_MK4TCL=builtin tclkit/tclkit-8.6.3  tests/run.tcl      # primary
+MKIT_MK4TCL=builtin tclkit/tclkit-8.5.17 tests/run.tcl      # compatibility
+```
+
 ## Using it in MK Studio
 
 MK Studio talks to its query language through one seam (`::engine`). One command installs mkit-sql behind it:
@@ -54,14 +69,13 @@ engine contract and its 41 UI-logic checks all pass.
 
 | | result |
 | --- | --- |
-| Engine suite, 492 checks | pass on the pure-Tcl Mk4tcl stand-in **and on real Metakit** (2.4.9.7 + Mk4tcl built from `tcltk/metakit`, Tcl 8.6) |
+| Engine suite, 509 checks | pass on the pure-Tcl Mk4tcl stand-in **and on real Metakit** (2.4.9.7 + Mk4tcl built from `tcltk/metakit`, Tcl 8.6) |
 | Metakit-only checks (`tests/real_metakit.tcl`, 22) | pass: persistence across close/reopen, 64-bit values, binary, Unicode, nested subviews, every `ALTER`, drop/recreate |
 | **Differential test against SQLite** (`tests/differential`) | more than 60,000 generated queries (about 10,000 of them window queries), 0 mismatches; recursive CTEs and row values checked too. Differences are deliberate (below) |
 | MK Studio's engine contract (38) and UI tests (16 + 41) | pass, on the stand-in and on real Metakit |
 | 200,000 rows on real Metakit (`tests/scale.tcl`) | most queries 0.2-1.5 s, heaviest 3.3 s, 229 MB peak |
 | Lint: ASCII, no shadowed commands, no 8.6-only commands | clean |
-| **Tcl 8.5** | **not executed.** The code avoids 8.6-only commands (lint-enforced) but has only run on 8.6 |
-| **A tclkit's built-in Mk4tcl** | **not executed here.** `tests/fetch-tclkit.sh` fetches the checksum-pinned runtimes MK Studio ships on and `MKIT_MK4TCL=builtin tclkit tests/run.tcl` runs the suite on one; CI does both |
+| **tclkit 8.6.3 and 8.5.17** (MK Studio's runtimes) | **not executed yet.** Everything above ran on the system Tcl 8.6.14 because running the downloaded tclkits was not permitted in the development sandbox. The code is lint-checked against those versions; CI (`.github/workflows/test.yml`) runs every suite on both kits. **Run `tests/fetch-tclkit.sh` and the two commands under "Runtimes" once to confirm** |
 
 Deliberate differences from SQLite (found by the differential test): `ROUND` rounds the decimal value (so
 `ROUND(2.675, 2)` is `2.68`, as in PostgreSQL), `%` is for integers, typing is static (`COALESCE(int, real)` is
