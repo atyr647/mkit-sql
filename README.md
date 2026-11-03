@@ -181,8 +181,8 @@ against **both storage layers**, and also on a Mk4tcl built from source and on t
 | Oracle for features (`tests/differential/features.py`) | MERGE, LATERAL, ALTER, subviews, `information_schema`, recursive CTEs agree with SQLite; it found the column-retype corruption |
 | Memory (`tests/scale_memory.tcl`) | flat; see above |
 | Lint: ASCII, no shadowed commands, nothing newer than the target runtimes, code-boundary inventory | clean |
-| CI (GitHub Actions) | the Linux job (both kits, every suite above) and the build-from-source job pass. The MK Studio job and the macOS/Windows jobs had setup bugs in the last run (a wrong branch name, Tcl install paths); fixed in the workflow, results pending |
-| **Not tested** | Windows and macOS (the jobs are best-effort until they have run green); tables of tens of millions of rows; Metakit's behaviour on network file systems |
+| CI (GitHub Actions) | the Linux job (both kits, every suite above) and the build-from-source job pass. the MK Studio job (contract, UI, locking interoperability) passes; the macOS job (engine, spill, robustness, injection, NULL, review regressions on Tcl 8.6) passes except for the Unix temp-file/locking step, being fixed; no Windows job runs because the Tcl available there is 9.x |
+| **Not tested** | Windows (and Tcl 9); macOS only partly; tables of tens of millions of rows; Metakit's behaviour on network file systems |
 
 Deliberate differences from SQLite (found by the differential test): `ROUND` rounds the decimal value (so
 `ROUND(2.675, 2)` is `2.68`, as in PostgreSQL), `%` is for integers, typing is static (`COALESCE(int, real)` is

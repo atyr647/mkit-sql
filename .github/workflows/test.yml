@@ -237,7 +237,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, windows-latest]
+        os: [macos-latest]      # Windows: the available Tcl there is 9.x, which this engine does not target (Tcl 8.5/8.6) - not tested
     runs-on: ${{ matrix.os }}
     continue-on-error: true
     defaults:

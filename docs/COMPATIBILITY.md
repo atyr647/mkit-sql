@@ -38,9 +38,10 @@ reason), and anything that was a **security hole**.
   versions (8.6.14, 9.0 where Mk4tcl exists) are expected to work and are exercised through the pure-Tcl stand-in.
 * The database file format is Metakit's. mkit-sql never changes the format: files it writes are ordinary Metakit files
   that MK Studio and every other Metakit tool can read, and the reverse.
-* Platforms: Linux is tested on every change. macOS and Windows run the platform-neutral part of the suite in CI; the
-  locking and temp-file hardening that rely on Unix semantics (`/proc`, 0700 folders, `kill -0`) have Windows fallbacks
-  that are lighter and **not** equivalent in strength. Treat Windows as best-effort for shared machines.
+* Platforms: Linux is tested on every change. macOS runs the platform-neutral part of the suite plus the temp-file and locking tests in CI. **Windows is not tested**
+  (the Tcl readily available there is 9.x, which the engine does not target); the locking and temp-file hardening that
+  rely on Unix semantics (`/proc`, 0700 folders, `kill -0`) have lighter Windows fallbacks that are **not** equivalent in
+  strength. Treat Windows as unsupported for shared machines.
 
 ## Reporting a problem
 

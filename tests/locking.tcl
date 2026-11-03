@@ -127,9 +127,11 @@ set tag [mkitsql::db::openFile $f] ; check spec_server_announces [lockText] "[pi
 set mkitsql::db::lockRole "" ; set mkitsql::db::lockEndpoint ""
 # a lock path that is not a regular file is refused, not followed (a link) and not read (a fifo would block)
 file delete $f.lock
-exec ln -s /etc/hostname $f.lock
+set target $area/lock_target.txt ; set fh [open $target w] ; puts $fh precious ; close $fh
+exec ln -s $target $f.lock
 check lock_symlink_refused [expr {[catch {mkitsql::db::openFile $f} m opts] ? [lrange [dict get $opts -errorcode] 0 1] : "opened"}] {MKIT BADLOCK}
-check lock_symlink_target_untouched [file exists /etc/hostname] 1
+check lock_symlink_target_untouched [expr {[file size $target] == 9}] 1
+file delete $target
 file delete $f.lock
 if {![catch {exec mkfifo $f.lock}]} {
     set t0 [clock milliseconds]
