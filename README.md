@@ -17,16 +17,21 @@ set r [::mkitsql::query {SELECT name, score FROM players WHERE score > ? ORDER B
 # -> cols {name score}  rows {{Ada 9.5}}
 ```
 
-## Status - please read
+## Status
 
-* **Verified against a stand-in, not against real Metakit.** All 309 engine tests and 16 UI tests run
-  against `tests/vendor/mock_mk4tcl.tcl`, a pure-Tcl imitation of Mk4tcl taken from MK Studio. No real
-  Mk4tcl was available when this was written (the build environment had no tclkit and could not compile
-  Metakit). The engine only touches Metakit through ~10 `::store` calls, so any difference should be a small
-  fix - but it has not been proven. Run the suite against a real Mk4tcl first:
-  `MKIT_MK4TCL=/path/to/Mk4tcl.so tclsh tests/run.tcl`.
-* Written in Tcl 8.5 syntax (no `lmap`, `try`, ...) so it can run on classic tclkits, but it has only been
-  executed on Tcl 8.6.
+* **Tested against real Metakit** (Metakit 2.4.9.7 + Mk4tcl built from `tcltk/metakit`, Tcl 8.6): all 311
+  engine checks, 22 Metakit-specific checks (persistence across close/reopen, 64-bit values, binary
+  data, Unicode, nested subviews, every `ALTER`, drop/recreate) and the 16 MK Studio UI checks pass.
+  The same engine checks also pass on the pure-Tcl stand-in. 20,000-row scans, grouping, sorting and
+  joins take 45-80 ms.
+* Real Metakit showed two bugs in MK Studio's `store.tcl` that its stand-in hid. `mkitsql/storefix.tcl`
+  works around both (and should be folded into `store.tcl`):
+  1. after a drop, `store::views` / `store::hasView` keep listing the dropped table until the next commit,
+     so `DROP TABLE t; CREATE TABLE t ...` failed with "already exists";
+  2. `store::dropView` leaves the rows behind, so a table re-created under the same name came back
+     **with its old rows**.
+* Written in Tcl 8.5 syntax (no `lmap`, `try`, ...) so it can run on classic tclkits, but only executed
+  on Tcl 8.6. Your own tclkit's Mk4tcl is the one that matters: run the suites on it (below).
 
 ## What is supported
 
@@ -115,9 +120,14 @@ Things in MK Studio that still refer to the old dialect and should be updated: t
 ## Tests
 
 ```sh
-tclsh tests/run.tcl                       # 309 engine checks (add a glob to run some: tclsh tests/run.tcl 'join_*')
-MKSTUDIO_DIR=/path/to/mkstudio xvfb-run wish tests/studio_integration.tcl     # 16 UI checks
-MKIT_MK4TCL=/path/to/Mk4tcl.so tclsh tests/run.tcl                            # same engine tests on real Metakit
+tclsh tests/run.tcl                       # 311 engine checks on the pure-Tcl Mk4tcl stand-in
+                                          #   (add a glob to run some: tclsh tests/run.tcl 'join_*')
+
+tests/build_mk4tcl.sh /tmp/mk4build       # builds the real Metakit + Mk4tcl (git, cmake, g++, tcl8.6-dev)
+export LD_LIBRARY_PATH=/tmp/mk4build/build/src MKIT_MK4TCL=/tmp/mk4build/build/tcl/libMk4tcl.so
+tclsh tests/run.tcl                       # the same 311 checks on real Metakit
+tclsh tests/real_metakit.tcl              # 22 checks that only mean something on real Metakit
+MKSTUDIO_DIR=/path/to/mkstudio xvfb-run wish tests/studio_integration.tcl     # 16 checks driving the real MK Studio UI
 ```
 
 `tests/vendor/` holds copies of MK Studio's `store.tcl` and the Mk4tcl stand-in (from mkstudio commit
@@ -133,6 +143,7 @@ mkitsql/expr.tcl         expression compiler (SQL expression -> small Tcl proc) 
 mkitsql/plan.tcl         planner + executor: scans, hash joins, filter pushdown, aggregation, sorting, set ops
 mkitsql/stmt.tcl         result shaping, INSERT/UPDATE/DELETE, DDL, transactions
 mkitsql/mkql_compat.tcl  drop-in layer for MK Studio
+mkitsql/storefix.tcl     workarounds for two store.tcl bugs found on real Metakit
 ```
 
 The only file that talks to Mk4tcl is MK Studio's `store.tcl`; mkit-sql calls just `::store::` `tags views

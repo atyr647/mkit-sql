@@ -19,7 +19,7 @@ namespace eval ::mkitsql {
     variable version 0.1.0
     variable dir [file dirname [file normalize [info script]]]
 }
-foreach f {parser expr bind plan stmt} { source -encoding utf-8 [file join $::mkitsql::dir $f.tcl] }
+foreach f {parser expr bind plan stmt storefix} { source -encoding utf-8 [file join $::mkitsql::dir $f.tcl] }
 
 # Run every statement in `text`; returns the result of the last one.
 proc ::mkitsql::run {text {db ""} {params {}}} {

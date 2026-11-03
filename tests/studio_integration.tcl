@@ -23,7 +23,12 @@ package provide app-mkstudio 1.0"
 close $fh
 
 set ::mkstudio_root $tmp/mkstudio.vfs
-source $::env(MKSTUDIO_DIR)/tests/mock_mk4tcl.tcl
+if {[info exists ::env(MKIT_MK4TCL)] && $::env(MKIT_MK4TCL) ne ""} {
+    load $::env(MKIT_MK4TCL) Mk4tcl
+    puts "(using the real Mk4tcl)"
+} else {
+    source $::env(MKSTUDIO_DIR)/tests/mock_mk4tcl.tcl
+}
 lappend auto_path $::mkstudio_root/lib
 package require app-mkstudio
 set ::env(HOME) $tmp/home ; file mkdir $::env(HOME)

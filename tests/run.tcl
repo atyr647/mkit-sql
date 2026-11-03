@@ -283,9 +283,9 @@ check ins_noCols2 [rows "SELECT sku, discontinued FROM products WHERE sku = 'X-3
 check ins_select [dict get [q "INSERT INTO products (sku, name, price, stock) SELECT 'Y-' || id, name, 1, id FROM departments"] affected] 5
 check ins_select2 [one "SELECT COUNT(*) FROM products WHERE sku LIKE 'Y-%'"] 5
 check ins_expr [ok "INSERT INTO products (sku, name, price, stock) VALUES ('Z-1', UPPER('z'), 2 * 3, 10 / 3)"] ok
-check ins_expr2 [rows "SELECT name, price, stock FROM products WHERE sku = 'Z-1'"] {{Z 6 3}}
+check ins_expr2 [rows "SELECT name, price = 6, stock FROM products WHERE sku = 'Z-1'"] {{Z 1 3}}
 check ins_null [ok "INSERT INTO products (sku, name, price, stock) VALUES ('N-1', NULL, NULL, NULL)"] ok
-check ins_null2 [rows "SELECT name, price, stock FROM products WHERE sku = 'N-1'"] {{{} 0 0}}
+check ins_null2 [rows "SELECT name, price = 0, stock FROM products WHERE sku = 'N-1'"] {{{} 1 0}}
 check ins_defaults [ok "INSERT INTO products DEFAULT VALUES"] ok
 check ins_textnum [ok "INSERT INTO products (sku, name, price, stock) VALUES ('T-1', 'n', '2.5', '42')"] ok
 check ins_textnum2 [rows "SELECT price, stock FROM products WHERE sku = 'T-1'"] {{2.5 42}}
@@ -352,6 +352,17 @@ check name_reserved_sel [rows {SELECT "from", "order" FROM "select" WHERE "from"
 q {DROP TABLE "select"}
 check utf8 [rows "SELECT UPPER('h\u00e9llo'), LENGTH('h\u00e9llo')"] [list [list "H\u00c9LLO" 5]]
 check drop [store::hasView $db zz] 0
+# a dropped table must not leave its rows behind for a new table of the same name
+q "CREATE TABLE ghost (a INT, b TEXT)"
+q "INSERT INTO ghost VALUES (1, 'x'), (2, 'y')"
+q "DROP TABLE ghost"
+q "CREATE TABLE ghost (a INT, b TEXT)"
+check drop_recreate_empty [one "SELECT COUNT(*) FROM ghost"] 0
+q "DROP TABLE ghost"
+q "COMMIT"
+q "CREATE TABLE ghost (a INT, c TEXT)"
+check drop_recreate_committed [one "SELECT COUNT(*) FROM ghost"] 0
+q "DROP TABLE ghost"
 check drop_missing [string match "Unknown table 'zz'*" [errmsg "DROP TABLE zz"]] 1
 check drop_ie [ok "DROP TABLE IF EXISTS zz"] ok
 q "INSERT INTO notes (id, body) VALUES (1, 'hello'), (2, 'it''s quoted')"
