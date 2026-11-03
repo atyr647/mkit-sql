@@ -63,7 +63,7 @@ foreach {name step preseed expectFiles} {
         mkitsql::db::releaseLock $db $mine
         set left [lsort [glob -nocomplain $db.lock*]]
         if {$left eq "$db.lock.guard"} {
-            after 2200                       ;# an abandoned guard is harmless: it ages out
+            after 3600                       ;# an abandoned guard is harmless: it ages out (the age is in whole seconds)
             set m2 [lindex [acquireWithin 8] 0]
             ok "$name: a leftover guard does not block the next owner" [expr {$m2 ne ""}]
             if {$m2 ne ""} { mkitsql::db::releaseLock $db $m2 }

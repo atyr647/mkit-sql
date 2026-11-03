@@ -7,6 +7,8 @@ set here [file dirname [file normalize [info script]]]
 set ::env(MKIT_BACKEND) standalone
 source $here/mk4load.tcl
 source $here/loadengine.tcl
+# Windows cannot delete a file a (just finished) process or Metakit mapping still has open: retry for up to 5 s
+proc rmfile {f} { for {set i 0} {$i < 50} {incr i} { if {![catch {file delete $f}]} return ; after 100 } ; catch {file delete $f} }
 set trials [expr {$argc > 0 ? [lindex $argv 0] : 12}]
 set pass 0 ; set fail 0
 proc check {name got want} {
@@ -187,7 +189,7 @@ for {set k 0} {$k < $ntrial} {incr k} {
             mkitsql::db::closeFile $tg
         } msg]} { incr unreadable ; puts "file $k verified OK but failed to read: [string range $msg 0 80]" } else { incr readable }
     }
-    file delete $f
+    rmfile $f
 }
 check verify_verdicts_add_up [expr {$survived + $refused}] $ntrial
 # Metakit reads damaged data non-deterministically (the same bytes can loop on one read and not on the next), so the verifier is a filter, not a proof:
@@ -236,7 +238,7 @@ if {$::tcl_platform(platform) ne "windows"} {
 } else { puts "(crash trials skipped on Windows)" }
 
 foreach t [mkitsql::db::tags] { catch {mkitsql::db::closeFile $t} }       ;# (macOS: Metakit crashed at exit with a handle left open)
-file delete -force $area
+for {set i 0} {$i < 50 && [catch {file delete -force $area}]} {incr i} { after 100 }
 puts "$pass passed, $fail failed"
 flush stdout
 exit [expr {$fail ? 1 : 0}]
