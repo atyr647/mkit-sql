@@ -129,7 +129,13 @@ holds right after loading, mostly Metakit's view of the file):
 a full external sort of the whole table 74 s; a hash join with a 1.25M-row table 243 s; `LIKE 'name12%'` 26 s; a window function over everything 322 s.
 Everything finishes in bounded memory, but Tcl is not a fast engine: expect minutes, not seconds, for whole-table work at this size.
 **A correlated subquery over a 1,250,000-row table (re-evaluated per group) did not finish in an hour** - it is the one shape whose cost grows with
-rows x distinct groups; rewrite it as a join or `GROUP BY`. Tables of tens of millions of rows are untested.
+rows x distinct groups; rewrite it as a join or `GROUP BY`. *(That was before correlated subqueries were remembered per key; see below.)*
+
+**20,000,000 rows** of a narrow table (`id INT, grp INT, val DOUBLE`; a 762 MB file; `tests/bench/big.tcl 20000000`, real Metakit): loading 93 s; `COUNT(*)`
+instant; `WHERE id = x` 2 s; `COUNT(*) ... WHERE grp = 7` 2.7 s; `SUM/AVG/MIN/MAX` 215 s; `GROUP BY` 1,000 groups 178 s; `DISTINCT` 83 s;
+`ORDER BY ... LIMIT 10` 167 s; `COUNT(DISTINCT id)` over 20M distinct values 1,160 s; `UPDATE` of 10 % 49 s; `DELETE` of 10 % 393 s. Peak memory: 276 MB after
+loading, 318 MB for the whole-table queries, 443 MB for the 20M-value `COUNT(DISTINCT)`, 627 MB / 1,282 MB for the update / delete (Metakit holds the
+changed table in RAM until `COMMIT`). Memory stays bounded; time is what grows. A Metakit file cannot pass 2 GiB (see docs/SQL.md), which is about 55 million rows of this width.
 
 The old in-memory engine peaked at 185-229 MB *per query* at 200,000 rows and ran out of room at about 1M. Now the
 extra memory of an operator does not depend on the table size (external sort, grouping by a unique key, a join of the

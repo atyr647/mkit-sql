@@ -79,7 +79,7 @@ proc ::mkitsql::randHex {n} {
     # no /dev/urandom (Windows): mix what is available; the folder is created exclusively and is private anyway
     set hex ""
     while {[string length $hex] < 2 * $n} {
-        append hex [format %08x [expr {(int(rand() * 4294967296) ^ ([clock clicks -microseconds] & 0xffffffff) ^ ([pid] * 2654435761)) & 0xffffffff}]]
+        append hex [format %08x [expr {(entier(rand() * 4294967296) ^ ([clock clicks -microseconds] & 0xffffffff) ^ ([pid] * 2654435761)) & 0xffffffff}]]
     }
     return [string range $hex 0 [expr {2 * $n - 1}]]
 }
@@ -170,7 +170,7 @@ proc ::mkitsql::cleanTemp {{base ""}} {
             set ok 1 ; set inside [glob -nocomplain -directory $p * .*]
             foreach f $inside {
                 if {[file tail $f] in {. ..}} continue
-                if {![regexp {^\d+\.spill$} [file tail $f]] || [catch {file lstat $f fs}] || $fs(type) ne "file"} { set ok 0 }
+                if {![regexp {^(\d+\.spill|verify_child\.tcl)$} [file tail $f]] || [catch {file lstat $f fs}] || $fs(type) ne "file"} { set ok 0 }
             }
             if {!$ok} continue
             foreach f $inside { if {[file tail $f] ni {. ..}} { catch {file delete $f} } }

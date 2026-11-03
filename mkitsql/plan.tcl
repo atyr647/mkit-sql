@@ -520,7 +520,7 @@ proc ::mkitsql::pushOne {cols id ref op k} {
     if {$kt eq "null"} { return {} }
     switch -- $letter {
         I - L {
-            if {$kt eq "int"} { set x $kv } elseif {$kt eq "real" && [string is double -strict $kv] && $kv == int($kv) && abs($kv) < 9e15} { set x [expr {int($kv)}] } else { return {} }
+            if {$kt eq "int"} { set x $kv } elseif {$kt eq "real" && [string is double -strict $kv] && $kv == entier($kv) && abs($kv) < 9e15} { set x [expr {entier($kv)}] } else { return {} }
             if {![string is wideinteger -strict $x]} { return {} }
             if {$letter eq "I" && ($x < -2147483647 || $x > 2147483646)} { return {} }
             if {$letter eq "L" && ($x < -9223372036854775806 || $x > 9223372036854775806)} { return {} }

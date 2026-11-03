@@ -1180,6 +1180,9 @@ proc ::mkitsql::recursiveStream {p outer sink} {
         if {$cancel} { fail "Cancelled" }
         if {$progressHook ne ""} { {*}$progressHook }
         set wtable($tid) $rows
+        # answers of subqueries that read the working table (or anything else) belong to ONE round: forget them
+        variable subCache ; variable memo ; variable memoCount ; variable memoUsed
+        array unset subCache ; array unset memo ; set memoCount 0 ; set memoUsed 0
         set rows [collectPlan [dict get $p step] $outer]
     }
     catch {unset wtable($tid)}

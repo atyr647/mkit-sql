@@ -21,6 +21,8 @@ All notable changes to mkit-sql. The versioning and compatibility rules are in
 * **`SIMILAR TO`** (SQL regular expressions), **`COLLATE BINARY | NOCASE`** (comparisons, `IN`, `BETWEEN`, `LIKE`, `ORDER BY`, `GROUP BY`).
 * **`SUM`, `AVG`, `MIN`, `MAX` over intervals**, plain, grouped, `DISTINCT` and windowed (also with spilling aggregation).
 * **Duplicate column names in derived tables and CTEs** (`SELECT * FROM (SELECT a.id, b.id ...)`).
+* Fixes from the storage review: a commit record that cannot be deleted after a successful commit is emptied (it used to roll the acknowledged commit back at the next open; an `empty 0` record could empty a finished database), a failed commit on MK Studio's store is undone and reported too, a partial commit record is removed, `commitUnprotected`, no repair without the lock, a read-only open that fails no longer leaks the handle, an undeletable stale lock gets its own error, the interrupted-first-commit repair truncates before it removes its record, `commitFailed` closes before repairing and checks the file before reopening. `tests/commitfail.tcl` (file-size limit via `prlimit`, both layers).
+* **Windows:** `int()` keeps only 32 bits on 64-bit Windows Tcl 8 (found by the real-Metakit Windows CI run: dates before 1901 and BIGINT casts went wrong); every `int(` is `entier(` now and lint refuses `int(`.
 * `MKIT_DURABLE=0` turns the post-commit flush off (test machines); `tests/syncdisk.tcl` proves the flush works on the system.
 * CI: real-Metakit runs on Windows and macOS (MK Studio's own tclkits, fetched by SHA1), `tests/fetch-tclkit.sh windows|macos`.
 * `tests/bench/big.tcl`: 20,000,000 rows on real Metakit.

@@ -242,6 +242,10 @@ proc ::mkitsql::rangeBounds {w b1 b2 j m pok gid gs ge} {
     set v [lindex $pok $j 0]
     set g [lindex $gid $j]
     set ends {}
+    # NULL keys sit together at the start or the end of the partition: a frame that reaches past all non-NULL rows still reaches them
+    set leadNull -1 ; set trailNull $m
+    for {set p 0} {$p < $m && [lindex $pok $p 0] eq $N} {incr p} { set leadNull $p }
+    for {set p [expr {$m - 1}]} {$p >= 0 && [lindex $pok $p 0] eq $N && $p > $leadNull} {incr p -1} { set trailNull $p }
     foreach {b side} [list $b1 start $b2 end] {
         lassign $b kind off
         switch -- $kind {
@@ -253,7 +257,7 @@ proc ::mkitsql::rangeBounds {w b1 b2 j m pok gid gs ge} {
                 # value the boundary sits at
                 set sign [expr {($kind eq "preceding") != $desc ? -1 : 1}]
                 set bv [expr {$v + $sign * $off}]
-                set found [expr {$side eq "start" ? $m : -1}]
+                set found [expr {$side eq "start" ? $trailNull : $leadNull}]
                 for {set p 0} {$p < $m} {incr p} {
                     set pv [lindex $pok $p 0]
                     if {$pv eq $N} continue
@@ -342,7 +346,7 @@ proc ::mkitsql::winAggregate {w m pargs LO HI gid gs ge} {
                     set key $v
                     if {$sk eq "n"} {
                         # 1 and 1.0 are the same value
-                        if {![string is integer -strict $v]} { set key [expr {double($v)}] ; if {$key == int($key) && abs($key) < 1e15} { set key [expr {int($key)}] } }
+                        if {![string is integer -strict $v]} { set key [expr {double($v)}] ; if {$key == entier($key) && abs($key) < 1e15} { set key [expr {entier($key)}] } }
                     }
                     if {[dict exists $seen $key]} continue
                     dict set seen $key 1

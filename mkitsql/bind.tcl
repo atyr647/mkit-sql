@@ -202,6 +202,13 @@ proc ::mkitsql::bindFrom {node} {
                 # all column names common to the left and right sides
                 set lcols [treeCols $bl] ; set rcols [treeCols $br]
                 set using {}
+                # a column name that a derived table has twice cannot be joined on
+                foreach lc $lcols { foreach rc $rcols {
+                    set ln [lindex $lc 1] ; set rn [lindex $rc 1]
+                    if {[string equal -nocase [visibleName $ln] [visibleName $rn]] && ([string first "\uFDD1" $ln] > 0 || [string first "\uFDD1" $rn] > 0)} {
+                        fail "NATURAL JOIN on '[visibleName $ln]' is ambiguous: a derived table has two columns of that name"
+                    }
+                } }
                 foreach lc $lcols {
                     foreach rc $rcols {
                         if {[string equal -nocase [lindex $lc 1] [lindex $rc 1]]} { lappend using [lindex $lc 1] ; break }

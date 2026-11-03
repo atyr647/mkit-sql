@@ -346,8 +346,8 @@ proc ::mkitsql::coerceValue {col letter v} {
             } elseif {[regexp {^[-+]?(\d+\.?\d*|\.\d+)([eE][-+]?\d+)?$} $x]} {
                 set d [expr {double($x)}]
                 if {$d == Inf || $d == -Inf || $d >= 9.3e18 || $d <= -9.3e18} { fail "Value '[string range $v 0 40]' is out of range for the whole-number column '$col'" }
-                if {$d != double(int($d))} { fail "Column '$col' holds [letterWords $letter], but '[string range $v 0 40]' is not a whole number" }
-                set x [expr {int($d)}]
+                if {$d != double(entier($d))} { fail "Column '$col' holds [letterWords $letter], but '[string range $v 0 40]' is not a whole number" }
+                set x [expr {entier($d)}]
             } else {
                 fail "Column '$col' holds [letterWords $letter], but '[string range $v 0 40]' is not a whole number"
             }

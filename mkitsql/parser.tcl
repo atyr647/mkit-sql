@@ -323,7 +323,7 @@ proc ::mkitsql::parsePredicate {} {
             if {[acceptKw ESCAPE]} { set esc [parseConcat] }
             if {[isCollate $l] || [isCollate $pat]} {
                 lassign [unCollate $l] l1 k1 ; lassign [unCollate $pat] p1 k2
-                if {$k1 eq "nocase" || $k2 eq "nocase"} { if {$ci != 2} { set ci 1 } }
+                if {$k1 eq "nocase" || $k2 eq "nocase"} { set ci [expr {$ci == 2 ? 3 : 1}] }
                 set l $l1 ; set pat $p1
             }
             set l [list like $l $pat $esc $neg $ci]
@@ -447,6 +447,8 @@ proc ::mkitsql::collationName {name tok} {
 proc ::mkitsql::orderCollate {e} {
     if {![isCollate $e]} { return $e }
     lassign [unCollate $e] e1 k
+    # a position (ORDER BY 1 COLLATE ...) cannot be wrapped: leave the marker, the binder refuses it
+    if {[lindex $e1 0] eq "lit"} { return $e }
     return [expr {$k eq "nocase" ? [lowerOf $e1] : $e1}]
 }
 proc ::mkitsql::isCollate {e} { expr {[lindex $e 0] eq "collate"} }
@@ -970,10 +972,12 @@ proc ::mkitsql::parseSelectCore {} {
     set distinct 0
     if {[acceptKw DISTINCT]} { set distinct 1 } else { acceptKw ALL }
     set items {}
+    variable sawCollateItem ; set sawCollateItem 0
     while 1 {
         lappend items [parseSelectItem]
         if {![acceptOp ,]} break
     }
+    if {$distinct && $sawCollateItem} { err "COLLATE is not supported in SELECT DISTINCT (it would change which rows are duplicates)" "" }
     set from {} ; set where {} ; set group {} ; set having {}
     if {[acceptKw FROM]} { set from [parseFrom] }
     if {[acceptKw WHERE]} { set where [parseExpr] }
@@ -1020,6 +1024,7 @@ proc ::mkitsql::parseSelectCore {} {
             # re-use the OVER parser by stepping back onto the '('
             variable ti
             incr ti -1
+            if {[dict exists $windows [string tolower $wn]]} { err "Window '$wn' is defined twice" [peek -1] }
             dict set windows [string tolower $wn] [parseWindowSpec]
             if {![acceptOp ,]} break
         }
@@ -1044,7 +1049,7 @@ proc ::mkitsql::parseGroupElement {} {
     if {[isKw $t CUBE] && [isOp [peek 1] (]} {
         advance ; advance ; set items [parseGroupItems] ; expectOp )
         set n [llength $items] ; set sets {}
-        if {$n > 12} { err "CUBE of more than 12 expressions would need over 4096 grouping sets" $t }
+        if {$n > 8} { err "CUBE of more than 8 expressions would need over 256 grouping sets" $t }
         for {set mask [expr {(1 << $n) - 1}]} {$mask >= 0} {incr mask -1} {
             set pick {}
             for {set j 0} {$j < $n} {incr j} { if {$mask & (1 << ($n - 1 - $j))} { lappend pick [lindex $items $j] } }
@@ -1105,7 +1110,9 @@ proc ::mkitsql::gsSubst {n set all} {
     variable aggs
     set tag [lindex $n 0]
     if {$tag eq "lit"} { return $n }
-    if {$tag in {win sub exists insub quant star}} { return $n }
+    if {$tag eq "insub"} { return [lreplace $n 1 1 [gsSubst [lindex $n 1] $set $all]] }           ;# x IN (SELECT ...): x is ours, the subquery is not
+    if {$tag eq "quant"} { return [lreplace $n 3 3 [gsSubst [lindex $n 3] $set $all]] }
+    if {$tag in {win sub exists star}} { return $n }
     if {$tag eq "func"} {
         set name [lindex $n 1]
         if {[string toupper $name] in $aggs} { return $n }
@@ -1134,6 +1141,10 @@ proc ::mkitsql::rewriteGroupingSets {items from where sets having windows distin
         if {$alias eq ""} { set alias [expr {[lindex $e 0] eq "col" ? [lindex $e 2] : $text}] }
         lappend items2 [list $e $alias $text]
     }
+    if {[llength $sets] > 256} { err "ROLLUP / CUBE / GROUPING SETS would need [llength $sets] grouping sets (the limit is 256)" "" }
+    foreach it $items2 { if {[regexp {(^|[ \{])win [A-Z_]+ [01] } [lindex $it 0]]} { err "Window functions cannot be combined with ROLLUP, CUBE or GROUPING SETS in one query: put the grouping query in a subquery and apply the window to its result" "" } }
+    set vol "$from $where $having $items2"
+    if {[string match "*func RANDOM*" $vol]} { err "RANDOM() cannot be used in a query with ROLLUP, CUBE or GROUPING SETS (each grouping set would see different random values)" "" }
     set sets2 {}
     foreach S $sets {
         set S2 {}
@@ -1186,7 +1197,7 @@ proc ::mkitsql::parseSelectItem {} {
             set alias [parseName "alias"]
         }
     }
-    if {[isCollate $e]} { set e [lindex [unCollate $e] 0] }
+    if {[isCollate $e]} { variable sawCollateItem ; set sawCollateItem 1 ; set e [lindex [unCollate $e] 0] }
     return [list $e $alias [srcText $a $b]]
 }
 

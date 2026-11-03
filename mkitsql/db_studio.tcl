@@ -55,7 +55,24 @@ proc ::mkitsql::db::openFile {path args} {
 # what was put right when the file was opened (an interrupted commit), "" if nothing
 proc ::mkitsql::db::repairedNote {tag} { if {[llength [info commands ::store::repairedNote]]} { return [::store::repairedNote $tag] } ; return "" }
 proc ::mkitsql::db::closeFile {tag} { ::store::closeFile $tag ; ::mkitsql::typeForget $tag }
-proc ::mkitsql::db::commit {tag} { ::store::commit $tag }
+proc ::mkitsql::db::commit {tag} {
+    if {[catch {::store::commit $tag} err opts]} {
+        # a failed commit (a full disk, Metakit's 2 GiB limit): put the file right if this store can, discard the pending changes, and
+        # say what happened - the handle must not be used on to a file Metakit may have left half written
+        set path [::store::path $tag] ; set note ""
+        if {[llength [info commands ::store::repairFile]]} {
+            # close, put the file right, open it again under the same tag (the repair must come before Metakit reads it again)
+            catch {mk::file close $tag}
+            catch {::store::repairFile $path} note
+            set opts {-nocommit}
+            if {[::store::readonly $tag]} { lappend opts -readonly }
+            catch {mk::file open $tag $path {*}$opts}
+        }
+        catch {::store::rollback $tag}
+        set size [expr {[file exists $path] ? [file size $path] : 0}]
+        return -code error -errorcode [list MKIT COMMITFAILED $size] "The commit failed ($err) - most likely the size limit of a Metakit file (2 GiB) or a full disk. The database file was put back to its last committed state where possible and the changes made since then were discarded (as ROLLBACK does). $note"
+    }
+}
 proc ::mkitsql::db::rollback {tag} { ::store::rollback $tag }
 proc ::mkitsql::db::layout {path} { ::store::layout $path }
 proc ::mkitsql::db::size {path} { ::store::size $path }

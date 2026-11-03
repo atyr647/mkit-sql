@@ -42,7 +42,7 @@ proc ::mkitsql::db::copyColumn {path from to type} {
     for {set i 0} {$i < $n} {incr i} {
         set v [mk::get $path!$i $from]
         switch -- $type {
-            I - L { if {![string is integer -strict $v]} { set v [expr {[string is double -strict $v] ? int($v) : 0}] } }
+            I - L { if {![string is integer -strict $v]} { set v [expr {[string is double -strict $v] ? entier($v) : 0}] } }
             F - D { if {![string is double -strict $v]} { set v 0 } }
         }
         mk::set $path!$i $to $v

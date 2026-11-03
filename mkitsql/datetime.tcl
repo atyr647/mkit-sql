@@ -13,8 +13,8 @@ namespace eval ::mkitsql {
 }
 
 proc ::mkitsql::ivMake {m s} {
-    set m [expr {int($m)}]
-    if {$s == int($s) && abs($s) < 1e15} { set s [expr {int($s)}] } else { set s [expr {double($s)}] }
+    set m [expr {entier($m)}]
+    if {$s == entier($s) && abs($s) < 1e15} { set s [expr {entier($s)}] } else { set s [expr {double($s)}] }
     return $::mkitsql::IV$m:$s
 }
 proc ::mkitsql::ivSplit {v} {
@@ -41,13 +41,13 @@ proc ::mkitsql::ivFormat {v} {
     if {$mo} { lappend parts "$mo mon[expr {abs($mo) == 1 ? {} : {s}}]" }
     set neg [expr {$s < 0}]
     set a [expr {abs($s)}]
-    set d [expr {int($a / 86400)}]
+    set d [expr {entier($a / 86400)}]
     set rem [expr {$a - $d * 86400}]
     if {$d} { lappend parts "[expr {$neg ? -$d : $d}] day[expr {$d == 1 ? {} : {s}}]" }
     if {$rem > 0 || ![llength $parts]} {
-        set hh [expr {int($rem / 3600)}] ; set mi [expr {int(($rem - $hh * 3600) / 60)}]
+        set hh [expr {entier($rem / 3600)}] ; set mi [expr {entier(($rem - $hh * 3600) / 60)}]
         set ss [expr {$rem - $hh * 3600 - $mi * 60}]
-        if {$ss == int($ss)} { set sss [format %02d [expr {int($ss)}]] } else { set sss [format %09.6f $ss] ; set sss [string trimright $sss 0] }
+        if {$ss == entier($ss)} { set sss [format %02d [expr {entier($ss)}]] } else { set sss [format %09.6f $ss] ; set sss [string trimright $sss 0] }
         lappend parts "[expr {$neg ? {-} : {}}][format %02d $hh]:[format %02d $mi]:$sss"
     }
     return [join $parts " "]
@@ -68,8 +68,8 @@ proc ::mkitsql::ivParse {str from to} {
         if {[regexp {^([-+])(.*)$} $str -> sg rest]} { set str [string trim $rest] ; if {$sg eq "-"} { set sign -1 } }
         if {$to eq ""} {
             if {![regexp {^\d+(\.\d+)?$} $str]} { fail "$bad: expected a number of ${from}s" }
-            if {$from eq "year"} { return [list [expr {$sign * int($str * 12)}] 0] }
-            if {$from eq "month"} { return [list [expr {$sign * int($str)}] 0] }
+            if {$from eq "year"} { return [list [expr {$sign * entier($str * 12)}] 0] }
+            if {$from eq "month"} { return [list [expr {$sign * entier($str)}] 0] }
             return [list 0 [expr {$sign * $str * [dict get $ivUnitSecs $from]}]]
         }
         if {$from eq "year" && $to eq "month"} {
@@ -102,8 +102,8 @@ proc ::mkitsql::ivParse {str from to} {
         }
         if {[regexp -nocase {^\s*([-+]?\d+(?:\.\d+)?)\s*([a-z]+)(.*)$} $rest -> n u rest2]} {
             switch -glob -- [string tolower $u] {
-                y - yr - yrs - year - years { set m [expr {$m + int($n * 12)}] }
-                mon - mons - month - months { set m [expr {$m + int($n)}] }
+                y - yr - yrs - year - years { set m [expr {$m + entier($n * 12)}] }
+                mon - mons - month - months { set m [expr {$m + entier($n)}] }
                 w - week - weeks { set s [expr {$s + $n * 604800}] }
                 d - day - days { set s [expr {$s + $n * 86400}] }
                 h - hr - hrs - hour - hours { set s [expr {$s + $n * 3600}] }
@@ -199,15 +199,15 @@ proc ::mkitsql::dtAdd {v months secs} {
     }
     if {$months} {
         set tot [expr {[dict get $p y] * 12 + [dict get $p m] - 1 + $months}]
-        set y [expr {int(floor($tot / 12.0))}] ; set m [expr {$tot - $y * 12 + 1}]
+        set y [expr {entier(floor($tot / 12.0))}] ; set m [expr {$tot - $y * 12 + 1}]
         set d [dict get $p d]
         set dm [daysInMonth $y $m]
         if {$d > $dm} { set d $dm }
         dict set p y $y ; dict set p m $m ; dict set p d $d
     }
     set e [expr {[dtEpoch $p] + $secs}]
-    set whole [expr {$kind eq "date" && $secs == int($secs) && int($secs) % 86400 == 0}]
-    set ef [expr {int(floor($e))}]
+    set whole [expr {$kind eq "date" && $secs == entier($secs) && entier($secs) % 86400 == 0}]
+    set ef [expr {entier(floor($e))}]
     set days [expr {$ef / 86400}] ; set rem [expr {$ef - $days * 86400}]
     lassign [civilFromDays $days] y m d
     if {$y < 1 || $y > 9999} { fail "The date is out of range (years 0001 to 9999)" }
@@ -220,8 +220,8 @@ proc ::mkitsql::dtAdd {v months secs} {
     return $out
 }
 proc ::mkitsql::fmtSecs {t} {
-    set h [expr {int($t / 3600)}] ; set mi [expr {int(($t - $h * 3600) / 60)}] ; set s [expr {$t - $h * 3600 - $mi * 60}]
-    if {$s == int($s)} { return [format %02d:%02d:%02d $h $mi [expr {int($s)}]] }
+    set h [expr {entier($t / 3600)}] ; set mi [expr {entier(($t - $h * 3600) / 60)}] ; set s [expr {$t - $h * 3600 - $mi * 60}]
+    if {$s == entier($s)} { return [format %02d:%02d:%02d $h $mi [expr {entier($s)}]] }
     return [format %02d:%02d:%09.6f $h $mi $s]
 }
 
@@ -229,10 +229,19 @@ proc ::mkitsql::fmtSecs {t} {
 ::mkitsql::defstrict iv_add {a b} { lassign [::mkitsql::ivSplit $a] m1 s1 ; lassign [::mkitsql::ivSplit $b] m2 s2 ; ::mkitsql::ivMake [expr {$m1 + $m2}] [expr {$s1 + $s2}] }
 ::mkitsql::defstrict iv_sub {a b} { lassign [::mkitsql::ivSplit $a] m1 s1 ; lassign [::mkitsql::ivSplit $b] m2 s2 ; ::mkitsql::ivMake [expr {$m1 - $m2}] [expr {$s1 - $s2}] }
 ::mkitsql::defstrict iv_neg {a} { lassign [::mkitsql::ivSplit $a] m s ; ::mkitsql::ivMake [expr {-$m}] [expr {-$s}] }
-::mkitsql::defstrict iv_mul {a n} { lassign [::mkitsql::ivSplit $a] m s ; ::mkitsql::ivMake [expr {round($m * $n)}] [expr {$s * $n}] }
+# scale an interval by a factor: whole months stay months, the fractional month becomes days of 30 days (as PostgreSQL does)
+proc ::mkitsql::ivScale {a f} {
+    lassign [ivSplit $a] m s
+    set mm [expr {$m * double($f)}]
+    set whole [expr {$mm < 0 ? -entier(-$mm) : entier($mm)}]
+    set frac [expr {$mm - $whole}]
+    if {abs($frac) < 1e-9} { set frac 0 }
+    return [ivMake $whole [expr {$s * double($f) + $frac * 2592000}]]
+}
+::mkitsql::defstrict iv_mul {a n} { ::mkitsql::ivScale $a $n }
 ::mkitsql::defstrict iv_div {a n} {
     if {$n == 0} { ::mkitsql::fail "Division by zero" }
-    lassign [::mkitsql::ivSplit $a] m s ; ::mkitsql::ivMake [expr {round($m / double($n))}] [expr {$s / double($n)}]
+    ::mkitsql::ivScale $a [expr {1.0 / $n}]
 }
 ::mkitsql::defstrict iv_fmt {a} { ::mkitsql::ivFormat $a }
 ::mkitsql::defstrict dt_add_iv {d iv} { lassign [::mkitsql::ivSplit $iv] m s ; ::mkitsql::dtAdd $d $m $s }
@@ -246,7 +255,12 @@ proc ::mkitsql::fmtSecs {t} {
     lassign [::mkitsql::ivParse $v "" ""] m s
     ::mkitsql::ivMake $m $s
 }
-foreach {nm op} {eq == ne != lt < le <= gt > ge >=} {
+# equality is exact (months and seconds both equal), so it agrees with GROUP BY, DISTINCT, joins and IN, which see the same two parts;
+# ordering compares the length of time with 30-day months
+foreach {nm op} {eq eq ne ne} {
+    ::mkitsql::defstrict ${nm}_i {a b} "string $op \[::mkitsql::ivSplit \$a\] \[::mkitsql::ivSplit \$b\]"
+}
+foreach {nm op} {lt < le <= gt > ge >=} {
     ::mkitsql::defstrict ${nm}_i {a b} "expr {\[::mkitsql::ivTotal \$a\] $op \[::mkitsql::ivTotal \$b\]}"
 }
 
@@ -254,12 +268,12 @@ foreach {nm op} {eq == ne != lt < le <= gt > ge >=} {
 proc ::mkitsql::ivExtract {field v} {
     lassign [ivSplit $v] m s
     switch -- $field {
-        YEAR   { return [expr {int($m / 12)}] }
-        MONTH  { return [expr {int($m - int($m / 12) * 12)}] }
-        DAY    { return [expr {int($s / 86400)}] }
-        HOUR   { return [expr {int(($s - int($s / 86400) * 86400) / 3600)}] }
-        MINUTE { return [expr {int(($s - int($s / 3600) * 3600) / 60)}] }
-        SECOND { set r [expr {$s - int($s / 60) * 60}] ; if {$r == int($r)} { return [expr {int($r)}] } ; return $r }
+        YEAR   { return [expr {entier($m / 12)}] }
+        MONTH  { return [expr {entier($m - entier($m / 12) * 12)}] }
+        DAY    { return [expr {entier($s / 86400)}] }
+        HOUR   { return [expr {entier(($s - entier($s / 86400) * 86400) / 3600)}] }
+        MINUTE { return [expr {entier(($s - entier($s / 3600) * 3600) / 60)}] }
+        SECOND { set r [expr {$s - entier($s / 60) * 60}] ; if {$r == entier($r)} { return [expr {entier($r)}] } ; return $r }
         EPOCH  { return [ivTotal $v] }
     }
     fail "Unknown EXTRACT field '$field' for an interval"

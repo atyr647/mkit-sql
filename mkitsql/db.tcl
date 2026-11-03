@@ -189,9 +189,17 @@ proc ::mkitsql::db::takeLock {path} {
         }
         lockStep mutex
         set again [lockHolder $path]                                           ;# look again now that nobody else is replacing it
-        if {$again eq "" && [dict get [lockInfo $path] state] in {stale ours}} { catch {::file delete $lf} ; lockStep deleted }
+        set undeletable 0
+        if {$again eq "" && [dict get [lockInfo $path] state] in {stale ours}} {
+            catch {::file delete $lf} ; lockStep deleted
+            # a stale lock that cannot be removed (another user's file in a sticky folder, a read-only folder) will never go away by retrying
+            if {![catch {::file lstat $lf st}]} { set undeletable 1 }
+        }
         catch {::file delete $guard}
         if {$again ne ""} { return [lockedError $again $path] }
+        if {$undeletable} {
+            return -code error -errorcode [list MKIT LOCKED 0 unknown {} {}] "The lock file of this database is stale (its process is gone) but cannot be removed - it may belong to another user or lie in a protected folder:\n$lf\nRemove it by hand."
+        }
     }
     return -code error -errorcode [list MKIT LOCKED 0 unknown {} {}] "Could not take the lock on this database (another process is starting at the same moment), please repeat:\n$path"
 }
@@ -221,7 +229,8 @@ proc ::mkitsql::db::openFile {path args} {
         set mine [takeLock $path]                       ;# before anything touches the file, so a refusal touches nothing
         if {$mine eq "" && $requireLock} { error "Cannot create the lock file for $path (is the folder writable?)" }
         # with the lock held nobody else is in the middle of a commit: put right a commit that was interrupted
-        if {[::file exists $path] && [catch {repairFile $path} repairNote]} { set repairNote "" }
+        # (not without the lock: then another writer may be in the middle of a commit, and cutting its unfinished append would break it)
+        if {$mine ne "" && [::file exists $path] && [catch {repairFile $path} repairNote]} { set repairNote "" }
     }
     # a damaged file would open as an empty database (and a later COMMIT would replace the real data); an untrusted one is read
     # completely in a throw-away process first.  Both happen AFTER the repair, so a file that only needed one is not refused.
@@ -247,12 +256,17 @@ proc ::mkitsql::db::openFile {path args} {
         if {$mine ne ""} { releaseLock $path $mine }
         return -code error -errorcode [list MKIT DAMAGED "not a Metakit database"] "This file isn't a Metakit database, so it was not opened:\n$path"
     }
+    set holder ""
+    if {$readonly && [catch {lockHolder $path} holder opts]} {
+        # a lock path that is not a regular file: nothing has been registered yet, so close the handle and report
+        catch {mk::file close $tag}
+        return -options $opts $holder
+    }
     lappend tags $tag
     if {$repairNote ne ""} { variable repaired ; set repaired($tag) $repairNote }
     set file($tag) $path ; set ro($tag) $readonly ; set dirty($tag) 0
     if {$readonly} {
-        set h [lockHolder $path]
-        if {$h ne ""} { set lockedBy($tag) $h }
+        if {$holder ne ""} { set lockedBy($tag) $holder }
     } elseif {$mine ne ""} {
         set lockOwned($tag) $mine
     }
@@ -284,23 +298,31 @@ proc ::mkitsql::db::commit {tag} {
 # commit"), and - measured on real Metakit - may first have appended part of its data and even written the new header, leaving a
 # file that crashes Metakit when it is opened.  The record written before the commit says what to put back.  The file is restored,
 # the handle reopened (the changes since the last commit are gone, as with ROLLBACK), and the error says what happened.
-namespace eval ::mkitsql::db { variable maxFileBytes 2147483647 }
+namespace eval ::mkitsql::db { variable maxFileBytes 2147483647 ; variable unprotected ; array set unprotected {} }
 proc ::mkitsql::db::commitFailed {tag err} {
     variable file ; variable dirty ; variable ro ; variable maxFileBytes
     set path $file($tag)
-    set note [repairFile $path]
+    # close first (Windows: no truncating a file Metakit still has mapped), put the file right, open it again and check it
     catch {mk::file close $tag}
-    set opts {-nocommit}
-    if {$ro($tag)} { lappend opts -readonly }
-    set reopened [expr {![catch {mk::file open $tag $path {*}$opts}]}]
+    set note "" ; set repairFailed 0
+    if {[catch {repairFile $path} note]} { set repairFailed 1 }
+    set reopened 0
+    if {!$repairFailed && ![string match "Warning*" $note]} {
+        set opts {-nocommit}
+        if {$ro($tag)} { lappend opts -readonly }
+        if {![catch {::mkitsql::dbRequireIntact $path}] && ![catch {mk::file open $tag $path {*}$opts}]} { set reopened 1 }
+    }
     set dirty($tag) 0
     ::mkitsql::typeForget $tag
     set size [expr {[::file exists $path] ? [::file size $path] : 0}]
     set cause "a full disk or a write error"
     if {$size > $maxFileBytes / 2} { set cause "the size limit of a Metakit file ($maxFileBytes bytes = 2 GiB; this file is $size bytes) or a full disk" }
-    set msg "The commit failed ($err) - most likely $cause. The database file was put back to its last committed state"
-    if {$reopened} { append msg " and the changes made since then were discarded (as ROLLBACK does).\n" } else { append msg ". Close and reopen it.\n" }
-    append msg "Nothing in the file is lost. To get past the size limit, split the data over several database files."
+    set msg "The commit failed ($err) - most likely $cause. "
+    if {$reopened} {
+        append msg "The database file was put back to its last committed state and the changes made since then were discarded (as ROLLBACK does).\nNothing in the file is lost. To get past the size limit, split the data over several database files."
+    } else {
+        append msg "The file could NOT be put back automatically ([expr {$repairFailed ? $note : $note}]). This handle is closed; do not commit again. Open the file again: a pending commit record is applied when it is opened for writing."
+    }
     return [list [list MKIT COMMITFAILED $size] $msg]
 }
 
@@ -373,13 +395,31 @@ proc ::mkitsql::db::beginCommit {path} {
         return 0
     }
     set rec [commitRecord $path]
-    if {[catch { set h [open $rec w] ; puts -nonewline $h $line ; close $h }]} { return 0 }
+    if {[catch { set h [open $rec w] ; puts -nonewline $h $line ; close $h }]} {
+        # no record can be written (a read-only folder, a full disk): the commit would run unprotected.  Remove what is left of a partial
+        # record, and let the caller see it (commitUnprotected); it still goes ahead, because a database in a folder that cannot hold
+        # a lock file must stay writable
+        catch {close $h} ; catch {::file delete $rec}
+        variable unprotected ; set unprotected($path) 1
+        return 0
+    }
     syncDisk $rec $path
     return 1
 }
+# 1 when a commit of this file ran without a commit record (the record could not be written): an interrupted one could not be undone
+proc ::mkitsql::db::commitUnprotected {tag} { variable unprotected ; variable file ; return [info exists unprotected($file($tag))] }
 proc ::mkitsql::db::endCommit {path} {
     syncDisk $path
-    catch {::file delete [commitRecord $path]}
+    set rec [commitRecord $path]
+    catch {::file delete $rec}
+    if {[::file exists $rec]} {
+        # The commit is complete and confirmed, but its record cannot be removed (on Windows a virus scanner or an indexer may hold a
+        # fresh file open).  A record left behind would make the next writer undo this commit, so make it harmless: an empty record means
+        # nothing to undo.  If even that fails the caller must know.
+        if {[catch { set h [open $rec w] ; close $h }]} {
+            return -code error -errorcode [list MKIT RECORDSTUCK $rec] "The commit succeeded, but its safety record could not be removed or emptied:\n$rec\nDelete that file before the database is opened again, or the next open would undo this commit."
+        }
+    }
 }
 # Put right an interrupted commit.  Needs the write lock.  Returns "" (nothing to do) or what was done.
 proc ::mkitsql::db::repairFile {path} {
@@ -389,13 +429,19 @@ proc ::mkitsql::db::repairFile {path} {
         if {[catch {set h [open $rec r] ; set d [string trim [read $h 200]] ; close $h}]} { return "" }
         lassign [split $d " "] hex size
         if {$hex eq "empty" && $size == 0} {
-            # the first commit of a new database was interrupted: it is a new, empty database again
-            ::file delete $rec
+            # the first commit of a new database was interrupted: it is a new, empty database again - unless the file already has a
+            # complete frame (the commit finished and only its record was left behind): then it is a database, keep it
+            if {$info ne "" && [dict get $info size] == [dict get $info offset] && [footerOkAt $path [dict get $info size]]} {
+                ::file delete $rec
+                return ""
+            }
             if {[::file exists $path] && [::file size $path] > 0} {
                 set h [open $path r+b] ; chan truncate $h 0 ; close $h
                 syncDisk $path
+                ::file delete $rec                                       ;# last: a crash before this leaves the record for the next open
                 return "The first save of this new database was interrupted and has been undone: the database is empty again."
             }
+            ::file delete $rec
             return ""
         }
         if {[string length $hex] == 16 && [string is integer -strict $size] && $info ne ""} {

@@ -44,7 +44,7 @@ set boundaries [list \
     [list bind.tcl    {(^|[\[ \{])uplevel }  2 "withScopes / lmap2 run a script literal written in this file"] \
     [list expr.tcl    {^\s*proc [^ \{]*\$}   4 "defstrict (names from this file) and the three cx::pN procs, verified by verify.tcl"] \
     [list db.tcl      {catch \{open }          1 "the lock file, created exclusively (O_EXCL) - the protocol of MK Studio's docs/CONCURRENCY.md"] \
-    [list db.tcl      {(^|\[)open }            10 "the lock file (create, bounded read), its takeover guard (O_EXCL), /proc/<pid>/stat and /proc/stat; the commit record (write, read) and the database file (rewritten header / cut back to undo an interrupted commit)"] \
+    [list db.tcl      {(^|\[)open }            11 "the lock file (create, bounded read), its takeover guard (O_EXCL), /proc/<pid>/stat and /proc/stat; the commit record (write, read, empty it) and the database file (rewritten header / cut back to undo an interrupted commit)"] \
     [list dbcommon.tcl {(^|\[)open }           3 "reads the 8-byte header and 16-byte footer of a database file and the commit record, to decide whether a repair of an interrupted commit is safe"] \
     [list db.tcl      {\{exec }                2 "`sync` (coreutils) and, on Windows, PowerShell FlushFileBuffers force the database file and its commit record to disk around a commit; fixed commands, file names go in through the environment"] \
     [list db.tcl      {catch \{exec }          2 "the same two flush calls"] \
@@ -60,10 +60,12 @@ set boundaries [list \
     [list spill.tcl   {catch \{exec }          2 "process-liveness probe (kill -0 / tasklist) with a pid already checked to be a positive integer"] \
     [list stmt.tcl    {(^|\[)rename }        1 "deletes the generated cx::pN procs"] \
     [list pkgIndex.tcl {(^|[\[ \{])source -}  1 "package index: loads mkitsql.tcl"]]
-# any other dynamic-code or process command anywhere in mkitsql/ is a lint failure
+# any other dynamic-code or process command anywhere in mkitsql/ is a lint failure.  int( is on the list too: int() keeps only a machine word,
+# which is 32 bits on 64-bit Windows Tcl 8 (dates and BIGINT went wrong there) - use entier()
 set forbidden {{(^|\[)subst } {(^|\[)interp } {(^|\[)exec } {(^|\[)trace } {(^|\[)socket }
     {(^|\[)fileevent } {info body} {regsub [^#\n]*-command} {(^|\[)uplevel #0} {(^|\[)namespace inscope}
     {(^|\[)interp alias} {(^|\[)load } {(^|\[)vwait }
+    {(^|[^A-Za-z_:])int\(}
     {(EXCL\}|-permissions|&) 0[0-7]{2,}}}   ;# a leading-zero file mode / mask: octal in Tcl 8, decimal in Tcl 9 - write modes in decimal
 foreach f [glob -directory $root/mkitsql *.tcl] {
     set in [open $f r] ; set code [read $in] ; close $in

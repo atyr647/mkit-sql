@@ -153,6 +153,7 @@ proc ::mkitsql::rt::num {v} {
     if {$v eq "\uFDD0NULL"} { return $v }
     set s [string trim $v]
     if {![regexp {^[-+]?(\d+(\.\d*)?|\.\d+)([eE][-+]?\d+)?$} $s]} {
+        if {[::mkitsql::isIv $v]} { ::mkitsql::fail "An interval cannot be used as a number" }
         ::mkitsql::fail "Invalid number: '[string range $v 0 40]'"
     }
     regsub {^([-+]?)0+(?=\d)} $s {\1} s
@@ -232,6 +233,7 @@ proc ::mkitsql::similarRegexp {pat esc} {
     variable likeCache
     if {[info exists likeCache([list S $pat $esc])]} { return $likeCache([list S $pat $esc]) }
     set re "" ; set n [string length $pat] ; set prevQuant 0
+    if {$n > 2000} { ::mkitsql::fail "A SIMILAR TO pattern longer than 2000 characters is refused (Tcl compiles it in cubic time)" }
     for {set i 0} {$i < $n} {incr i} {
         set c [string index $pat $i] ; set quant 0
         if {$esc ne "" && $c eq $esc} {
@@ -284,8 +286,10 @@ proc ::mkitsql::similarRegexp {pat esc} {
 }
 proc ::mkitsql::rt::like {v pat esc ci} {
     if {$v eq "\uFDD0NULL" || $pat eq "\uFDD0NULL" || $esc eq "\uFDD0NULL"} { return "\uFDD0NULL" }
-    if {$ci == 2} {
-        # SIMILAR TO: backslash is the escape character unless an ESCAPE clause says otherwise (an empty ESCAPE does not switch it off)
+    if {[string length $esc] > 1} { ::mkitsql::fail "The ESCAPE of LIKE / SIMILAR TO must be one character" }
+    if {$ci >= 2} {
+        # SIMILAR TO (ci 3: COLLATE NOCASE): backslash is the escape character unless an ESCAPE clause says otherwise (an empty ESCAPE does not switch it off)
+        if {$ci == 3} { return [regexp -nocase -- [::mkitsql::similarRegexp $pat [expr {$esc eq "" ? "\\" : $esc}]] $v] }
         return [regexp -- [::mkitsql::similarRegexp $pat [expr {$esc eq "" ? "\\" : $esc}]] $v]
     }
     set re [::mkitsql::likeRegexp $pat $esc]
@@ -434,7 +438,7 @@ proc ::mkitsql::rt::fn_RANDOM {} { expr {rand()} }
 # wrapped to U+FDD0 and forged NULL).
 proc ::mkitsql::rt::toInt {v} {
     if {[string is wideinteger -strict $v]} { return $v }
-    if {[string is double -strict $v] && $v == $v && abs($v) < 9.2e18} { return [expr {int(round($v))}] }
+    if {[string is double -strict $v] && $v == $v && abs($v) < 9.2e18} { return [expr {entier(round($v))}] }
     ::mkitsql::fail "A whole number was expected, not '[string range $v 0 40]'"
 }
 # longest string a function may build (a LPAD / REPEAT / || chain can otherwise exhaust memory from one short statement)
@@ -559,7 +563,7 @@ proc ::mkitsql::rt::fn_CURRENT_TIMESTAMP {} { clock format [clock seconds] -form
     if {$kind eq "time" && $field in {YEAR MONTH DAY DOW DOY}} {
         ::mkitsql::fail "Cannot extract $field from a TIME"
     }
-    set sec [expr {$ss == int($ss) ? int($ss) : $ss}]
+    set sec [expr {$ss == entier($ss) ? entier($ss) : $ss}]
     switch -- $field {
         YEAR   { return $y }
         MONTH  { return $m }

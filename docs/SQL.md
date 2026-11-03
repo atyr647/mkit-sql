@@ -93,7 +93,7 @@ CROSS JOIN LATERAL (SELECT name, salary FROM employees e
 ## Subqueries
 
 Scalar `(SELECT ...)`, `[NOT] IN (SELECT ...)`, `[NOT] EXISTS (SELECT ...)`, `op ANY|SOME|ALL (SELECT ...)`,
-derived tables `FROM (SELECT ...) alias [(cols)]`, correlated at any depth, also inside `GROUP BY` queries
+derived tables `FROM (SELECT ...) alias [(cols)]`, correlated at any depth (a derived table inside a subquery cannot itself reach outward, see the end of this page), also inside `GROUP BY` queries
 (which may refer to the grouped columns). Row values work too: `(a, b) = (1, 2)`, `(a, b) < (...)`,
 `(a, b) IN ((1, 2), (3, 4))`, `(a, b) IN (SELECT x, y ...)`.
 
@@ -206,7 +206,7 @@ SELECT EXTRACT(DAY FROM DATE '2026-03-05' - DATE '2026-01-01');  -- 63
 `date +/- interval`, `date - date`, `interval +/- interval`, `interval * n`, `interval / n`, interval
 comparison and sorting work. A day counts as 24 hours. Intervals cannot be stored in a column (store
 seconds, or `CAST(iv AS VARCHAR)`). `SUM`, `AVG`, `MIN` and `MAX` work over intervals: months and seconds are added separately
-(so `SUM` of two `1 mon` is `2 mons`), `MIN`/`MAX` return a value of the data compared by length of time (30-day months), `AVG` is the
+(so `SUM` of two `1 mon` is `2 mons`; a fractional month from `AVG`, `/` or `*` becomes days of 30 days: `AVG` of `1 mon` and `2 mons` is `1 mon 15 days`), **equality is exact** (`1 mon` is not `30 days`, in `=`, `IN`, joins, `DISTINCT` and `GROUP BY` alike) while ordering compares the length of time with 30-day months, `MIN`/`MAX` return a value of the data compared by length of time (30-day months), `AVG` is the
 sum divided by the count. To do date
 arithmetic on a text column, cast it first: `CAST(hired AS DATE) + INTERVAL '7' DAY`.
 
@@ -390,10 +390,16 @@ Metakit has no locking of its own. What mkit-sql guarantees, and what it does no
   symbolic links so two names of one file share one lock. `tests/locking.tcl` runs the spec's checks against this code,
   races real processes, kills holders with `kill -9`, and (with `MKSTUDIO_DIR`) runs MK Studio's own `store.tcl` against
   it in both directions. If the folder is read-only, or the disk is full, no lock can be made and the file opens unlocked;
-  `::mkitsql::db::requireLock 1` turns that into an error. **Limits:** the lock is advisory (a program that does not
+  `set ::mkitsql::db::requireLock 1` turns that into an error. **Limits:** the lock is advisory (a program that does not
   follow it is not stopped); a *hard link* is a different name Metakit cannot tell apart, so two hard links to one file
   can both be opened for writing; and processes in different PID namespaces (containers) that share a folder *and* a
-  host name cannot see each other's pids - give such containers different host names, or run one server.
+  host name cannot see each other's pids - give such containers different host names, or run one server; **one Tcl interpreter per
+process opens a given file for writing** (a second interpreter or thread of the same process has the same pid, so it is taken for the
+holder itself and gets the lock too); a **wall-clock step** larger than 2 s forward (a manual `date -s`) can make a live holder look
+like a recycled pid, because the check compares its start time with the lock's modification time (MK Studio's protocol has the same
+property); file names are compared as spelled, so on Windows and macOS (case-insensitive) always open a file under one spelling.
+A file in a folder where no lock file can be created opens unlocked (see `requireLock`) and is then **not repaired** (another writer
+may be mid-commit); likewise a commit whose record cannot be written still runs, and `::mkitsql::db::commitUnprotected $tag` says so.
 * **Readers are not locked.** `openFile -readonly` always works, notes who holds the write lock
   (`::mkitsql::db::lockedBy`), and write statements on it say so. A reader that is open while a writer commits can see a
   half-written state: that is Metakit, not something advisory locks can fix. Keep readers short, or have the writing
@@ -440,7 +446,7 @@ end, so a damaged header can never make them throw data away; read-only opens ca
 names and formats are MK Studio's (`store.tcl` does the same), so either program can repair what the other left behind. The record of the very first commit of a brand-new file reads `empty 0`: an interrupted first commit is put back to an
 empty file (tested by killing a first commit after each of 14 different writes). On Windows the file is flushed through
 PowerShell (not testable on the CI runner's stand-in, so best effort). MK Studio's `.sum` / `.bak` sidecar files are left alone.
-`::mkitsql::db::durable 0` turns the `sync` calls off. **Limits:** a disk that loses data it said was written; Windows, which has
+`set ::mkitsql::db::durable 0` turns the `sync` calls off. **Limits:** a disk that loses data it said was written; Windows, which has
 no `sync` command (kills are covered, power loss is as safe as the operating system's own write ordering); a commit that was
 confirmed to the caller only counts as durable after the file has been forced out, so a crash after `mk::file commit` but before
 that is rolled back.
@@ -514,7 +520,11 @@ failures). A caller never sees a Tcl stack trace as the *only* signal: the messa
 | `SELECT TOP n` | T-SQL only; use `LIMIT` or `FETCH FIRST` |
 | `INSERT ... RETURNING`, `UPDATE ... FROM` | not in the SQL standard |
 | `COLLATE` names other than `BINARY` and `NOCASE` (locale collations) | text sorts by code point; add a lower-cased column or use `NOCASE` |
-| `COLLATE` in `DISTINCT`, `IS DISTINCT FROM`, aggregates | refused with an error |
+| `COLLATE` in `DISTINCT`, `IS DISTINCT FROM`, aggregates, `ORDER BY 1 COLLATE ...` (a position), inside `ROLLUP`/`CUBE` | refused with an error |
+| Window functions in the same query as `ROLLUP` / `CUBE` / `GROUPING SETS`; `RANDOM()` there; more than 256 grouping sets (`CUBE` of more than 8) | refused: put the grouping query in a subquery and apply the window to its result (each grouping set is its own scan, so a window or a random value would see different inputs) |
+| A subquery that names a grouping column of a `ROLLUP` / `CUBE` / `GROUPING SETS` query (`(SELECT ... WHERE u.k = a)`) | refused ("must appear in the GROUP BY clause"); `a IN (SELECT ...)` on the grouped column works |
+| A derived table `FROM (SELECT ...)` inside a subquery that refers to the *enclosing* query's columns | "Unknown table or alias"; the derived table cannot see outward (use `LATERAL`, or move the condition out) |
+| An aggregate inside a subquery whose arguments name only the enclosing query's columns (`(SELECT MAX(a.v) FROM u)`) | evaluated inside the subquery (once per row of `u`); standard SQL attaches it to the enclosing query |
 | `INTERVAL` columns; exact `DECIMAL` | Metakit has no such types |
 | A *reference* to a column name that two columns of a derived table share | refused as ambiguous (the duplicate columns themselves are fine: `SELECT * FROM (SELECT a.id, b.id ...)`); an explicit column list `t(p, p)` must be distinct |
 | A statement that expands to more than 4,000 subqueries | a CTE is bound again at every reference, so a chain of CTEs that each use the previous one twice doubles at every level; refused instead of hanging (`::mkitsql::maxBinds`) |
