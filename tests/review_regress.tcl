@@ -169,7 +169,7 @@ check R11_open_error_names_path [string match "*no_such_dir/x.mk*" $bad] 1
 # the type memory of an open file dies with it: a closed and reopened file may be changed to another type
 set f2 $::tmp/mkitsql_rr2_[pid].mk ; file delete $f2
 set d2 [mkitsql::db::openFile $f2 -create]
-mkitsql::run "CREATE TABLE w (x INT)" $d2 ; mkitsql::run "INSERT INTO w VALUES (1)" $d2 ; mkitsql::run COMMIT $d2
+mkitsql::run "CREATE TABLE keep (a INT)" $d2 ; mkitsql::run "CREATE TABLE w (x INT)" $d2 ; mkitsql::run "INSERT INTO w VALUES (1)" $d2 ; mkitsql::run COMMIT $d2
 mkitsql::run "DROP TABLE w" $d2 ; mkitsql::run COMMIT $d2
 mkitsql::db::closeFile $d2
 set d2 [mkitsql::db::openFile $f2 -unchecked]
