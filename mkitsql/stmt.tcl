@@ -354,6 +354,16 @@ proc ::mkitsql::deleteRowsSmart {path layout idx} {
     variable bulkMin
     set idx [lsort -integer -unique $idx]
     if {![llength $idx]} return
+    # how many contiguous runs?  (counted first, so a huge scattered delete never builds the run list)
+    set nruns 0 ; set prev -2
+    foreach i $idx {
+        if {$i != $prev + 1} { incr nruns }
+        set prev $i
+    }
+    if {$nruns >= $bulkMin} {
+        rewriteView $path $layout $idx "" {}
+        return
+    }
     set runs {} ; set start [lindex $idx 0] ; set cnt 0 ; set prev [expr {$start - 2}]
     foreach i $idx {
         if {$i == $prev + 1} { incr cnt } else {
@@ -363,10 +373,6 @@ proc ::mkitsql::deleteRowsSmart {path layout idx} {
         set prev $i
     }
     lappend runs [list $start $cnt]
-    if {[llength $runs] >= $bulkMin} {
-        rewriteView $path $layout $idx "" {}
-        return
-    }
     for {set k [expr {[llength $runs] - 1}]} {$k >= 0} {incr k -1} {
         lassign [lindex $runs $k] first n
         ::mkitsql::db::deleteRange $path $first $n
