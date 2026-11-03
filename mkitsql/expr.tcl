@@ -208,24 +208,12 @@ proc ::mkitsql::rt::inlist {v list kind hasNull} {
 # ---- scalar functions ------------------------------------------------------
 ::mkitsql::defstrict fn_ABS {a} { expr {abs($a)} }
 ::mkitsql::defstrict fn_SIGN {a} { expr {$a > 0 ? 1 : ($a < 0 ? -1 : 0)} }
-::mkitsql::defstrict fn_CEIL {a} { if {[string is integer -strict $a]} { return $a } ; expr {ceil($a)} }
-::mkitsql::defstrict fn_FLOOR {a} { if {[string is integer -strict $a]} { return $a } ; expr {floor($a)} }
-::mkitsql::defstrict fn_ROUND {a {n 0}} {
-    if {[string is integer -strict $a] && $n >= 0} { return $a }
-    if {$n == 0} { return [expr {double(round($a))}] }
-    if {$n > 0} { return [expr {double([format %.${n}f $a])}] }
-    set k [expr {10.0 ** (-$n)}]
-    expr {double(round($a / $k) * $k)}
-}
-::mkitsql::defstrict fn_TRUNC {a {n 0}} {
-    if {[string is integer -strict $a] && $n >= 0} { return $a }
-    if {$n >= 0} {
-        set k [expr {10.0 ** $n}]
-        return [expr {double(int($a * $k)) / $k}]
-    }
-    set k [expr {10.0 ** (-$n)}]
-    expr {double(int($a / $k)) * $k}
-}
+::mkitsql::defstrict fn_CEIL {a} { expr {double(ceil($a))} }
+::mkitsql::defstrict fn_FLOOR {a} { expr {double(floor($a))} }
+# ROUND / TRUNC work on the number's shortest decimal form, so ROUND(2.675, 2) is 2.68
+# and ties round away from zero (the SQL rule) instead of following binary noise.
+::mkitsql::defstrict fn_ROUND {a {n 0}} { ::mkitsql::decRound $a $n 1 }
+::mkitsql::defstrict fn_TRUNC {a {n 0}} { ::mkitsql::decRound $a $n 0 }
 ::mkitsql::defstrict fn_SQRT {a} {
     if {$a < 0} { ::mkitsql::fail "Cannot take square root of a negative number" }
     expr {sqrt($a)}
@@ -387,6 +375,24 @@ proc ::mkitsql::rt::fn_CURRENT_TIMESTAMP {} { clock format [clock seconds] -form
         }
     }
     ::mkitsql::fail "Unknown EXTRACT field '$field'"
+}
+
+# Round (up=1) or truncate (up=0) to n decimals; n may be negative.  Returns a double.
+proc ::mkitsql::decRound {a n up} {
+    set v [expr {double($a)}]
+    if {$v != $v || $v == Inf || $v == -Inf} { return $v }
+    if {![regexp {^(-?)(\d+)(?:\.(\d+))?(?:[eE]([-+]?\d+))?$} $v -> sign ip fp ex]} { return $v }
+    if {$ex eq ""} { set ex 0 }
+    set m [string trimleft $ip$fp 0]
+    if {$m eq ""} { return 0.0 }
+    set e [expr {$ex - [string length $fp]}]       ;# value = m * 10^e
+    if {$e >= -$n} { return $v }
+    set p [expr {10 ** (-$n - $e)}]
+    set q [expr {$m / $p}]
+    if {$up && 2 * ($m % $p) >= $p} { incr q }
+    if {$n >= 0} { set r [expr {double($q) / (10.0 ** $n)}] } else { set r [expr {double($q) * (10.0 ** (-$n))}] }
+    if {$sign eq "-"} { set r [expr {-$r}] }
+    return $r
 }
 
 # ============================================================================
@@ -688,8 +694,8 @@ proc ::mkitsql::funcTable {} {
     variable FT
     if {[info exists FT]} { return $FT }
     set FT {
-        ABS {1 1 num0}      SIGN {1 1 int}     CEIL {1 1 num0}    CEILING {1 1 num0}
-        FLOOR {1 1 num0}    ROUND {1 2 num0}   TRUNC {1 2 num0}   TRUNCATE {1 2 num0}
+        ABS {1 1 num0}      SIGN {1 1 int}     CEIL {1 1 real}    CEILING {1 1 real}
+        FLOOR {1 1 real}    ROUND {1 2 real}   TRUNC {1 2 real}   TRUNCATE {1 2 real}
         SQRT {1 1 real}     POWER {2 2 real}   POW {2 2 real}     EXP {1 1 real}
         LN {1 1 real}       LOG10 {1 1 real}   SIN {1 1 real}     COS {1 1 real}
         TAN {1 1 real}      ASIN {1 1 real}    ACOS {1 1 real}    ATAN {1 1 real}

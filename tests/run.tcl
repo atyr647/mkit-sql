@@ -85,6 +85,11 @@ check fn_trim [rows "SELECT TRIM('  x  '), TRIM(LEADING 'x' FROM 'xxaxx'), TRIM(
 check fn_misc [rows "SELECT REPLACE('aXbX', 'X', '-'), POSITION('b' IN 'abc'), LEFT('abcdef', 2), RIGHT('abcdef', 2), REPEAT('ab', 3), REVERSE('abc'), LPAD('7', 3, '0'), RPAD('7', 3, '*')"] {{a-b- 2 ab ef ababab cba 007 7**}}
 check fn_num [rows "SELECT ABS(-4), SIGN(-9), CEIL(2.1), FLOOR(2.9), ROUND(3.14159, 2), POWER(2, 10), SQRT(16), MOD(10, 3)"] {{4 -1 3.0 2.0 3.14 1024.0 4.0 1}}
 check fn_round [rows "SELECT ROUND(2.5), ROUND(-2.5), ROUND(1234.5678, -2), TRUNC(2.99), TRUNC(-2.99)"] {{3.0 -3.0 1200.0 2.0 -2.0}}
+check round_ties [rows "SELECT ROUND(1.625, 2), ROUND(2.675, 2), ROUND(-1.625, 2), ROUND(0.5), ROUND(1.5), ROUND(2.5), ROUND(-0.5), ROUND(1.005, 2), ROUND(0.285, 2)"] {{1.63 2.68 -1.63 1.0 2.0 3.0 -1.0 1.01 0.29}}
+check round_neg [rows "SELECT ROUND(15, -1), ROUND(25, -1), ROUND(-25, -1), ROUND(1234, -2), ROUND(1e20, 2), ROUND(0.000123, 5)"] {{20.0 30.0 -30.0 1200.0 1e+20 0.00012}}
+check round_real [rows "SELECT ROUND(3) / 5, ROUND(7) / 2"] {{0.6 3.5}}
+check trunc_dec [rows "SELECT TRUNC(2.999, 2), TRUNC(-2.999, 2), TRUNC(1234.5, -2)"] {{2.99 -2.99 1200.0}}
+check ceil_floor [rows "SELECT CEIL(2.1), FLOOR(2.9), CEIL(-2.1), FLOOR(-2.1), CEIL(5)"] {{3.0 2.0 -2.0 -3.0 5.0}}
 check fn_concat [rows "SELECT CONCAT('a', NULL, 'b'), CONCAT_WS('-', 'a', NULL, 'b')"] {{ab a-b}}
 check fn_null  [rows "SELECT UPPER(NULL), LENGTH(NULL), ABS(NULL)"] {{NULL NULL NULL}}
 check fn_date  [rows "SELECT EXTRACT(YEAR FROM '2026-03-05'), EXTRACT(MONTH FROM '2026-03-05'), EXTRACT(DAY FROM '2026-03-05'), EXTRACT(HOUR FROM '2026-03-05 14:30:00')"] {{2026 3 5 14}}
