@@ -21,7 +21,7 @@ set only86pairs {{string cat} {string reverse} {dict getdef} {dict getwithdefaul
     {lpop} {lremove}}
 set fails 0
 foreach f [lsort [concat [glob -directory $root/mkitsql *.tcl] [glob -directory $root/tests *.tcl]]] {
-    set in [open $f r] ; fconfigure $in -encoding binary ; set bin [read $in] ; close $in
+    set in [open $f r] ; fconfigure $in -translation binary ; set bin [read $in] ; close $in
     if {[regexp {[\x80-\xff]} $bin]} { puts "NON-ASCII in [file tail $f]" ; incr fails }
     if {[file tail $f] eq "lint.tcl"} continue
     set src $bin
