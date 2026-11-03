@@ -118,6 +118,8 @@ jobs:
           MKIT_MK4TCL=builtin $T86 tests/bulkwrite.tcl 150 4
           MKIT_MK4TCL=builtin $T85 tests/bulkwrite.tcl 80 5
           MKIT_BULKMIN=1 MKIT_MK4TCL=builtin $T86 tests/run.tcl
+      - name: Soak - tens of thousands of mixed statements in one process, nothing accumulates, tclkit 8.6.3
+        run: MKIT_MK4TCL=builtin $T86 tests/soak.tcl 60 1
       - name: Memory stays flat on a big table (streaming, spilling), tclkit 8.6.3, REAL Metakit
         run: MKIT_MK4TCL=builtin $T86 tests/scale_memory.tcl 200000 4194304
 
