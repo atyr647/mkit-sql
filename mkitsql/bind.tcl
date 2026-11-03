@@ -427,7 +427,7 @@ proc ::mkitsql::noteRef {level srcId name} {
     variable needed ; variable refLog
     set needed($srcId,[string tolower $name]) 1
     if {[llength $refLog]} {
-        lset refLog end [concat [lindex $refLog end] [list [list $level $srcId]]]
+        lset refLog end [concat [lindex $refLog end] [list [list $level $srcId [string tolower $name]]]]
     }
 }
 
@@ -610,9 +610,9 @@ proc ::mkitsql::bindSubquery {q} {
     }
     # references that reach beyond our parent are outer references of the parent too
     foreach r $outer {
-        lassign $r lvl sid
+        lassign $r lvl sid rname
         if {$lvl >= 2 && [llength $refLog]} {
-            lset refLog end [concat [lindex $refLog end] [list [list [expr {$lvl - 1}] $sid]]]
+            lset refLog end [concat [lindex $refLog end] [list [list [expr {$lvl - 1}] $sid $rname]]]
         }
     }
     return [list $bq $outer]

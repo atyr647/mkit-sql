@@ -13,6 +13,11 @@ namespace eval ::mkitsql {
     variable plans
     variable subCache
     variable lookupSeq 0
+    variable scanSeq 0
+    variable scanCache
+    variable scanRuns
+    array set scanCache {}
+    array set scanRuns {}
     variable lookupIdx
     array set lookupIdx {}
     variable wtable
@@ -209,7 +214,13 @@ proc ::mkitsql::compileSelect {bs outerMaps} {
         }
         lassign [compileList $argNodes $preCtx] aargs _
         dict set p agg [dict create gkey $gkey ng $ng aargs $aargs specs $specs]
-        set ctx [dict create maps [concat [list {}] $outerMaps]]
+        set gmap {}
+        set gj 0
+        foreach g $rwG {
+            if {[lindex $g 0] eq "ref" && [lindex $g 1] == 0} { dict set gmap [lindex $g 2],[string tolower [lindex $g 3]] $gj }
+            incr gj
+        }
+        set ctx [dict create maps [concat [list $gmap] $outerMaps]]
         set items $items2 ; set having $having2 ; set order $order2
         set baseWidth [expr {$ng + [llength $aggNodes]}]
     } else {
@@ -306,21 +317,15 @@ proc ::mkitsql::rwAgg {node} {
             return $node
         }
         sub - exists {
-            if {[lsearch -exact [outerSrcsAt1 [lindex $node 2]] ""] < 0 && [llength [outerSrcsAt1 [lindex $node 2]]]} {
-                fail "A subquery that refers to grouped columns is not supported; use a join or a derived table"
-            }
+            checkGroupedRefs [lindex $node 2]
             return $node
         }
         insub {
-            if {[llength [outerSrcsAt1 [lindex $node 4]]]} {
-                fail "A subquery that refers to grouped columns is not supported; use a join or a derived table"
-            }
+            checkGroupedRefs [lindex $node 4]
             return [lreplace $node 1 1 [rwAgg [lindex $node 1]]]
         }
         quant {
-            if {[llength [outerSrcsAt1 [lindex $node 5]]]} {
-                fail "A subquery that refers to grouped columns is not supported; use a join or a derived table"
-            }
+            checkGroupedRefs [lindex $node 5]
             return [lreplace $node 3 3 [rwAgg [lindex $node 3]]]
         }
         lit - slot { return $node }
@@ -352,6 +357,23 @@ proc ::mkitsql::hasOuterRef {node} {
     }
     foreach c [exprChildren $node] { if {[hasOuterRef $c]} { return 1 } }
     return 0
+}
+
+# A subquery inside a grouped query may refer to the enclosing query's GROUP BY columns
+# (they are read from the aggregated tuple), but not to ungrouped ones.
+proc ::mkitsql::checkGroupedRefs {refs} {
+    variable rwG
+    foreach r $refs {
+        lassign $r lvl sid name
+        if {$lvl != 1} continue
+        set ok 0
+        foreach g $rwG {
+            if {[lindex $g 0] eq "ref" && [lindex $g 1] == 0 && [lindex $g 2] == $sid && [string tolower [lindex $g 3]] eq $name} { set ok 1 }
+        }
+        if {!$ok} {
+            fail "Column '$name' must appear in the GROUP BY clause or be used in an aggregate function (it is used inside a subquery)"
+        }
+    }
 }
 
 # ---- window rewriting ------------------------------------------------------
@@ -444,8 +466,9 @@ proc ::mkitsql::cfLeaf {s pushable stVar} {
     }
     switch -- [dict get $s kind] {
         table {
+            variable scanSeq
             set plan [dict create kind scan path [dict get $s path] props [dict get $lay props] \
-                subs [dict get $lay subs] filter $filter lookup $lookup]
+                subs [dict get $lay subs] filter $filter lookup $lookup sid [incr scanSeq]]
         }
         lateral {
             set plan [dict create kind lateral parent [dict get $s parent] sub [dict get $s sub] \
@@ -803,9 +826,21 @@ proc ::mkitsql::filterRows {rows filter outer} {
 
 # Scan a Metakit view (or subview) and return tuples  [props.. subcounts.. cur]
 proc ::mkitsql::scanPath {path node outer stop} {
-    variable chunk ; variable progressHook ; variable cancel ; variable lookupIdx ; variable N
+    variable chunk ; variable progressHook ; variable cancel ; variable lookupIdx ; variable N ; variable scanCache ; variable scanRuns
     set props [dict get $node props] ; set subs [dict get $node subs]
     set filter [dict get $node filter]
+    # A scan that runs again and again (a correlated subquery that cannot use a hash lookup)
+    # reads the table from Metakit once and filters the cached rows afterwards.
+    if {$stop == 0 && [dict exists $node sid] && ![dict exists $node nocache] && [dict get $node lookup] eq ""} {
+        set sid [dict get $node sid]
+        if {![info exists scanRuns($sid)]} { set scanRuns($sid) 0 }
+        if {[incr scanRuns($sid)] >= 3 && [::store::size $path] <= 300000} {
+            if {![info exists scanCache($sid)]} {
+                set scanCache($sid) [scanPath $path [dict replace $node filter "" nocache 1] {} 0]
+            }
+            return [filterRows $scanCache($sid) $filter $outer]
+        }
+    }
     if {[dict exists $node lookup] && [dict get $node lookup] ne ""} {
         set lk [dict get $node lookup]
         set lid [dict get $lk lid]

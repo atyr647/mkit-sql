@@ -21,9 +21,9 @@ namespace eval ::mkitsql {
 # ============================================================================
 proc ::mkitsql::resetStatement {} {
     variable plans ; variable subCache ; variable planCorr ; variable needed
-    variable scopes ; variable ctes ; variable refLog ; variable fromSoFar ; variable lookupIdx
+    variable scopes ; variable ctes ; variable refLog ; variable fromSoFar ; variable lookupIdx ; variable scanCache ; variable scanRuns
     foreach p [info procs ::mkitsql::cx::*] { rename $p {} }
-    array unset lookupIdx ; array set lookupIdx {}
+    array unset lookupIdx ; array set lookupIdx {} ; array unset scanCache ; array set scanCache {} ; array unset scanRuns ; array set scanRuns {}
     array unset plans ; array unset subCache ; array unset planCorr ; array unset needed
     array set plans {} ; array set subCache {} ; array set planCorr {} ; array set needed {}
     set scopes {} ; set ctes {} ; set refLog {} ; set fromSoFar {}
@@ -49,6 +49,7 @@ proc ::mkitsql::execStatement {ast {db ""} {plist {}}} {
         insert   { return [afterWrite [execInsert [lindex $ast 1]]] }
         update   { return [afterWrite [execUpdate [lindex $ast 1]]] }
         delete   { return [afterWrite [execDelete [lindex $ast 1]]] }
+        merge    { return [afterWrite [execMerge [lindex $ast 1]]] }
         create   { return [afterWrite [execCreate [lindex $ast 1]]] }
         drop     { return [afterWrite [execDrop [lindex $ast 1]]] }
         alter    { return [afterWrite [execAlter [lindex $ast 1]]] }
@@ -336,6 +337,110 @@ proc ::mkitsql::execDelete {st} {
     if {[llength $idx]} { ::store::deleteRows $path $idx }
     set n [llength $idx]
     return [dict create kind message text "[plural $n row] deleted from '$label'." affected $n tag $tag]
+}
+
+# ============================================================================
+#  MERGE   (matching is done by the ON condition, so no keys are needed)
+# ============================================================================
+# The statement runs as one SELECT  source LEFT JOIN target  that also computes every
+# WHEN condition and every SET / VALUES expression; the file is only touched afterwards.
+proc ::mkitsql::execMerge {st} {
+    variable N
+    lassign [resolveTarget [dict get $st parts] [dict get $st subs]] tag view path layout label
+    set parts [dict get $st parts]
+    set talias [dict get $st alias]
+    if {$talias eq ""} {
+        if {[llength [dict get $st subs]]} { set talias [lindex [dict get $st subs] end 1] } else { set talias [lindex $parts end] }
+    }
+    set items [list [list [list col $talias _rowid] {} _rowid]]
+    set plan {}                       ;# per clause: {kind condIdx action ...}
+    foreach cl [dict get $st clauses] {
+        lassign $cl kind cond act
+        set ci [llength $items]
+        lappend items [list [expr {$cond eq "" ? {lit bool 1} : $cond}] {} cond]
+        switch -- [lindex $act 0] {
+            delete { lappend plan [list $kind $ci delete] }
+            update {
+                set targets {} ; set first [llength $items] ; set seen {}
+                foreach sc [lindex $act 1] {
+                    lassign $sc c e
+                    set lc [findLayoutCol $layout $c]
+                    if {$lc eq ""} { fail "Unknown column '$c' in '$label'" }
+                    if {[lindex $lc 1] eq "V"} { fail "'$c' is a subview and cannot be assigned" }
+                    if {[lsearch -exact $seen [string tolower $c]] >= 0} { fail "Column '$c' is assigned twice" }
+                    lappend seen [string tolower $c]
+                    lappend targets [list [lindex $lc 0] [lindex $lc 1]]
+                    lappend items [list $e {} $c]
+                }
+                lappend plan [list $kind $ci update $first $targets]
+            }
+            insert {
+                lassign [lrange $act 1 2] cols vals
+                if {![llength $cols]} {
+                    foreach c $layout { if {[lindex $c 1] ne "V"} { lappend cols [lindex $c 0] } }
+                }
+                if {[llength $cols] != [llength $vals]} {
+                    fail "MERGE ... INSERT has [llength $cols] column[expr {[llength $cols] == 1 ? {} : {s}}] but [llength $vals] value[expr {[llength $vals] == 1 ? {} : {s}}]"
+                }
+                set targets {} ; set first [llength $items]
+                foreach c $cols e $vals {
+                    set lc [findLayoutCol $layout $c]
+                    if {$lc eq ""} { fail "Unknown column '$c' in '$label'" }
+                    if {[lindex $lc 1] eq "V"} { fail "'$c' is a subview" }
+                    lappend targets [list [lindex $lc 0] [lindex $lc 1]]
+                    lappend items [list $e {} $c]
+                }
+                lappend plan [list $kind $ci insert $first $targets]
+            }
+        }
+    }
+    set from [list join left [dict get $st source] [list table $parts [dict get $st subs] $talias] [dict get $st on] {}]
+    set sel [dict create type select distinct 0 items $items from $from where {} group {} having {} windows [dict create]]
+    set q [dict create type query with {} body $sel order {} limit {} offset {}]
+    set bq [bindQuery $q]
+    set id [compileQuery $bq {}]
+    set rows [runPlan $id {}]
+
+    set updates {} ; set deletes {} ; set inserts {} ; set touched [dict create]
+    foreach r $rows {
+        set rid [lindex $r 0]
+        set matched [expr {$rid ne $N}]
+        foreach cl $plan {
+            lassign $cl kind ci action
+            if {($kind eq "matched") != $matched} continue
+            if {[lindex $r $ci] ne "1"} continue
+            switch -- $action {
+                delete - update {
+                    if {[dict exists $touched $rid]} {
+                        fail "MERGE would change the same target row twice: the ON condition matches one target row with more than one source row"
+                    }
+                    dict set touched $rid 1
+                    if {$action eq "delete"} {
+                        lappend deletes $rid
+                    } else {
+                        set vals {} ; set k [lindex $cl 3]
+                        foreach t [lindex $cl 4] { lappend vals [coerceValue [lindex $t 0] [lindex $t 1] [lindex $r $k]] ; incr k }
+                        lappend updates [list $rid [lindex $cl 4] $vals]
+                    }
+                }
+                insert {
+                    set vals {} ; set props {} ; set k [lindex $cl 3]
+                    foreach t [lindex $cl 4] { lappend props [lindex $t 0] ; lappend vals [coerceValue [lindex $t 0] [lindex $t 1] [lindex $r $k]] ; incr k }
+                    lappend inserts [list $props $vals]
+                }
+            }
+            break
+        }
+    }
+    foreach u $updates {
+        lassign $u rid targets vals
+        foreach t $targets v $vals { ::store::setCell $path $rid [lindex $t 0] $v }
+    }
+    if {[llength $deletes]} { ::store::deleteRows $path $deletes }
+    foreach i $inserts { ::store::appendRow $path [lindex $i 0] [lindex $i 1] }
+    set total [expr {[llength $updates] + [llength $deletes] + [llength $inserts]}]
+    return [dict create kind message affected $total tag $tag \
+        text "MERGE into '$label': [llength $updates] updated, [llength $deletes] deleted, [llength $inserts] inserted."]
 }
 
 # ============================================================================

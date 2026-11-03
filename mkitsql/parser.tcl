@@ -1074,6 +1074,59 @@ proc ::mkitsql::parseUpdate {} {
     return [list update [dict create parts $parts subs $subs alias $alias sets $sets where $where]]
 }
 
+# MERGE INTO target [[AS] alias] USING source ON cond
+#   { WHEN MATCHED [AND c] THEN UPDATE SET .. | DELETE
+#   | WHEN NOT MATCHED [AND c] THEN INSERT [(cols)] VALUES (..) }
+proc ::mkitsql::parseMerge {} {
+    expectKw MERGE ; expectKw INTO
+    lassign [parseTarget] parts subs
+    set alias ""
+    if {[acceptKw AS]} { set alias [parseName alias] } else {
+        set t [peek]
+        if {$t ne "" && ([lindex $t 0] eq "qident" || ([lindex $t 0] eq "ident" && ![isReserved $t]))} { set alias [parseName alias] }
+    }
+    expectKw USING
+    set src [parseTableRef]
+    expectKw ON
+    set on [parseExpr]
+    set clauses {}
+    while {[acceptKw WHEN]} {
+        set not [acceptKw NOT]
+        expectKw MATCHED
+        set cond ""
+        if {[acceptKw AND]} { set cond [parseExpr] }
+        expectKw THEN
+        if {!$not} {
+            if {[acceptKw DELETE]} {
+                set act [list delete]
+            } else {
+                expectKw UPDATE ; expectKw SET
+                set sets {}
+                while 1 {
+                    set c [parseName "column name"]
+                    expectOp =
+                    lappend sets [list $c [parseExpr]]
+                    if {![acceptOp ,]} break
+                }
+                set act [list update $sets]
+            }
+        } else {
+            expectKw INSERT
+            set cols {}
+            if {[isOp [peek] (]} { set cols [parseNameList] }
+            expectKw VALUES
+            expectOp (
+            set vals [list [parseExpr]]
+            while {[acceptOp ,]} { lappend vals [parseExpr] }
+            expectOp )
+            set act [list insert $cols $vals]
+        }
+        lappend clauses [list [expr {$not ? "notmatched" : "matched"}] $cond $act]
+    }
+    if {![llength $clauses]} { err "MERGE needs at least one WHEN MATCHED / WHEN NOT MATCHED clause" [peek] }
+    return [list merge [dict create parts $parts subs $subs alias $alias source $src on $on clauses $clauses]]
+}
+
 proc ::mkitsql::parseDelete {} {
     expectKw DELETE ; expectKw FROM
     lassign [parseTarget] parts subs
@@ -1247,6 +1300,7 @@ proc ::mkitsql::parse {tokens text} {
         INSERT   { set ast [parseInsert] }
         UPDATE   { set ast [parseUpdate] }
         DELETE   { set ast [parseDelete] }
+        MERGE    { set ast [parseMerge] }
         TRUNCATE {
             advance ; acceptKw TABLE
             lassign [parseTarget] parts subs

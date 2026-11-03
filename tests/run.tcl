@@ -413,6 +413,46 @@ check dt_e_timemonth [errmsg "SELECT TIME '10:00:00' + INTERVAL '1' MONTH"] {A m
 check dt_e_bareval [string match "'abc' is not a date or time*" [errmsg "SELECT CAST('abc' AS DATE) + INTERVAL '1' DAY"]] 0
 
 # ============================================================================
+#  Subqueries over grouped columns, and the scan cache
+# ============================================================================
+check grp_sub   [rows "SELECT dept, (SELECT name FROM departments d WHERE d.id = e.dept), COUNT(*) FROM employees e GROUP BY dept ORDER BY dept"] {{1 Engineering 4} {2 Design 4} {3 Sales 4} {4 Support 4} {5 Research 4}}
+check grp_sub_having [rows "SELECT dept FROM employees e GROUP BY dept HAVING EXISTS (SELECT 1 FROM departments d WHERE d.id = e.dept AND d.location = 'Berlin')"] {1}
+check grp_sub_nonequi [rows "SELECT dept, (SELECT COUNT(*) FROM employees x WHERE x.dept > e.dept) FROM employees e GROUP BY dept ORDER BY dept"] {{1 16} {2 12} {3 8} {4 4} {5 0}}
+check grp_sub_err [errmsg "SELECT dept, (SELECT name FROM departments d WHERE d.id = e.id) FROM employees e GROUP BY dept"] {Column 'id' must appear in the GROUP BY clause or be used in an aggregate function (it is used inside a subquery)}
+check grp_sub_in [col0 "SELECT dept FROM employees e GROUP BY dept HAVING dept IN (SELECT id FROM departments WHERE id < 3) ORDER BY dept"] {1 2}
+check scan_cache [rows "SELECT d.id, (SELECT COUNT(*) FROM departments x WHERE x.id > d.id) FROM departments d ORDER BY d.id"] {{1 4} {2 3} {3 2} {4 1} {5 0}}
+check scan_cache2 [col0 "SELECT d.id FROM departments d WHERE NOT EXISTS (SELECT 1 FROM departments x WHERE x.id > d.id AND x.name < d.name) ORDER BY d.id"] [col0 "SELECT d.id FROM departments d WHERE d.id NOT IN (SELECT a.id FROM departments a JOIN departments b ON b.id > a.id AND b.name < a.name) ORDER BY d.id"]
+
+# ============================================================================
+#  MERGE
+# ============================================================================
+q "CREATE TABLE stock (sku VARCHAR(10), qty INT, note VARCHAR(20))"
+q "INSERT INTO stock VALUES ('a', 10, ''), ('b', 5, ''), ('c', 0, ''), ('d', 7, '')"
+q "CREATE TABLE incoming (sku VARCHAR(10), qty INT)"
+q "INSERT INTO incoming VALUES ('a', 5), ('c', 0), ('e', 9), ('f', 0)"
+set r [q "MERGE INTO stock s USING incoming i ON s.sku = i.sku
+          WHEN MATCHED AND i.qty = 0 THEN DELETE
+          WHEN MATCHED THEN UPDATE SET qty = s.qty + i.qty, note = 'restocked'
+          WHEN NOT MATCHED AND i.qty > 0 THEN INSERT (sku, qty, note) VALUES (i.sku, i.qty, 'new')"]
+check merge_msg  [dict get $r text] {MERGE into 'stock': 1 updated, 1 deleted, 1 inserted.}
+check merge_rows [rows "SELECT sku, qty, note FROM stock ORDER BY sku"] {{a 15 restocked} {b 5 {}} {d 7 {}} {e 9 new}}
+check merge_affected [dict get $r affected] 3
+q "MERGE INTO stock USING (SELECT 'b' AS sku, 100 AS qty) i ON stock.sku = i.sku WHEN MATCHED THEN UPDATE SET qty = i.qty"
+check merge_subq [one "SELECT qty FROM stock WHERE sku = 'b'"] 100
+q "MERGE INTO stock USING (VALUES ('z', 1)) AS v(sku, qty) ON stock.sku = v.sku WHEN NOT MATCHED THEN INSERT VALUES (v.sku, v.qty, 'v')"
+check merge_values [rows "SELECT sku, qty, note FROM stock WHERE sku = 'z'"] {{z 1 v}}
+check merge_none [dict get [q "MERGE INTO stock USING incoming i ON stock.sku = i.sku AND 1 = 0 WHEN MATCHED THEN DELETE"] affected] 0
+check merge_twice [errmsg "MERGE INTO stock s USING (SELECT 'a' AS sku UNION ALL SELECT 'a') i ON s.sku = i.sku WHEN MATCHED THEN UPDATE SET qty = 0"] {MERGE would change the same target row twice: the ON condition matches one target row with more than one source row}
+check merge_atomic [one "SELECT qty FROM stock WHERE sku = 'a'"] 15
+check merge_badcol [string match "Unknown column 'nope' in 'stock'" [errmsg "MERGE INTO stock s USING incoming i ON s.sku = i.sku WHEN MATCHED THEN UPDATE SET nope = 1"]] 1
+check merge_badtype [string match "Column 'qty' holds whole numbers*" [errmsg "MERGE INTO stock s USING incoming i ON s.sku = i.sku WHEN MATCHED THEN UPDATE SET qty = 'x'"]] 1
+check merge_valcount [string match "MERGE ... INSERT has 2 columns but 1 value" [errmsg "MERGE INTO stock s USING incoming i ON s.sku = i.sku WHEN NOT MATCHED THEN INSERT (sku, qty) VALUES (i.sku)"]] 1
+check merge_noclause [string match "MERGE needs at least one*" [errmsg "MERGE INTO stock s USING incoming i ON s.sku = i.sku"]] 1
+check merge_dirty [expr {[store::dirty $db] > 0}] 1
+q "DROP TABLE stock"
+q "DROP TABLE incoming"
+
+# ============================================================================
 #  Subviews (Metakit's nested tables)
 # ============================================================================
 set r [q "SELECT id, skills FROM employees WHERE id = 1"]
