@@ -128,13 +128,14 @@ proc ::mkitsql::db::holdsLock {tag} { variable lockOwned ; return [info exists l
 # Open (or with -create, create) a datafile; returns its tag.  Options: -create -readonly
 proc ::mkitsql::db::openFile {path args} {
     variable tags ; variable file ; variable ro ; variable dirty ; variable lockOwned ; variable lockedBy ; variable requireLock
-    set create 0 ; set readonly 0
+    set create 0 ; set readonly 0 ; set unchecked 0
     foreach a $args {
-        switch -- $a { -create {set create 1} -readonly {set readonly 1} default { error "unknown option $a" } }
+        switch -- $a { -create {set create 1} -readonly {set readonly 1} -unchecked {set unchecked 1} default { error "unknown option $a" } }
     }
     set path [::file normalize $path]
     foreach t $tags { if {$file($t) eq $path} { error "File is already open as '$t'." } }
     if {!$create && ![::file exists $path]} { error "File not found: $path" }
+    if {!$unchecked} { ::mkitsql::dbRequireIntact $path }       ;# a damaged file would open as an empty database
     set mine ""
     if {!$readonly} {
         set mine [takeLock $path]                       ;# before opening, so a refusal touches nothing
@@ -149,6 +150,11 @@ proc ::mkitsql::db::openFile {path args} {
             if {$mine ne ""} { releaseLock $path $mine }
             error $err
         }
+    }
+    if {!$unchecked && !$create && ![::mkitsql::dbSignatureOk $path [llength [mk::file views $tag]]]} {
+        catch {mk::file close $tag}
+        if {$mine ne ""} { releaseLock $path $mine }
+        return -code error -errorcode [list MKIT DAMAGED "not a Metakit database"] "This file isn't a Metakit database, so it was not opened:\n$path"
     }
     lappend tags $tag
     set file($tag) $path ; set ro($tag) $readonly ; set dirty($tag) 0

@@ -157,7 +157,7 @@ jobs:
           python3 tests/differential/diff.py --kind window --n 1500 --seed 7
 
   # An extra check against a Mk4tcl compiled from the current Metakit sources (system Tcl 8.6).
-    metakit-from-source:
+  metakit-from-source:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

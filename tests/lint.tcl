@@ -45,6 +45,7 @@ set boundaries [list \
     [list expr.tcl    {^\s*proc [^ \{]*\$}   4 "defstrict (names from this file) and the three cx::pN procs, verified by verify.tcl"] \
     [list db.tcl      {catch \{open }          3 "lock files, created exclusively (O_EXCL) - the same protocol as MK Studio"] \
     [list db.tcl      {(^|\[)open }            3 "reads: the lock file, /proc/<pid>/stat"] \
+    [list dbcheck.tcl {(^|\[)open }            2 "reads the first and last bytes of a database file to validate its frame"] \
     [list spill.tcl   {(^|\[)open }            1 "reads /dev/urandom for the private folder's random name"] \
     [list spill.tcl   {catch \{open }          2 "the spill file path is built by spillNewPath from the temp dir + a counter"] \
     [list mkitsql.tcl {(^|[\[ \{])source -}  3 "loads this package's own files (core, and one of the two storage layers)"] \

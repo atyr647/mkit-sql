@@ -16,7 +16,13 @@ proc ::mkitsql::db::path {tag} { ::store::path $tag }
 proc ::mkitsql::db::readonly {tag} { ::store::readonly $tag }
 proc ::mkitsql::db::dirty {tag} { ::store::dirty $tag }
 proc ::mkitsql::db::touch {tag} { ::store::touch $tag }
-proc ::mkitsql::db::openFile {path args} { ::store::openFile $path {*}$args }
+proc ::mkitsql::db::openFile {path args} {
+    set unchecked [expr {"-unchecked" in $args}]
+    set fargs {}
+    foreach a $args { if {$a ne "-unchecked"} { lappend fargs $a } }
+    if {!$unchecked && [file exists [file normalize $path]]} { ::mkitsql::dbRequireIntact [file normalize $path] }
+    return [::store::openFile $path {*}$fargs]
+}
 proc ::mkitsql::db::closeFile {tag} { ::store::closeFile $tag }
 proc ::mkitsql::db::commit {tag} { ::store::commit $tag }
 proc ::mkitsql::db::rollback {tag} { ::store::rollback $tag }

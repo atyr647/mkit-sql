@@ -23,7 +23,7 @@ namespace eval ::mkitsql {
     variable version 0.3.0
     variable dir [file dirname [file normalize [info script]]]
 }
-foreach f {parser expr datetime verify bind plan spill exec window stmt} { source -encoding utf-8 [file join $::mkitsql::dir $f.tcl] }
+foreach f {parser expr datetime verify bind plan spill exec window stmt dbcheck} { source -encoding utf-8 [file join $::mkitsql::dir $f.tcl] }
 
 # The storage layer.  Standalone (db.tcl, straight on Mk4tcl) unless MK Studio's ::store is already
 # loaded, in which case the files are shared with it through db_studio.tcl.  Force one with
