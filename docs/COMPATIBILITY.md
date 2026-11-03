@@ -40,10 +40,10 @@ reason), and anything that was a **security hole**.
   stay on the 8.x runtimes. Newer 8.6 versions (8.6.14) are exercised the same way.
 * The database file format is Metakit's. mkit-sql never changes the format: files it writes are ordinary Metakit files
   that MK Studio and every other Metakit tool can read, and the reverse.
-* Platforms: Linux is tested on every change. macOS (Tcl 8.6) and Windows (Tcl 9) run the platform-neutral part of the suite on the stand-in in CI, and macOS also the
-  temp-file and locking tests. The locking and temp-file hardening that rely on Unix semantics (`/proc`, 0700 folders,
-  `kill -0`) have lighter Windows fallbacks that are **not** equivalent in strength: treat Windows as best-effort, and do
-  not rely on it for several users on one machine.
+* Platforms: Linux is tested on every change. macOS and Windows also run the whole suite on **real Metakit** (MK Studio's tclkits 8.6.3 / 8.5.17) in CI,
+  including the commit record, the flush, locking and lock crashes; the pure-Tcl stand-in runs on macOS (Tcl 8.6) and Windows (Tcl 9) as well. The locking and temp-file hardening that rely on Unix semantics (`/proc`, 0700 folders,
+  `kill -0`) have lighter Windows fallbacks that are **not** equivalent in strength: Windows is tested but not
+  stress-tested for several users on one machine: do not rely on it for that.
 
 ## Reporting a problem
 
