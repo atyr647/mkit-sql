@@ -48,4 +48,5 @@ rec update_10pct [ms { q "UPDATE a SET val = val + 1 WHERE grp < 100" ; q COMMIT
 rec delete_10pct [ms { q "DELETE FROM a WHERE grp >= 900" ; q COMMIT }]
 mkitsql::db::closeFile $db
 set fh [open $out w] ; puts $fh "\{[join $res ,]\}" ; close $fh
+if {![catch {set h [open /proc/self/status] ; set st [read $h] ; close $h}] && [regexp {VmHWM:\s+(\d+)} $st -> kb]} { puts "peak memory (VmHWM): [expr {$kb / 1024}] MB" }
 puts "file size: [expr {[file size $f] / 1048576}] MB" ; file delete $f
