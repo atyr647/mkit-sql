@@ -27,16 +27,24 @@ jobs:
         run: $T86 tests/lint.tcl
 
       # ---- primary runtime: tclkit 8.6.3 with its built-in (real) Mk4tcl
-      - name: Engine tests, tclkit 8.6.3, pure-Tcl Mk4tcl stand-in
-        run: $T86 tests/run.tcl
       - name: Engine tests, tclkit 8.6.3, REAL Metakit
         run: MKIT_MK4TCL=builtin $T86 tests/run.tcl
       - name: Metakit-specific tests, tclkit 8.6.3
         run: MKIT_MK4TCL=builtin $T86 tests/real_metakit.tcl
       - name: Documentation examples, tclkit 8.6.3
         run: MKIT_MK4TCL=builtin $T86 tests/doc_examples.tcl
+      - name: Code-injection and quoting test, tclkit 8.6.3
+        run: MKIT_MK4TCL=builtin $T86 tests/injection.tcl
+      - name: Fuzzer (malformed SQL must fail cleanly), tclkit 8.6.3
+        run: MKIT_MK4TCL=builtin $T86 tests/fuzz.tcl 40000 1
+      - name: A Metakit file we did not create (a tclkit boot database), tclkit 8.6.3
+        run: MKIT_MK4TCL=builtin $T86 tests/realworld.tcl tclkit/tclkit-8.5.17
       - name: package require, tclkit 8.6.3
         run: $T86 tests/pkg_check.tcl
+      - name: package require, tclkit 8.5.17
+        run: $T85 tests/pkg_check.tcl
+      - name: Engine tests on the pure-Tcl stand-in (system Tcl)
+        run: sudo apt-get install -y tcl8.6 && tclsh8.6 tests/run.tcl
       - name: Differential tests against SQLite (engine runs on tclkit 8.6.3, real Metakit)
         env:
           MKIT_TCLSH: tclkit/tclkit-8.6.3
@@ -51,12 +59,16 @@ jobs:
       # ---- compatibility runtime: tclkit 8.5.17
       - name: Engine tests, tclkit 8.5.17, REAL Metakit
         run: MKIT_MK4TCL=builtin $T85 tests/run.tcl
-      - name: Engine tests, tclkit 8.5.17, pure-Tcl Mk4tcl stand-in
-        run: $T85 tests/run.tcl
       - name: Metakit-specific tests, tclkit 8.5.17
         run: MKIT_MK4TCL=builtin $T85 tests/real_metakit.tcl
       - name: Documentation examples, tclkit 8.5.17
         run: MKIT_MK4TCL=builtin $T85 tests/doc_examples.tcl
+      - name: Code-injection and quoting test, tclkit 8.5.17
+        run: MKIT_MK4TCL=builtin $T85 tests/injection.tcl
+      - name: Fuzzer, tclkit 8.5.17
+        run: MKIT_MK4TCL=builtin $T85 tests/fuzz.tcl 40000 1
+      - name: A Metakit file we did not create, tclkit 8.5.17
+        run: MKIT_MK4TCL=builtin $T85 tests/realworld.tcl tclkit/tclkit-8.6.3
       - name: Differential tests, tclkit 8.5.17
         env:
           MKIT_TCLSH: tclkit/tclkit-8.5.17

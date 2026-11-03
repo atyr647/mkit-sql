@@ -30,6 +30,16 @@ proc ::mkitsql::resetStatement {} {
 }
 
 proc ::mkitsql::execStatement {ast {db ""} {plist {}}} {
+    if {[catch {execStatement1 $ast $db $plist} res opts]} {
+        if {[string match "too many nested evaluations*" $res]} {
+            fail "The statement is too deeply nested to run (too many subqueries or expressions inside each other)"
+        }
+        return -options $opts $res
+    }
+    return $res
+}
+
+proc ::mkitsql::execStatement1 {ast db plist} {
     variable defaultDb ; variable cancel ; variable capRows
     set savedParams $plist
     resetStatement

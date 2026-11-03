@@ -279,7 +279,7 @@ proc ::mkitsql::compileSelect {bs outerMaps} {
     set plain 0 ; set curPos -1 ; set source ""
     if {![dict get $bs isAgg] && ![dict get $bs distinct] && [llength $srcs] == 1 && !$anyWin} {
         set s [lindex $srcs 0]
-        if {[dict get $s kind] in {table lateral}} {
+        if {[dict exists $s path]} {
             set plain 1
             set curPos [dict get $rootMap [dict get $s id],[string tolower $curCol]]
             set source [dict get $s path]
@@ -431,6 +431,7 @@ proc ::mkitsql::cfNode {t pushable stVar} {
 
 proc ::mkitsql::cfLeaf {s pushable stVar {latmap {}}} {
     upvar 1 $stVar st
+    variable curCol
     set id [dict get $s id]
     set lay [dict get $st lay $id]
     set map {} ; set i 0
@@ -478,8 +479,18 @@ proc ::mkitsql::cfLeaf {s pushable stVar {latmap {}}} {
                 subs [dict get $lay subs] filter $filter sfilter $sfilter dfilter $dfilter lookup $lookup sid [incr scanSeq]]
         }
         lateral {
-            set plan [dict create kind lateral parent [dict get $s parent] sub [dict get $s sub] \
-                props [dict get $lay props] subs [dict get $lay subs] filter $filter]
+            if {[dict exists $s plevel]} {
+                # the subview belongs to a row of an enclosing query: find that row's cursor in the outer tuple
+                set pl [dict get $s plevel]
+                set om [lindex [dict get $st outer] [expr {$pl - 1}]]
+                set key [dict get $s parent],[string tolower $curCol]
+                if {![dict exists $om $key]} { fail "Cannot read the subview '[dict get $s sub]' of the enclosing query here" }
+                set plan [dict create kind lateralouter level $pl pos [dict get $om $key] sub [dict get $s sub] \
+                    props [dict get $lay props] subs [dict get $lay subs] filter $filter]
+            } else {
+                set plan [dict create kind lateral parent [dict get $s parent] sub [dict get $s sub] \
+                    props [dict get $lay props] subs [dict get $lay subs] filter $filter]
+            }
         }
         derived {
             if {[dict exists $s lateralq] && [dict get $s lateralq]} {
@@ -816,6 +827,10 @@ proc ::mkitsql::runSrc {node outer stop} {
     switch -- [dict get $node kind] {
         one { return [list {}] }
         scan { return [scanPath [dict get $node path] $node $outer $stop] }
+        lateralouter {
+            set cur [lindex [lindex $outer [expr {[dict get $node level] - 1}]] [dict get $node pos]]
+            return [scanPath $cur.[dict get $node sub] $node $outer $stop]
+        }
         derived {
             variable plans
             set sub [dict get $node sub]

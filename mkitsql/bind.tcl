@@ -295,7 +295,12 @@ proc ::mkitsql::bindSource {node} {
                         if {$crec} {
                             set bq [bindRecursiveCte $ci $cname $ccols $cq]
                         } else {
-                            set bq [withScopes [list] {bindQuery $cq}]
+                            # a CTE sees only the ones defined before it (never itself)
+                            set savedCtes $ctes
+                            set ctes [lrange $ctes [expr {$ci + 1}] end]
+                            set rc [catch {withScopes [list] {bindQuery $cq}} bq opts]
+                            set ctes $savedCtes
+                            if {$rc} { return -options $opts $bq }
                         }
                         set outNames [dict get $bq outNames]
                         if {[llength $ccols]} {
@@ -324,6 +329,22 @@ proc ::mkitsql::bindSource {node} {
                             [layoutCols [lindex $col 4]] parent [dict get $s id] sub [lindex $col 0] \
                             layout [lindex $col 4]]
                     }
+                }
+                # a subview of a table in an ENCLOSING query:  WHERE (SELECT COUNT(*) FROM d.files) > 5
+                set k 0
+                foreach scope $scopes {
+                    foreach s $scope {
+                        if {[dict get $s alias] ne [string tolower $p0] || [dict get $s kind] ni {table lateral}} continue
+                        set sub [lindex $parts 1]
+                        set ci [srcColIndex $s $sub]
+                        if {$ci < 0 || ![lindex [dict get $s cols] $ci 3]} continue
+                        set col [lindex [dict get $s cols] $ci]
+                        noteRef [expr {$k + 1}] [dict get $s id] $curCol
+                        return [newSource lateral [pickName $alias [lindex $col 0]] \
+                            [layoutCols [lindex $col 4]] parent [dict get $s id] sub [lindex $col 0] \
+                            layout [lindex $col 4] plevel [expr {$k + 1}]]
+                    }
+                    incr k
                 }
                 if {[string equal -nocase $p0 information_schema]} {
                     return [infoSource [lindex $parts 1] $alias]
@@ -590,6 +611,13 @@ proc ::mkitsql::bx {node} {
         win { return [bindWindow $node] }
         func {
             lassign $node _ name distinct args
+            variable aggs
+            if {[lsearch -exact $aggs $name] >= 0 && [lindex $args 0 0] ne "star"} {
+                set max [expr {$name in {STRING_AGG GROUP_CONCAT} ? 2 : 1}]
+                if {[llength $args] < 1 || [llength $args] > $max} {
+                    fail "Function ${name}() takes [expr {$max == 2 ? {1 or 2} : 1}] argument[expr {$max == 2 ? {s} : {}}], not [llength $args]"
+                }
+            }
             set ba {}
             foreach a $args {
                 if {[lindex $a 0] eq "star"} { lappend ba $a } else { lappend ba [bx $a] }

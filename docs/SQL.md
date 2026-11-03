@@ -85,6 +85,9 @@ A correlated subquery whose condition has the form `inner.col = <outer expressio
 built once per statement; other correlated forms re-filter a cached copy of the inner table (so they cost
 rows x rows, as in any engine without indexes).
 
+A subquery may also unnest a subview of the *enclosing* row: `WHERE (SELECT COUNT(*) FROM d.files) > 5`,
+`EXISTS (SELECT 1 FROM e.skills s WHERE s.level = 5)`.
+
 ## Set operations and CTEs
 
 `UNION [ALL]`, `INTERSECT [ALL]`, `EXCEPT [ALL]` (`INTERSECT` binds tighter), `VALUES (...), (...)`,
@@ -98,6 +101,7 @@ WITH RECURSIVE nums(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM nums WHERE x < 1
 SELECT x FROM nums;
 ```
 
+A CTE sees only the CTEs defined before it, never itself (that needs `RECURSIVE`).
 `WITH RECURSIVE` evaluates round by round; `UNION` (not `ALL`) drops repeated rows, which also stops cycles. A
 plain `LIMIT` over a recursive query stops the recursion early. A runaway recursion stops after
 `::mkitsql::maxRecursion` rounds (default 100000) with an error that says what to add.

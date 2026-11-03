@@ -429,6 +429,17 @@ check cancel_reset [one "SELECT COUNT(*) FROM cx WHERE n < 0"] 0
 q "DROP TABLE cx"
 
 # ============================================================================
+#  A subquery over a subview of the enclosing row   (found by querying a real tclkit)
+# ============================================================================
+check osv_count   [col0 "SELECT id FROM employees e WHERE (SELECT COUNT(*) FROM e.skills) >= 4 ORDER BY id"] [col0 "SELECT id FROM employees WHERE skills >= 4 ORDER BY id"]
+check osv_exists  [col0 "SELECT id FROM employees e WHERE EXISTS (SELECT 1 FROM e.skills s WHERE s.level = 5) ORDER BY id"] [col0 "SELECT DISTINCT e.id FROM employees e JOIN e.skills s ON s.level = 5 ORDER BY e.id"]
+check osv_select  [rows "SELECT id, (SELECT MAX(level) FROM e.skills) FROM employees e WHERE id <= 3 ORDER BY id"] [rows "SELECT e.id, MAX(s.level) FROM employees e JOIN e.skills s ON 1 = 1 WHERE e.id <= 3 GROUP BY e.id ORDER BY e.id"]
+check osv_in      [col0 "SELECT id FROM employees e WHERE 'SQL' IN (SELECT skill FROM e.skills) ORDER BY id"] [col0 "SELECT DISTINCT e.id FROM employees e JOIN e.skills s ON s.skill = 'SQL' ORDER BY e.id"]
+check osv_nested  [rows "SELECT d.id, (SELECT COUNT(*) FROM employees e WHERE e.dept = d.id AND (SELECT COUNT(*) FROM e.skills) > 2) FROM departments d ORDER BY d.id"] [rows "SELECT d.id, (SELECT COUNT(*) FROM employees e WHERE e.dept = d.id AND e.skills > 2) FROM departments d ORDER BY d.id"]
+check osv_agg_q   [rows "SELECT dept, COUNT(*) FROM employees e WHERE (SELECT SUM(level) FROM e.skills) > 5 GROUP BY dept ORDER BY dept"] [rows "SELECT dept, COUNT(*) FROM employees e WHERE e.id IN (SELECT x.id FROM employees x JOIN x.skills s ON 1 = 1 GROUP BY x.id HAVING SUM(s.level) > 5) GROUP BY dept ORDER BY dept"]
+check osv_nosuch  [string match "*Unknown database 'e'*" [errmsg "SELECT id FROM employees e WHERE (SELECT COUNT(*) FROM e.nothere) > 1"]] 1
+
+# ============================================================================
 #  LATERAL
 # ============================================================================
 check lat_topn   [rows "SELECT d.id, t.id FROM departments d CROSS JOIN LATERAL (SELECT e.id FROM employees e WHERE e.dept = d.id ORDER BY e.id DESC LIMIT 2) t ORDER BY d.id, t.id"] [
@@ -493,6 +504,20 @@ check cal_epoch   [rows "SELECT EXTRACT(EPOCH FROM TIMESTAMP '1970-01-01 00:00:0
 check cal_old     [rows "SELECT DATE '0001-01-01' + INTERVAL '1' DAY, DATE '1600-02-29' + INTERVAL '1' YEAR, DATE '1900-02-28' + INTERVAL '1' DAY, DATE '2000-02-28' + INTERVAL '1' DAY"] {{0001-01-02 1601-02-28 1900-03-01 2000-02-29}}
 check cal_diff    [one "SELECT DATE '2026-03-05' - DATE '1970-01-01'"] {20517 days}
 check cal_roundtrip [one "SELECT DATE '2026-03-05' + (DATE '9999-12-31' - DATE '2026-03-05')"] 9999-12-31
+
+# ============================================================================
+#  Found by the fuzzer
+# ============================================================================
+check fz_cte_self   [errmsg "WITH n(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM n WHERE x < 3) SELECT SUM(x) FROM n"] {Unknown table 'n'.  Tables: departments, employees, orders, products}
+check fz_cte_prior  [col0 "WITH a AS (SELECT 1 AS x), b AS (SELECT x + 1 AS y FROM a) SELECT y FROM b"] {2}
+check fz_cte_later  [string match "Unknown table 'b'*" [errmsg "WITH a AS (SELECT * FROM b), b AS (SELECT 1 AS x) SELECT * FROM a"]] 1
+check fz_cte_shadow [col0 "WITH employees AS (SELECT 42 AS id) SELECT id FROM employees"] {42}
+check fz_cte_shadow2 [col0 "WITH departments AS (SELECT 1 AS id) SELECT id FROM departments d WHERE d.id = 1"] {1}
+check fz_count_none [errmsg "SELECT COUNT() FROM employees"] {Function COUNT() takes 1 argument, not 0}
+check fz_sum_two    [errmsg "SELECT SUM(id, dept) FROM employees"] {Function SUM() takes 1 argument, not 2}
+check fz_strag_three [errmsg "SELECT STRING_AGG(name, ',', 'x') FROM employees"] {Function STRING_AGG() takes 1 or 2 arguments, not 3}
+check fz_nested     [string match "The statement is nested too deeply*" [errmsg "SELECT [string repeat ( 2000]1[string repeat ) 2000]"]] 1
+check fz_nested_sub [string match "*nested too deeply*" [errmsg "SELECT [string repeat "(SELECT " 700]1[string repeat ) 700]"]] 1
 
 # ============================================================================
 #  Subviews (Metakit's nested tables)

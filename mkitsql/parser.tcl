@@ -1356,7 +1356,13 @@ proc ::mkitsql::parseScript {text} {
         set a [lindex $st 0 2]
         set last [lindex $st end]
         set b [expr {[lindex $last 2] + [lindex $last 3]}]
-        lappend out [list [parse $st $text] $a $b [string range $text $a [expr {$b-1}]]]
+        if {[catch {parse $st $text} ast opts]} {
+            if {[string match "too many nested evaluations*" $ast]} {
+                return -code error -errorcode [list MKQL SYNTAX $a [expr {$b - $a}]] "The statement is nested too deeply (too many brackets or subqueries inside each other)"
+            }
+            return -options $opts $ast
+        }
+        lappend out [list $ast $a $b [string range $text $a [expr {$b-1}]]]
     }
     return $out
 }

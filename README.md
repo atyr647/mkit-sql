@@ -67,15 +67,25 @@ engine contract and its 41 UI-logic checks all pass.
 
 ## Verification
 
+Everything below was run on **both of MK Studio's runtimes**, tclkit 8.6.3 and tclkit 8.5.17 (each with its own
+built-in Mk4tcl 2.4.9.7), and also on a Mk4tcl built from source and on the pure-Tcl stand-in.
+
 | | result |
 | --- | --- |
-| Engine suite, 509 checks | pass on the pure-Tcl Mk4tcl stand-in **and on real Metakit** (2.4.9.7 + Mk4tcl built from `tcltk/metakit`, Tcl 8.6) |
+| Engine suite, 526 checks | pass on both kits against **real Metakit**, and on the stand-in |
 | Metakit-only checks (`tests/real_metakit.tcl`, 22) | pass: persistence across close/reopen, 64-bit values, binary, Unicode, nested subviews, every `ALTER`, drop/recreate |
 | **Differential test against SQLite** (`tests/differential`) | more than 60,000 generated queries (about 10,000 of them window queries), 0 mismatches; recursive CTEs and row values checked too. Differences are deliberate (below) |
-| MK Studio's engine contract (38) and UI tests (16 + 41) | pass, on the stand-in and on real Metakit |
-| 200,000 rows on real Metakit (`tests/scale.tcl`) | most queries 0.2-1.5 s, heaviest 3.3 s, 229 MB peak |
-| Lint: ASCII, no shadowed commands, no 8.6-only commands | clean |
-| **tclkit 8.6.3 and 8.5.17** (MK Studio's runtimes) | **not executed yet.** Everything above ran on the system Tcl 8.6.14 because running the downloaded tclkits was not permitted in the development sandbox. The code is lint-checked against those versions; CI (`.github/workflows/test.yml`) runs every suite on both kits. **Run `tests/fetch-tclkit.sh` and the two commands under "Runtimes" once to confirm** |
+| **Code injection** (`tests/injection.tcl`, 1,218 checks) | hostile strings (`[exit 7]`, `}[set x 1]{`, backslashes, braces, NULs...) used as literals, parameters, aliases and stored data never run as code and always round-trip exactly |
+| **Fuzzer** (`tests/fuzz.tcl`) | more than 300,000 mutated statements: every failure is a clean engine error, none is a raw Tcl error |
+| **A Metakit file we did not create** (`tests/realworld.tcl`) | a tclkit's own boot database: nested tables, binary columns, joins, windows, subqueries - all work |
+| MK Studio's engine contract (38) and UI tests (16 + 41) | pass on both kits, real Metakit |
+| 200,000 rows on real Metakit (`tests/scale.tcl`) | most queries 0.2-1.5 s, heaviest 3.4 s, 185-229 MB peak |
+| Lint: ASCII, no shadowed commands, nothing newer than the target runtimes | clean |
+| **Not tested** | Windows and macOS; files far larger than memory allows (see below); the GitHub Actions workflow itself (never run, YAML validated only) |
+
+The engine is **in-memory per query**: scans, sorts and joins hold their rows in Tcl lists, so a query's working set
+must fit in RAM (about 1 KB per row at 5 columns; 200,000 rows peaked at 229 MB). Plain `LIMIT` queries and
+equality lookups stop early, but a full `ORDER BY` over millions of rows will not fit.
 
 Deliberate differences from SQLite (found by the differential test): `ROUND` rounds the decimal value (so
 `ROUND(2.675, 2)` is `2.68`, as in PostgreSQL), `%` is for integers, typing is static (`COALESCE(int, real)` is
@@ -89,11 +99,14 @@ mkstudio patch fix it: `mk::view delete` leaves the rows behind, so a table re-c
 ## Tests
 
 ```sh
-tclsh tests/run.tcl                       # 509 engine checks on the pure-Tcl stand-in   (glob to filter: 'join_*')
+tclsh tests/run.tcl                       # 526 engine checks on the pure-Tcl stand-in   (glob to filter: 'join_*')
 tclsh tests/lint.tcl                      # static checks
 tclsh tests/doc_examples.tcl              # the examples in docs/SQL.md
 python3 tests/differential/diff.py [--n 3000] [--seed 1] [--kind window]      # compare with SQLite
 python3 tests/differential/diff.py --file tests/differential/recursive.sql
+tclsh tests/injection.tcl                 # hostile strings must stay inert
+tclsh tests/fuzz.tcl 40000 1              # mutated SQL must fail cleanly
+MKIT_MK4TCL=builtin tclkit/tclkit-8.6.3 tests/realworld.tcl tclkit/tclkit-8.5.17    # a Metakit file we did not create
 
 tests/build_mk4tcl.sh /tmp/mk4build       # build the real Metakit + Mk4tcl (git, cmake, g++, tcl8.6-dev)
 export LD_LIBRARY_PATH=/tmp/mk4build/build/src MKIT_MK4TCL=/tmp/mk4build/build/tcl/libMk4tcl.so
