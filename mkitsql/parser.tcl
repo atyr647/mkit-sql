@@ -636,7 +636,7 @@ proc ::mkitsql::parseTypeSpec {} {
 proc ::mkitsql::parseQuery {} {
     set with {}
     if {[acceptKw WITH]} {
-        if {[isKw [peek] RECURSIVE]} { err "WITH RECURSIVE is not supported yet" [peek] }
+        set recursive [acceptKw RECURSIVE]
         while 1 {
             set name [parseName "CTE name"]
             set cols {}
@@ -649,7 +649,7 @@ proc ::mkitsql::parseQuery {} {
             expectOp (
             set q [parseQuery]
             expectOp )
-            lappend with [list $name $cols $q]
+            lappend with [list $name $cols $q $recursive]
             if {![acceptOp ,]} break
         }
     }

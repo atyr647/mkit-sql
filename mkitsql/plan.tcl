@@ -15,6 +15,10 @@ namespace eval ::mkitsql {
     variable lookupSeq 0
     variable lookupIdx
     array set lookupIdx {}
+    variable wtable
+    array set wtable {}
+    variable maxRecursion 100000
+    variable maxWorkRows 5000000
     variable chunk 2000
     variable capRows 0          ;# >0: stop scanning after this many rows (plain queries only)
     array set plans {}
@@ -81,6 +85,11 @@ proc ::mkitsql::compileQuery {bq outerMaps} {
             set p [dict create kind setop op [dict get $bq op] all [dict get $bq all] \
                 left [compileQuery [dict get $bq left] $outerMaps] \
                 right [compileQuery [dict get $bq right] $outerMaps]]
+        }
+        recursive {
+            set p [dict create kind recursive all [dict get $bq all] tid [dict get $bq tid] \
+                anchor [compileQuery [dict get $bq anchor] $outerMaps] \
+                step [compileQuery [dict get $bq step] $outerMaps]]
         }
         query {
             set order {}
@@ -436,6 +445,9 @@ proc ::mkitsql::cfLeaf {s pushable stVar} {
         derived {
             set plan [dict create kind derived sub [compileQuery [dict get $s bq] {}] filter $filter]
         }
+        wref {
+            set plan [dict create kind wref tid [dict get $s tid] filter $filter]
+        }
         info {
             set plan [dict create kind info which [dict get $s which] filter $filter]
         }
@@ -531,6 +543,7 @@ proc ::mkitsql::runPlan {id outer} {
             return $out
         }
         setop { return [runSetop $p $outer] }
+        recursive { return [runRecursive $p $outer] }
         query {
             set rows [runPlan [dict get $p body] $outer]
             set order [dict get $p order]
@@ -552,6 +565,46 @@ proc ::mkitsql::runPlan {id outer} {
             return [applyLimit $rows [dict get $p limit] [dict get $p offset]]
         }
     }
+}
+
+# Iterate a recursive CTE: each round runs the recursive part against the rows the
+# previous round produced.  UNION (not ALL) drops rows already seen, which is also
+# what makes cyclic data terminate.
+proc ::mkitsql::runRecursive {p outer {budget 0}} {
+    variable wtable ; variable maxRecursion ; variable cancel ; variable progressHook ; variable maxWorkRows
+    set tid [dict get $p tid] ; set all [dict get $p all]
+    set rows [runPlan [dict get $p anchor] $outer]
+    if {!$all} {
+        set seen [dict create] ; set uniq {}
+        foreach r $rows { if {![dict exists $seen $r]} { dict set seen $r 1 ; lappend uniq $r } }
+        set rows $uniq
+    }
+    set work $rows
+    set iter 0
+    while {[llength $work] && !($budget > 0 && [llength $rows] >= $budget)} {
+        if {[incr iter] > $maxRecursion} {
+            catch {unset wtable($tid)}
+            fail "Recursive query stopped after $maxRecursion rounds.  Add a stop condition (WHERE ...) or raise ::mkitsql::maxRecursion"
+        }
+        if {$cancel} { fail "Cancelled" }
+        if {$progressHook ne ""} { {*}$progressHook }
+        set wtable($tid) $work
+        set new [runPlan [dict get $p step] $outer]
+        if {!$all} {
+            set fresh {}
+            foreach r $new { if {![dict exists $seen $r]} { dict set seen $r 1 ; lappend fresh $r } }
+            set new $fresh
+        }
+        foreach r $new { lappend rows $r }
+        if {[llength $rows] > $maxWorkRows} {
+            catch {unset wtable($tid)}
+            fail "Recursive query produced more than $maxWorkRows rows.  Add a stop condition (WHERE ...)"
+        }
+        set work $new
+    }
+    catch {unset wtable($tid)}
+    if {$budget > 0 && [llength $rows] > $budget} { set rows [lrange $rows 0 [expr {$budget - 1}]] }
+    return $rows
 }
 
 proc ::mkitsql::applyLimit {rows limit offset} {
@@ -706,9 +759,19 @@ proc ::mkitsql::runSrc {node outer stop} {
         one { return [list {}] }
         scan { return [scanPath [dict get $node path] $node $outer $stop] }
         derived {
-            return [filterRows [runPlan [dict get $node sub] $outer] [dict get $node filter] $outer]
+            variable plans
+            set sub [dict get $node sub]
+            # a plain LIMIT over a recursive query is a row budget: stop iterating once it is met
+            if {$stop > 0 && [dict get $node filter] eq "" && [dict get $plans($sub) kind] eq "recursive"} {
+                return [runRecursive $plans($sub) $outer $stop]
+            }
+            return [filterRows [runPlan $sub $outer] [dict get $node filter] $outer]
         }
         info { return [filterRows [infoRows [dict get $node which]] [dict get $node filter] $outer] }
+        wref {
+            variable wtable
+            return [filterRows $wtable([dict get $node tid]) [dict get $node filter] $outer]
+        }
         join { return [runJoin $node $outer] }
     }
     error "runSrc: [dict get $node kind]"

@@ -19,6 +19,9 @@ namespace eval ::mkitsql {
     variable refLog {}         ;# stack of lists of {level srcId} (outer references)
     variable params {}         ;# dict: 1-based index or name -> value
     variable curWindows {}     ;# named windows (WINDOW clause) of the SELECT being bound
+    variable recSeq 0
+    variable recUsed
+    array set recUsed {}
     variable defaultDb ""
     variable fromSoFar {}      ;# sources bound so far in the FROM clause being bound
     variable curCol "%cur"     ;# hidden column holding a row's cursor path
@@ -268,10 +271,22 @@ proc ::mkitsql::bindSource {node} {
             set p0 [lindex $parts 0]
             # ---- CTE?
             if {[llength $parts] == 1 && ![llength $subs]} {
+                set ci -1
                 foreach c $ctes {
-                    lassign $c cname ccols cq
+                    incr ci
+                    lassign $c cname ccols cq crec
                     if {[string equal -nocase $cname $p0]} {
-                        set bq [withScopes [list] {bindQuery $cq}]
+                        if {[lindex $c 4] eq "wref"} {
+                            # the recursive reference inside a recursive CTE: reads the working table
+                            lassign [lrange $c 5 7] tid rnames rtypes
+                            recordRecUse $tid
+                            return [newSource wref [pickName $alias $cname] [derivedCols $rnames $rtypes ""] tid $tid]
+                        }
+                        if {$crec} {
+                            set bq [bindRecursiveCte $ci $cname $ccols $cq]
+                        } else {
+                            set bq [withScopes [list] {bindQuery $cq}]
+                        }
                         set outNames [dict get $bq outNames]
                         if {[llength $ccols]} {
                             if {[llength $ccols] != [llength $outNames]} {
@@ -324,6 +339,51 @@ proc ::mkitsql::bindSource {node} {
 # strings ("007" -> 7, "1e3" -> 1000.0).  These helpers use plain `if`.
 proc ::mkitsql::pickName {alias default} { if {$alias ne ""} { return $alias } ; return $default }
 proc ::mkitsql::drillName {col} { if {[lindex $col 3]} { return [lindex $col 0] } ; return 0 }
+
+# ---- recursive CTEs --------------------------------------------------------
+proc ::mkitsql::recordRecUse {tid} { variable recUsed ; set recUsed($tid) 1 }
+
+# Bind  WITH RECURSIVE name AS (anchor UNION [ALL] recursive-part).  `ci` is the CTE's
+# position in the visible-CTE list: the anchor must not see the CTE itself, the
+# recursive part sees it as the working table.
+proc ::mkitsql::bindRecursiveCte {ci cname ccols cq} {
+    variable ctes ; variable recUsed ; variable recSeq
+    set body [dict get $cq body]
+    set plain [expr {[dict get $body type] ne "setop" || [dict get $body op] ne "union"}]
+    if {$plain} { return [withScopes [list] {bindQuery $cq}] }
+    if {[llength [dict get $cq order]] || [dict get $cq limit] ne "" || [dict get $cq offset] ne ""} {
+        fail "ORDER BY / LIMIT inside the definition of recursive query '$cname' is not supported"
+    }
+    set saved $ctes
+    set visible [lrange $ctes [expr {$ci + 1}] end]
+    set ctes $visible
+    set rc [catch {withScopes [list] {bindBody [dict get $body left]}} anchor opts]
+    set ctes $saved
+    if {$rc} { return -options $opts $anchor }
+    set names [dict get $anchor outNames] ; set types [dict get $anchor outTypes]
+    if {[llength $ccols]} {
+        if {[llength $ccols] != [llength $names]} {
+            fail "Recursive query '$cname' returns [llength $names] columns but [llength $ccols] names were given"
+        }
+        set names $ccols
+    }
+    set tid [incr recSeq]
+    set ctes [linsert $visible 0 [list $cname {} {} 0 wref $tid $names $types]]
+    set rc [catch {withScopes [list] {bindBody [dict get $body right]}} step opts]
+    set ctes $saved
+    if {$rc} { return -options $opts $step }
+    if {![info exists recUsed($tid)]} {
+        # no self-reference: an ordinary UNION
+        return [withScopes [list] {bindQuery $cq}]
+    }
+    if {[llength [dict get $step outNames]] != [llength $names]} {
+        fail "Each branch of recursive query '$cname' must have the same number of columns"
+    }
+    set rt {}
+    foreach a $types b [dict get $step outTypes] { lappend rt [unify $a $b] }
+    return [dict create kind recursive anchor $anchor step $step all [dict get $body all] tid $tid \
+        outNames $names outTypes $rt outLetters [lrepeat [llength $names] ""] outDrill [lrepeat [llength $names] 0]]
+}
 
 proc ::mkitsql::derivedCols {names types bq} {
     set cols {} ; set i 0
@@ -832,8 +892,8 @@ proc ::mkitsql::bindQuery {q} {
     variable ctes
     set savedCtes $ctes
     foreach c [dict get $q with] {
-        lassign $c cname ccols cq
-        set ctes [linsert $ctes 0 [list $cname $ccols $cq]]
+        lassign $c cname ccols cq crec
+        set ctes [linsert $ctes 0 [list $cname $ccols $cq $crec]]
     }
     set rc [catch {bindQueryBody $q} res opts]
     set ctes $savedCtes

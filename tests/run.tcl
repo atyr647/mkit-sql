@@ -317,6 +317,27 @@ check win_filter_g [rows "SELECT p, COUNT(*) FILTER (WHERE x = 2) FROM $V GROUP 
 check win_filter_w [col0 "SELECT SUM(x) FILTER (WHERE x > 1) OVER (ORDER BY x, p) FROM $V ORDER BY x, p"] {NULL 2 4 9 16}
 
 # ============================================================================
+#  WITH RECURSIVE
+# ============================================================================
+check rec_count  [col0 "WITH RECURSIVE cnt(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM cnt WHERE x < 10) SELECT x FROM cnt ORDER BY x"] {1 2 3 4 5 6 7 8 9 10}
+check rec_fact   [rows "WITH RECURSIVE f(n, v) AS (SELECT 1, 1 UNION ALL SELECT n + 1, v * (n + 1) FROM f WHERE n < 10) SELECT v FROM f WHERE n = 10"] {3628800}
+check rec_union_cycle [col0 "WITH RECURSIVE t(x) AS (SELECT 1 UNION SELECT (x % 3) + 1 FROM t) SELECT x FROM t ORDER BY x"] {1 2 3}
+check rec_limit  [col0 "WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM n) SELECT x FROM n LIMIT 4"] {1 2 3 4}
+check rec_graph  [col0 "WITH RECURSIVE e(a, b) AS (VALUES (1,2),(2,3),(3,1),(3,4),(9,10)), r(n) AS (SELECT 1 UNION SELECT b FROM e JOIN r ON a = n) SELECT n FROM r ORDER BY n"] {1 2 3 4}
+check rec_tree   [col0 "WITH RECURSIVE p(id, par, nm) AS (VALUES (1,0,'r'),(2,1,'a'),(3,2,'b')), t(id, path) AS (SELECT id, nm FROM p WHERE par = 0 UNION ALL SELECT p.id, t.path || '/' || p.nm FROM p JOIN t ON p.par = t.id) SELECT path FROM t ORDER BY id"] {r r/a r/a/b}
+check rec_table  [col0 "WITH RECURSIVE up(id) AS (SELECT id FROM departments WHERE id = 5 UNION ALL SELECT id - 1 FROM up WHERE id > 1) SELECT id FROM up ORDER BY id"] {1 2 3 4 5}
+check rec_reuse  [rows "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 3) SELECT (SELECT SUM(x) FROM c), (SELECT COUNT(*) FROM c)"] {{6 3}}
+check rec_nonrec [col0 "WITH RECURSIVE x(v) AS (SELECT 1 UNION ALL SELECT 2) SELECT v FROM x ORDER BY v"] {1 2}
+check rec_guard  [string match "Recursive query stopped after * rounds*" [errmsg "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x FROM c) SELECT COUNT(*) FROM c"]] 1
+set mkitsql::maxRecursion 5
+check rec_guard2 [string match "Recursive query stopped after 5 rounds*" [errmsg "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 50) SELECT COUNT(*) FROM c"]] 1
+set mkitsql::maxRecursion 100000
+check rec_cols  [string match "Each branch of recursive query 'c' must have the same number of columns" [errmsg "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x, x FROM c WHERE x < 3) SELECT * FROM c"]] 1
+check rec_names [string match "Recursive query 'c' returns 1 columns but 2 names were given" [errmsg "WITH RECURSIVE c(x, y) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 3) SELECT * FROM c"]] 1
+check rec_order [string match "ORDER BY / LIMIT inside the definition of recursive query*" [errmsg "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 3 ORDER BY 1) SELECT * FROM c"]] 1
+check rec_anchor_self [string match "Unknown table 'c'*" [errmsg "WITH RECURSIVE c(x) AS (SELECT x FROM c UNION ALL SELECT 1) SELECT * FROM c"]] 1
+
+# ============================================================================
 #  Subviews (Metakit's nested tables)
 # ============================================================================
 set r [q "SELECT id, skills FROM employees WHERE id = 1"]
