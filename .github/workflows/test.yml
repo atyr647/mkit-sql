@@ -295,6 +295,8 @@ jobs:
         os: [macos-latest, windows-latest]      # macOS runs Tcl 8.6, Windows Tcl 9 (the engine supports 8.5 to 9; Mk4tcl exists only for 8.x, so these run on the pure-Tcl stand-in)
     runs-on: ${{ matrix.os }}
     continue-on-error: true
+    env:
+      TMPDIR: ${{ runner.temp }}          # the tests put scratch files in $TMPDIR (default /tmp, which Windows does not have)
     defaults:
       run:
         shell: bash
