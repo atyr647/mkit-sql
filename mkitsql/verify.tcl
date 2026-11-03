@@ -21,15 +21,20 @@ namespace eval ::mkitsql {
     variable verifyCmds {if set lindex list string return}
 }
 
+namespace eval ::mkitsql { variable verifiedOk ; array set verifiedOk {} }
 proc ::mkitsql::verifyCode {text} {
-    variable verifyOn
+    variable verifyOn ; variable verifiedOk
     if {!$verifyOn} return
+    # verification is a pure function of the text: code that passed once passes again
+    if {[info exists verifiedOk($text)]} return
     set pos 0
     if {[catch {vScript $text pos 0 0} msg opts]} {
         # running out of stack on a very deeply nested expression is reported by the caller as such
         if {[string match "too many nested evaluations*" $msg]} { return -options $opts $msg }
         error "internal error: unsafe code was generated for an expression ($msg)" "" {MKQL INTERNAL}
     }
+    if {[array size verifiedOk] >= 2000} { array unset verifiedOk }
+    set verifiedOk($text) 1
 }
 
 # parse a script starting at pos; closer = 1 when inside [ ... ] (stops at the matching ])

@@ -109,6 +109,7 @@ proc ::mkitsql::execStatement1 {ast db plist nulls} {
         select   { return [execSelect [lindex $ast 1]] }
         explain  { return [execExplain [lindex $ast 1]] }
         insert   { return [writeStmt execInsert [lindex $ast 1]] }
+        insertrows { return [writeStmt execInsertRows [lindex $ast 1]] }
         update   { return [writeStmt execUpdate [lindex $ast 1]] }
         delete   { return [writeStmt execDelete [lindex $ast 1]] }
         merge    { return [writeStmt execMerge [lindex $ast 1]] }
@@ -424,6 +425,47 @@ proc ::mkitsql::execInsert {st} {
     set n [spoolCount $sp]
     spoolFree $sp
     return [dict create kind message text "[plural $n row] inserted into '$label'." affected $n tag $tag]
+}
+
+# INSERT of rows that are already Tcl values (::mkitsql::insertRows): no SQL text to parse or bind, the same checks and conversions as INSERT.
+proc ::mkitsql::execInsertRows {st} {
+    variable N ; variable M
+    lassign [resolveTarget [dict get $st parts] {}] tag view path layout label
+    set cols [dict get $st cols]
+    if {![llength $cols]} { foreach c $layout { if {[lindex $c 1] ne "V"} { lappend cols [lindex $c 0] } } }
+    set targets {} ; set seen {}
+    foreach c $cols {
+        set lc [findLayoutCol $layout $c]
+        if {$lc eq ""} { fail "Unknown column '$c' in '$label'.  Available: [join [lmap2 $layout {x {lindex $x 0}}] {, }]" }
+        if {[lindex $lc 1] eq "V"} { fail "'$c' is a subview; insert into it with  INSERT INTO $label\[row\].$c ..." }
+        if {[lsearch -exact $seen [string tolower $c]] >= 0} { fail "Column '$c' is listed twice" }
+        lappend seen [string tolower $c]
+        lappend targets [list [lindex $lc 0] [lindex $lc 1]]
+    }
+    set w [llength $targets]
+    set nullToken [dict get $st nullToken] ; set useNull [dict get $st useNull]
+    set conv [list ::mkitsql::convInsert $targets]
+    set sp [spoolNew]
+    set chunk {} ; set n 0
+    foreach r [dict get $st rows] {
+        incr n
+        if {[llength $r] != $w} { fail "Row $n has [llength $r] value[expr {[llength $r] == 1 ? {} : {s}}] but there are $w column[expr {$w == 1 ? {} : {s}}]" }
+        if {[string first $M [join $r ,]] >= 0} { fail "Row $n contains U+FDD0, a character the engine reserves for NULL" }
+        if {$useNull} {
+            set r2 {}
+            foreach v $r { lappend r2 [expr {$v eq $nullToken ? $N : $v}] }
+            set r $r2
+        }
+        lappend chunk $r
+        if {[llength $chunk] >= 2000} { convSink $sp $conv $chunk ; set chunk {} }
+    }
+    if {[llength $chunk]} { convSink $sp $conv $chunk }
+    set props {} ; foreach t $targets { lappend props [lindex $t 0] }
+    assertClean
+    spoolEach $sp [list ::mkitsql::applyInsert $path $props]
+    set cnt [spoolCount $sp]
+    spoolFree $sp
+    return [dict create kind message text "[plural $cnt row] inserted into '$label'." affected $cnt tag $tag]
 }
 
 # ---- statements that change data: convert first (into a spool), apply afterwards ------------------

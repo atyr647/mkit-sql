@@ -53,6 +53,8 @@ namespace eval ::mkitsql {
     variable namedParams {}      ;# :name parameters seen in the statement being parsed
 
     # comment | block comment | 'string' | "ident" | number | word | operator | stray char
+    variable parseCache
+    array set parseCache {}
     variable tokenRe {(--[^\n]*)|(/\*(?:[^*]|\*(?!/))*\*/)|('(?:[^']|'')*')|("(?:[^"]|"")*")|((?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?)|([A-Za-z_][A-Za-z0-9_$]*)|(<>|!=|<=|>=|==|\|\||[-+*/%=<>(),;.\[\]!@?:])|(\S)}
 }
 
@@ -64,16 +66,16 @@ namespace eval ::mkitsql {
 proc ::mkitsql::tokenize {text} {
     variable tokenRe
     set out {}
-    set kinds {comment comment string qident number ident op bad}
     foreach {all g1 g2 g3 g4 g5 g6 g7 g8} [regexp -all -inline -indices $tokenRe $text] {
         lassign $all s e
-        set k 0
-        foreach g [list $g1 $g2 $g3 $g4 $g5 $g6 $g7 $g8] {
-            if {[lindex $g 0] >= 0} break
-            incr k
-        }
-        set kind [lindex $kinds $k]
-        if {$kind eq "comment"} continue
+        # exactly one group took part; the common kinds first
+        if {[lindex $g6 0] >= 0} { set kind ident
+        } elseif {[lindex $g7 0] >= 0} { set kind op
+        } elseif {[lindex $g5 0] >= 0} { set kind number
+        } elseif {[lindex $g3 0] >= 0} { set kind string
+        } elseif {[lindex $g4 0] >= 0} { set kind qident
+        } elseif {[lindex $g1 0] >= 0 || [lindex $g2 0] >= 0} { continue
+        } else { set kind bad }
         set raw [string range $text $s $e]
         switch -- $kind {
             string { set val [string map {'' '} [string range $raw 1 end-1]] }
@@ -1643,6 +1645,11 @@ proc ::mkitsql::parseScript {text} {
     if {$bad >= 0} {
         return -code error -errorcode [list MKQL SYNTAX $bad 1] "The character U+FDD0 is reserved (the engine uses it to mark NULL) and cannot appear in SQL text"
     }
+    # the same text always parses to the same tree (it depends on nothing else): remember recent short scripts
+    variable parseCache ; variable ignoreConstraints
+    set cacheable [expr {[string length $text] <= 4096}]
+    set ckey "[expr {[info exists ignoreConstraints] && $ignoreConstraints}] $text"          ;# the one setting that changes what a text parses to
+    if {$cacheable && [info exists parseCache($ckey)]} { return $parseCache($ckey) }
     foreach st [splitStatements [tokenize $text]] {
         set a [lindex $st 0 2]
         set last [lindex $st end]
@@ -1654,6 +1661,10 @@ proc ::mkitsql::parseScript {text} {
             return -options $opts $ast
         }
         lappend out [list $ast $a $b [string range $text $a [expr {$b-1}]]]
+    }
+    if {$cacheable} {
+        if {[array size parseCache] >= 256} { array unset parseCache }
+        set parseCache($ckey) $out
     }
     return $out
 }

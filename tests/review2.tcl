@@ -45,6 +45,12 @@ check "interval / n and * n" [rows "SELECT INTERVAL '1' MONTH / 3, INTERVAL '1' 
 check "interval where a number is expected" [string match "*interval cannot be used as a number*" [err "SELECT SUM(CASE WHEN v < 30 THEN INTERVAL '1' DAY ELSE 5 END) FROM t"]] 1
 # NATURAL JOIN on a duplicated name
 check "NATURAL JOIN on duplicated names is ambiguous" [string match "*NATURAL JOIN on 'k' is ambiguous*" [err "SELECT * FROM (SELECT a.k, b.k FROM u a JOIN u b ON a.w = b.w) q NATURAL JOIN u"]] 1
+# the parse cache must not outlive a setting that changes what a text means
+set ::mkitsql::ignoreConstraints 0
+check "constraints refused" [string match "*PRIMARY KEY is not supported*" [err "CREATE TABLE pk1 (id INT PRIMARY KEY)"]] 1
+set ::mkitsql::ignoreConstraints 1
+check "same text with ignoreConstraints 1 is accepted" [err "CREATE TABLE pk1 (id INT PRIMARY KEY)"] ""
+set ::mkitsql::ignoreConstraints 0
 mkitsql::db::closeFile $db ; file delete $f ; file delete [mkitsql::db::commitRecord $f]
 puts "review 2: $pass passed, $fail failed"
 exit [expr {$fail ? 1 : 0}]

@@ -50,6 +50,17 @@ proc ::mkitsql::run {text {db ""} {params {}} {nulls {}}} {
     return $last
 }
 
+# Insert many rows that are already Tcl values - no SQL text is parsed, which is what dominates a big INSERT ... VALUES (about 150 us a row; this
+# is about 25 us a row).  The same checks, conversions, range errors and all-or-nothing behaviour as INSERT.
+#     ::mkitsql::insertRows $db tablename {id name} {{1 Ada} {2 Grace}}
+# `columns` empty = every column in table order; `table` may be qualified (dbtag.table).  Values equal to `nullToken` (when you pass one) are
+# NULL, which is stored as the column's default like any other NULL.  Returns the same result as INSERT (affected = the row count).
+proc ::mkitsql::insertRows {db table columns rows {nullToken "\uFDD1none"}} {
+    set parts [split $table .]
+    set st [dict create parts $parts cols $columns rows $rows nullToken $nullToken useNull [expr {$nullToken ne "\uFDD1none"}]]
+    return [execStatement [list insertrows $st] $db {} {}]
+}
+
 # Run one SELECT and hand the rows to `callback` in chunks (a list of rows per call) without ever
 # holding the result: memory stays flat however big the table is.  The callback returns 1 to stop.
 # NULL is passed as `nullValue`.  Returns {cols .. types .. count N}.

@@ -297,6 +297,23 @@ Parameters are values, never SQL text, so they cannot inject SQL. To pass NULL, 
 ::mkitsql::query {SELECT ? IS NULL, ? IS NULL} $db {a b} {} {2}      ;# -> {0 1}
 ```
 
+## Speed: where the time goes, and what to do about it
+
+Measured on real Metakit (tclkit 8.6.3, one core): a statement costs about **0.1 ms** of fixed overhead for `SELECT 1`, and a point
+`SELECT ... WHERE id = ?` on a 3,000-row table about **0.9 ms**, of which Metakit's own scan is 0.3 ms, execution 0.05 ms, compiling the
+query 0.26 ms (a third of that is the safety check of the generated code), binding 0.09 ms and parsing 0.13 ms. Per-row work in the
+engine is 5-10 us (`SUM/AVG` over 20,000 rows 160 ms, a `LIKE` prefix scan 100 ms): that is the speed of interpreted Tcl.
+
+* The **parse** of a statement text is remembered (the last 256 texts up to 4 KB; the result depends on nothing but the text and
+  `::mkitsql::ignoreConstraints`), and generated code that passed the safety check once is not checked again. So a statement that
+  repeats with **parameters** (`INSERT INTO t VALUES (?, ?, ?, ?)` with a list each time) costs 105 us instead of 265 us, and `SELECT 1` 43 us instead of 108 us.
+  A statement whose text is different every time (values pasted into the SQL) gets no help.
+* **Loading many rows: use `::mkitsql::insertRows $db table {columns} $rows`.** Parsing the SQL text of a big `INSERT ... VALUES (...),(...)`
+  is 80 % of its cost (1,000 rows: 120 ms to parse, 24 ms to run); `insertRows` takes the rows as Tcl lists, does the same checks and conversions
+  (range errors, text to number, NULL, all-or-nothing, transactions) and costs 13 us a row (5,000 rows in 65 ms).
+* Not done, on purpose: a cache of compiled plans (parameters become part of the compiled code, and the plan also depends on table sizes and
+  the schema, so entries would rarely be reused and invalidating them is where the bugs would be) and compiled (C) kernels (the engine stays pure Tcl).
+
 ## Large tables and memory
 
 **A Metakit file cannot be larger than 2 GiB (2,147,483,647 bytes)** - it keeps its size in one 32-bit word (measured on real
