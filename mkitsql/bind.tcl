@@ -254,9 +254,10 @@ proc ::mkitsql::bindSource {node} {
     variable fromSoFar ; variable ctes ; variable curCol
     switch -- [lindex $node 0] {
         derived {
-            lassign $node _ q alias cols
-            # a subquery in FROM cannot see the siblings (no LATERAL)
-            set bq [withScopes [list] {bindQuery $q}]
+            lassign $node _ q alias cols outerok
+            # a subquery in FROM cannot see its siblings (no LATERAL); only the internal
+            # row-IN rewrite is allowed to see the enclosing query
+            if {$outerok eq "outerok"} { set bq [bindQuery $q] } else { set bq [withScopes [list] {bindQuery $q}] }
             set outNames [dict get $bq outNames] ; set outTypes [dict get $bq outTypes]
             if {[llength $cols]} {
                 if {[llength $cols] != [llength $outNames]} {
@@ -264,7 +265,7 @@ proc ::mkitsql::bindSource {node} {
                 }
                 set outNames $cols
             }
-            return [newSource derived $alias [derivedCols $outNames $outTypes $bq] bq $bq]
+            return [newSource derived $alias [derivedCols $outNames $outTypes $bq] bq $bq outerok [expr {$outerok eq "outerok"}]]
         }
         table {
             lassign $node _ parts subs alias
@@ -552,6 +553,14 @@ proc ::mkitsql::bx {node} {
             if {[llength [dict get $bq outNames]] != 1} { fail "A subquery used with IN must return exactly one column" }
             return [list insub $be $bq $neg $refs]
         }
+        row { fail "A row value (a, b) can only be used in a comparison or with IN" }
+        quant {
+            lassign $node _ op kind e q
+            set be [bx $e]
+            lassign [bindSubquery $q] bq refs
+            if {[llength [dict get $bq outNames]] != 1} { fail "A subquery used with [string toupper $kind] must return exactly one column" }
+            return [list quant $op $kind $be $bq $refs [lindex [dict get $bq outTypes] 0]]
+        }
         exists {
             lassign [bindSubquery [lindex $node 1]] bq refs
             return [list exists $bq $refs]
@@ -727,8 +736,9 @@ proc ::mkitsql::hasAgg {node} {
             foreach a [lindex $node 3] { if {[lindex $a 0] ne "star" && [hasAgg $a]} { return 1 } }
             return 0
         }
-        lit - ref - slot - insub - exists - sub - star {
+        lit - ref - slot - insub - exists - sub - star - quant {
             if {[lindex $node 0] eq "insub"} { return [hasAgg [lindex $node 1]] }
+            if {[lindex $node 0] eq "quant"} { return [hasAgg [lindex $node 3]] }
             return 0
         }
         win {
@@ -800,6 +810,9 @@ proc ::mkitsql::mapChildren {node fn} {
         insub {
             return [lreplace $node 1 1 [{*}$fn [lindex $node 1]]]
         }
+        quant {
+            return [lreplace $node 3 3 [{*}$fn [lindex $node 3]]]
+        }
         case {
             lassign $node t operand whens else
             set nw {}
@@ -837,6 +850,7 @@ proc ::mkitsql::exprChildren {node} {
         un { return [list [lindex $node 2]] }
         bin { return [list [lindex $node 2] [lindex $node 3]] }
         isnull - istf - cast - insub { return [list [lindex $node 1]] }
+        quant { return [list [lindex $node 3]] }
         isdist { return [list [lindex $node 1] [lindex $node 2]] }
         between { return [list [lindex $node 1] [lindex $node 2] [lindex $node 3]] }
         like {
@@ -869,6 +883,7 @@ proc ::mkitsql::localSrcs {node} {
         exists { return [outerSrcsAt1 [lindex $node 2]] }
         sub { return [outerSrcsAt1 [lindex $node 2]] }
         insub { return [concat [localSrcs [lindex $node 1]] [outerSrcsAt1 [lindex $node 4]]] }
+        quant { return [concat [localSrcs [lindex $node 3]] [outerSrcsAt1 [lindex $node 5]]] }
     }
     set out {}
     foreach c [exprChildren $node] { set out [concat $out [localSrcs $c]] }

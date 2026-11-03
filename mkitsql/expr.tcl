@@ -550,6 +550,14 @@ proc ::mkitsql::cg {node ctx} {
             set id [subPlan $bq $refs $ctx]
             return [list "\[::mkitsql::rt::scalar $id \$r0 \$outer\]" $ty]
         }
+        quant {
+            lassign $node _ op kind e bq refs ty
+            set a [cg $e $ctx]
+            set id [subPlan $bq $refs $ctx]
+            set nm [dict get {= eq <> ne < lt <= le > gt >= ge} $op]
+            set ck [cmpKind [lindex $a 1] $ty]
+            return [list "\[::mkitsql::rt::quant $id $nm $kind $ck [lindex $a 0] \$r0 \$outer\]" bool]
+        }
         case { return [cgCase $node $ctx] }
         cast { return [cgCast $node $ctx] }
         func { return [cgFunc $node $ctx] }

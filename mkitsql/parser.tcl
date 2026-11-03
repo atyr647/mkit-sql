@@ -211,7 +211,15 @@ proc ::mkitsql::parsePredicate {} {
         }
         if {$op ne ""} {
             advance
-            set l [list bin $op $l [parseConcat]]
+            if {([isKw [peek] ANY] || [isKw [peek] SOME] || [isKw [peek] ALL]) && [isOp [peek 1] (]} {
+                set kind [expr {[isKw [peek] ALL] ? "all" : "any"}]
+                advance ; advance
+                set q [parseQuery]
+                expectOp )
+                set l [list quant $op $kind $l $q]
+                continue
+            }
+            set l [mkCompare $op $l [parseConcat]]
             continue
         }
         # IS [NOT] NULL | TRUE | FALSE | DISTINCT FROM x
@@ -255,7 +263,18 @@ proc ::mkitsql::parsePredicate {} {
             if {[isKw [peek] SELECT] || [isKw [peek] WITH] || [isKw [peek] VALUES]} {
                 set q [parseQuery]
                 expectOp )
-                set l [list insub $l $q $neg]
+                if {[lindex $l 0] eq "row"} { set l [rowInSubquery $l $q $neg] } else { set l [list insub $l $q $neg] }
+            } elseif {[lindex $l 0] eq "row"} {
+                set items [list [parseExpr]]
+                while {[acceptOp ,]} { lappend items [parseExpr] }
+                expectOp )
+                set or ""
+                foreach it $items {
+                    set eq [mkCompare = $l $it]
+                    if {$or eq ""} { set or $eq } else { set or [list bin or $or $eq] }
+                }
+                if {$neg} { set or [list un not $or] }
+                set l $or
             } else {
                 set items {}
                 if {![isOp [peek] )]} {
@@ -280,6 +299,59 @@ proc ::mkitsql::parsePredicate {} {
         break
     }
     return $l
+}
+
+# ---- row values: desugared into ordinary AND / OR chains -----------------------
+proc ::mkitsql::rowCols {r} { if {[lindex $r 0] eq "row"} { return [lindex $r 1] } ; return [list $r] }
+
+proc ::mkitsql::mkCompare {op l r} {
+    if {[lindex $l 0] ne "row" && [lindex $r 0] ne "row"} { return [list bin $op $l $r] }
+    if {[lindex $l 0] ne "row" || [lindex $r 0] ne "row"} {
+        err "A row value (a, b) can only be compared with another row value of the same size" [peek -1]
+    }
+    set a [lindex $l 1] ; set b [lindex $r 1]
+    if {[llength $a] != [llength $b]} { err "Row values have different sizes ([llength $a] and [llength $b])" [peek -1] }
+    set eqs {}
+    foreach x $a y $b { lappend eqs [list bin = $x $y] }
+    set all [andChain $eqs]
+    switch -- $op {
+        =  { return $all }
+        <> { return [list un not $all] }
+    }
+    # ordering: lexicographic
+    set strict [string index $op 0]            ;# < or >
+    set or ""
+    for {set i 0} {$i < [llength $a]} {incr i} {
+        set term [list bin $strict [lindex $a $i] [lindex $b $i]]
+        if {$i > 0} { set term [list bin and [andChain [lrange $eqs 0 [expr {$i - 1}]]] $term] }
+        if {$or eq ""} { set or $term } else { set or [list bin or $or $term] }
+    }
+    if {[string length $op] == 2} { set or [list bin or $or $all] }       ;# <= and >=
+    return $or
+}
+proc ::mkitsql::andChain {l} {
+    set r ""
+    foreach e $l { if {$r eq ""} { set r $e } else { set r [list bin and $r $e] } }
+    return $r
+}
+
+# (a, b) [NOT] IN (SELECT x, y ...)  ==  [NOT] EXISTS (SELECT 1 FROM (...) q(c1, c2) WHERE c1 = a AND c2 = b)
+# The derived table is flagged `outerok` so the subquery may stay correlated with the
+# enclosing query.  (Pushing the conditions into the subquery instead would let outer
+# column names be captured by the inner table's columns.)
+proc ::mkitsql::rowInSubquery {row q neg} {
+    set cols {} ; set eqs {} ; set i 0
+    foreach x [lindex $row 1] {
+        set c __rq_c[incr i]
+        lappend cols $c
+        lappend eqs [list bin = [list col __rq $c] $x]
+    }
+    set sel [dict create type select distinct 0 items [list [list {lit int 1} {} 1]] \
+        from [list derived $q __rq $cols outerok] where [andChain $eqs] group {} having {} windows [dict create]]
+    set inner [dict create type query with {} body $sel order {} limit {} offset {}]
+    set e [list exists $inner]
+    if {$neg} { set e [list un not $e] }
+    return $e
 }
 
 proc ::mkitsql::parseConcat {} {
@@ -348,7 +420,12 @@ proc ::mkitsql::parsePrimary {} {
                         return [list sub $q]
                     }
                     set e [parseExpr]
-                    if {[isOp [peek] ,]} { err "Row values like (a, b) are not supported" [peek] }
+                    if {[isOp [peek] ,]} {
+                        set items [list $e]
+                        while {[acceptOp ,]} { lappend items [parseExpr] }
+                        expectOp )
+                        return [list row $items]
+                    }
                     expectOp )
                     return $e
                 }
@@ -391,6 +468,15 @@ proc ::mkitsql::parsePrimary {} {
                 CURRENT_DATE - CURRENT_TIME - CURRENT_TIMESTAMP - LOCALTIME - LOCALTIMESTAMP {
                     advance
                     return [list func $u 0 {}]
+                }
+                ROW {
+                    if {[isOp [peek 1] (]} {
+                        advance ; advance
+                        set items [list [parseExpr]]
+                        while {[acceptOp ,]} { lappend items [parseExpr] }
+                        expectOp )
+                        return [list row $items]
+                    }
                 }
                 EXTRACT   { if {[isOp [peek 1] (]} { advance ; return [parseExtract] } }
                 TRIM      { if {[isOp [peek 1] (]} { advance ; return [parseTrim] } }

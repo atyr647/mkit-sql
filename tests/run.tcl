@@ -338,6 +338,37 @@ check rec_order [string match "ORDER BY / LIMIT inside the definition of recursi
 check rec_anchor_self [string match "Unknown table 'c'*" [errmsg "WITH RECURSIVE c(x) AS (SELECT x FROM c UNION ALL SELECT 1) SELECT * FROM c"]] 1
 
 # ============================================================================
+#  ANY / ALL / SOME and row values
+# ============================================================================
+check any_gt    [col0 "SELECT id FROM departments WHERE id > ANY (SELECT 2 UNION SELECT 4) ORDER BY id"] {3 4 5}
+check any_eq    [col0 "SELECT id FROM departments WHERE id = ANY (SELECT 2 UNION SELECT 4) ORDER BY id"] {2 4}
+check some_syn  [col0 "SELECT id FROM departments WHERE id = SOME (SELECT 2 UNION SELECT 4) ORDER BY id"] {2 4}
+check all_gt    [col0 "SELECT id FROM departments WHERE id > ALL (SELECT 2 UNION SELECT 4) ORDER BY id"] {5}
+check all_ne    [col0 "SELECT id FROM departments WHERE id <> ALL (SELECT 2 UNION SELECT 4) ORDER BY id"] {1 3 5}
+check all_empty [col0 "SELECT id FROM departments WHERE id > ALL (SELECT id FROM departments WHERE id > 99) ORDER BY id"] {1 2 3 4 5}
+check any_empty [col0 "SELECT id FROM departments WHERE id > ANY (SELECT id FROM departments WHERE id > 99) ORDER BY id"] {}
+check any_null  [rows "SELECT 3 = ANY (SELECT 1 UNION SELECT NULL), 1 = ANY (SELECT 1 UNION SELECT NULL), 3 <> ALL (SELECT 1 UNION SELECT NULL), 0 <> ALL (SELECT 1 WHERE 0)"] {{NULL 1 NULL 1}}
+check any_corr  [col0 "SELECT d.id FROM departments d WHERE d.id > ALL (SELECT e.dept FROM employees e WHERE e.id <= d.id - 3) ORDER BY d.id"] [col0 "SELECT d.id FROM departments d WHERE NOT EXISTS (SELECT 1 FROM employees e WHERE e.id <= d.id - 3 AND NOT (d.id > e.dept)) ORDER BY d.id"]
+check any_text  [col0 "SELECT name FROM departments WHERE name = ANY (SELECT 'Sales' UNION SELECT 'Design') ORDER BY name"] {Design Sales}
+check any_cols  [errmsg "SELECT 1 WHERE 1 = ANY (SELECT 1, 2)"] {A subquery used with ANY must return exactly one column}
+check row_eq    [col0 "SELECT id FROM departments WHERE (id, name) = (3, 'Sales')"] {3}
+check row_ne    [llength [col0 "SELECT id FROM departments WHERE (id, name) <> (3, 'Sales')"]] 4
+check row_lt    [col0 "SELECT id FROM departments WHERE (id, name) < (3, 'Sales') ORDER BY id"] {1 2}
+check row_le    [col0 "SELECT id FROM departments WHERE (id, name) <= (3, 'Sales') ORDER BY id"] {1 2 3}
+check row_gt    [col0 "SELECT id FROM departments WHERE (id, name) > (3, 'Sales') ORDER BY id"] {4 5}
+check row_lex   [rows "SELECT (1, 5) < (2, 0), (2, 1) < (2, 0), (2, 0) <= (2, 0), (3, 'a') >= (3, 'b')"] {{1 0 1 0}}
+check row_in    [col0 "SELECT id FROM departments WHERE (id, name) IN ((1, 'Engineering'), (4, 'Support'), (5, 'x')) ORDER BY id"] {1 4}
+check row_notin [col0 "SELECT id FROM departments WHERE (id, name) NOT IN ((1, 'Engineering'), (4, 'Support')) ORDER BY id"] {2 3 5}
+check row_insub [col0 "SELECT id FROM departments WHERE (id, location) IN (SELECT dept, 'Berlin' FROM employees) ORDER BY id"] {1}
+check row_insub2 [col0 "SELECT id FROM departments d WHERE (id, 'x') IN (SELECT d.id, 'x' UNION SELECT 99, 'y')"] {1 2 3 4 5}
+check row_corr  [col0 "SELECT d.id FROM departments d WHERE (d.id, 1) IN (SELECT e.dept, 1 FROM employees e WHERE e.id = d.id) ORDER BY d.id"] [col0 "SELECT d.id FROM departments d WHERE EXISTS (SELECT 1 FROM employees e WHERE e.id = d.id AND e.dept = d.id) ORDER BY d.id"]
+check row_notinsub [col0 "SELECT id FROM departments WHERE (id, 1) NOT IN (SELECT dept, 1 FROM employees WHERE id = 1) ORDER BY id"] {1 2 4 5}
+check row_ROW   [col0 "SELECT id FROM departments WHERE ROW(id, name) = ROW(2, 'Design')"] {2}
+check row_size  [string match "Row values have different sizes*" [errmsg "SELECT 1 WHERE (1, 2) = (1, 2, 3)"]] 1
+check row_mixed [string match "A row value (a, b) can only be compared*" [errmsg "SELECT 1 WHERE (1, 2) = 1"]] 1
+check row_bare  [errmsg "SELECT (1, 2)"] {A row value (a, b) can only be used in a comparison or with IN}
+
+# ============================================================================
 #  Subviews (Metakit's nested tables)
 # ============================================================================
 set r [q "SELECT id, skills FROM employees WHERE id = 1"]

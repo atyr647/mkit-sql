@@ -314,6 +314,12 @@ proc ::mkitsql::rwAgg {node} {
             }
             return [lreplace $node 1 1 [rwAgg [lindex $node 1]]]
         }
+        quant {
+            if {[llength [outerSrcsAt1 [lindex $node 5]]]} {
+                fail "A subquery that refers to grouped columns is not supported; use a join or a derived table"
+            }
+            return [lreplace $node 3 3 [rwAgg [lindex $node 3]]]
+        }
         lit - slot { return $node }
     }
     return [mapChildren $node ::mkitsql::rwAgg]
@@ -443,7 +449,8 @@ proc ::mkitsql::cfLeaf {s pushable stVar} {
                 props [dict get $lay props] subs [dict get $lay subs] filter $filter]
         }
         derived {
-            set plan [dict create kind derived sub [compileQuery [dict get $s bq] {}] filter $filter]
+            set om [expr {[dict exists $s outerok] && [dict get $s outerok] ? [dict get $st outer] : {}}]
+            set plan [dict create kind derived sub [compileQuery [dict get $s bq] $om] filter $filter]
         }
         wref {
             set plan [dict create kind wref tid [dict get $s tid] filter $filter]
@@ -1049,6 +1056,28 @@ proc ::mkitsql::rt::exists {id r0 outer} {
     if {!$corr} { set ::mkitsql::subCache($id) $v }
     return $v
 }
+# v op ANY / ALL (subquery)
+proc ::mkitsql::rt::quant {id nm kind ck v r0 outer} {
+    set N $::mkitsql::N
+    set corr $::mkitsql::planCorr($id)
+    if {!$corr && [info exists ::mkitsql::subCache($id)]} {
+        set vals $::mkitsql::subCache($id)
+    } else {
+        set vals {}
+        foreach r [::mkitsql::runPlan $id [linsert $outer 0 $r0]] { lappend vals [lindex $r 0] }
+        if {!$corr} { set ::mkitsql::subCache($id) $vals }
+    }
+    set cmp ::mkitsql::rt::${nm}_$ck
+    set sawNull 0
+    foreach x $vals {
+        set c [$cmp $v $x]
+        if {$c eq $N} { set sawNull 1 ; continue }
+        if {$kind eq "any"} { if {$c} { return 1 } } else { if {!$c} { return 0 } }
+    }
+    if {$sawNull} { return $N }
+    return [expr {$kind eq "all"}]
+}
+
 proc ::mkitsql::rt::insub {id v r0 outer} {
     set N $::mkitsql::N
     if {$v eq $N} {
