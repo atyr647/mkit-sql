@@ -100,7 +100,7 @@ check nested_refused [string match "A statement cannot be run while another one 
 check nested_outer_completes [dict get $r count] 600
 check nested_after [one "SELECT COUNT(*) FROM big"] 600
 set mkitsql::progressHook {apply {{} { catch {mkitsql::run {SELECT 1} $::db} ::nestedMsg }}}
-q "SELECT COUNT(*) FROM big"
+q "SELECT COUNT(id) FROM big"
 set mkitsql::progressHook ""
 check nested_in_progress_hook [string match "A statement cannot be run*" $::nestedMsg] 1
 check nested_flag_reset [one "SELECT 1"] 1

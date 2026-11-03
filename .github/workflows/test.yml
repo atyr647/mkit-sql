@@ -93,6 +93,14 @@ jobs:
         run: |
           python3 tests/differential/dml.py --seqs 40 --steps 40 --seed 1
           MKIT_BULKMIN=1 MKIT_MEMBYTES=50 MKIT_CHUNK=3 python3 tests/differential/dml.py --seqs 30 --steps 40 --seed 2
+      - name: Pushdown, temporary files, locking (real processes; MK Studio interoperability), tclkit 8.6.3
+        run: |
+          for b in standalone studio; do MKIT_BACKEND=$b MKIT_MK4TCL=builtin $T86 tests/pushdown.tcl 400 1; done
+          MKIT_MK4TCL=builtin $T86 tests/tempsec.tcl
+          MKIT_MK4TCL=builtin $T86 tests/locking.tcl
+          MKIT_PUSHMIN=0 MKIT_MK4TCL=builtin $T86 tests/run.tcl
+          MKIT_PUSHDOWN=0 MKIT_MK4TCL=builtin $T86 tests/run.tcl
+          MKIT_TCLSH=$T86 MKIT_MK4TCL=builtin MKIT_PUSHMIN=0 python3 tests/differential/diff.py --n 3000 --seed 81
       - name: Big deletes/updates rebuild the table - same result as row by row, tclkit 8.6.3 and 8.5.17
         run: |
           MKIT_MK4TCL=builtin $T86 tests/bulkwrite.tcl 150 4
@@ -112,6 +120,11 @@ jobs:
         run: MKIT_MK4TCL=builtin $T85 tests/injection.tcl
       - name: Fuzzer, tclkit 8.5.17
         run: MKIT_MK4TCL=builtin $T85 tests/fuzz.tcl 40000 1
+      - name: Pushdown, temporary files, locking, tclkit 8.5.17
+        run: |
+          MKIT_MK4TCL=builtin $T85 tests/pushdown.tcl 300 2
+          MKIT_MK4TCL=builtin $T85 tests/tempsec.tcl
+          MKIT_MK4TCL=builtin $T85 tests/locking.tcl
       - name: Failure injection, spill round-trips, robustness, tclkit 8.5.17
         run: |
           for t in dropview spillroundtrip robustness; do MKIT_MK4TCL=builtin $T85 tests/$t.tcl; done
@@ -185,6 +198,8 @@ jobs:
         run: MKIT_MK4TCL=builtin MKSTUDIO_DIR=$PWD/mkstudio $T86 tests/studio_contract.tcl
       - name: The real MK Studio UI with mkit-sql behind it, tclkit 8.6.3, real Metakit
         run: MKIT_MK4TCL=builtin MKSTUDIO_DIR=$PWD/mkstudio xvfb-run -a $T86 tests/studio_integration.tcl
+      - name: Locking interoperates with MK Studio's own store.tcl (separate processes, both directions)
+        run: MKIT_MK4TCL=builtin MKSTUDIO_DIR=$PWD/mkstudio $T86 tests/locking.tcl
       - name: The installer and patch apply to a fresh mkstudio checkout
         run: |
           cp -r mkstudio mkstudio-fresh

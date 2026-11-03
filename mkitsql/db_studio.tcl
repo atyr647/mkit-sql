@@ -32,6 +32,28 @@ proc ::mkitsql::db::rebuildColumn {path oldName newName newType} { ::store::rebu
 proc ::mkitsql::db::parseLayout {spec} { ::store::parseLayout $spec }
 proc ::mkitsql::db::formatLayout {layout} { ::store::formatLayout $layout }
 
+# Row indices (ascending) that satisfy ALL of `conds`, decided inside Metakit (in C, ~40x faster than looking at
+# every row from Tcl).  conds = list of {exact|min|max column value}; min/max are inclusive.  The caller must pass
+# values valid for the column's type.
+proc ::mkitsql::db::select {path conds} {
+    set args {}
+    foreach c $conds { lassign $c op p v ; lappend args -$op $p $v }
+    return [mk::select $path {*}$args]
+}
+# the given rows (indices) in the order of `props`, like `rows`
+proc ::mkitsql::db::rowsAt {path props indices} {
+    set out {}
+    set np [llength $props]
+    if {$np == 0} { foreach i $indices { lappend out {} } ; return $out }
+    if {$np == 1} {
+        set p [lindex $props 0]
+        foreach i $indices { lappend out [list [mk::get $path!$i $p]] }
+        return $out
+    }
+    foreach i $indices { lappend out [mk::get $path!$i {*}$props] }
+    return $out
+}
+
 proc ::mkitsql::db::deleteRange {path first count} {
     mk::row delete $path!$first $count
     ::store::touchPath $path
@@ -40,6 +62,13 @@ proc ::mkitsql::db::clearView {path} {
     mk::view size $path 0
     ::store::touchPath $path
 }
+
+# who holds the write lock (MK Studio's own advisory lock), for a file this handle opened read-only
+proc ::mkitsql::db::lockedBy {tag} {
+    if {[llength [info commands ::store::lockedByOther]]} { return [::store::lockedByOther $tag] }
+    return ""
+}
+proc ::mkitsql::db::holdsLock {tag} { expr {![::store::readonly $tag]} }
 
 proc ::mkitsql::db::views {tag} {
     if {[llength [info commands ::store::hasLayout]]} { return [::store::views $tag] }

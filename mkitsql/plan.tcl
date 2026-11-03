@@ -28,6 +28,9 @@ namespace eval ::mkitsql {
     variable maxWorkRows 5000000
     variable chunk 2000
     variable capRows 0          ;# >0: stop scanning after this many rows (plain queries only)
+    variable pushdown 1         ;# 1 = let Metakit narrow scans with mk::select (see pushSpec)
+    variable pushMin 500        ;# ... on tables of at least this many rows
+    variable pushScans 0        ;# how many scans Metakit narrowed (for tests and EXPLAIN)
     array set plans {}
     array set subCache {}
 }
@@ -433,6 +436,99 @@ proc ::mkitsql::cfNode {t pushable stVar} {
     error "cfNode: [lindex $t 0]"
 }
 
+# ---- pushing simple conditions into Metakit -------------------------------------------------------------
+# A top-level AND conjunct of the form  column OP constant,  column BETWEEN a AND b  or  column IN (constants)  on a
+# stored number or text column can be decided inside Metakit by mk::select, so only the rows that can match are
+# read.  This only NARROWS the rows: the complete WHERE is still evaluated on every candidate, so a condition that
+# is pushed loosely (a strict < as <=, a double as a range) can never change a result.  Anything that is not
+# certain to select a superset of the true matches is left to the normal filter.
+# Returns {conds in} : conds = {{exact|min|max column value}...}, in = {} or {column {conds-per-value...}}.
+proc ::mkitsql::pushSpec {s id conjuncts} {
+    variable pushdown
+    if {!$pushdown} { return {} }
+    set cols [dict create]
+    foreach c [dict get $s cols] {
+        lassign $c n t l isSub
+        if {!$isSub} { dict set cols [string tolower $n] [list $n $l] }
+    }
+    set conds {} ; set in {}
+    foreach c $conjuncts {
+        switch -- [lindex $c 0] {
+            bin {
+                lassign $c _ op a b
+                if {$op ni {= < <= > >=}} continue
+                if {[lindex $a 0] eq "ref" && [lindex $b 0] eq "lit"} {
+                    set col $a ; set k $b
+                } elseif {[lindex $b 0] eq "ref" && [lindex $a 0] eq "lit"} {
+                    set col $b ; set k $a ; set op [string map {< > > < <= >= >= <=} $op]
+                } else continue
+                set r [pushOne $cols $id $col $op $k]
+                if {[llength $r]} { lappend conds {*}$r }
+            }
+            between {
+                lassign $c _ e lo hi neg
+                if {$neg || [lindex $e 0] ne "ref" || [lindex $lo 0] ne "lit" || [lindex $hi 0] ne "lit"} continue
+                set r1 [pushOne $cols $id $e >= $lo] ; set r2 [pushOne $cols $id $e <= $hi]
+                if {[llength $r1] && [llength $r2]} { lappend conds {*}$r1 {*}$r2 }
+            }
+            in {
+                lassign $c _ e items neg
+                if {$neg || [llength $in] || [lindex $e 0] ne "ref" || ![llength $items] || [llength $items] > 64} continue
+                set per {} ; set okAll 1
+                foreach it $items {
+                    if {[lindex $it 0] ne "lit"} { set okAll 0 ; break }
+                    set r [pushOne $cols $id $e = $it]
+                    if {![llength $r]} { set okAll 0 ; break }
+                    lappend per $r
+                }
+                if {$okAll} { set in [list [lindex $e 3] $per] }
+            }
+        }
+    }
+    if {![llength $conds] && ![llength $in]} { return {} }
+    # equalities narrow most, so Metakit should apply them first
+    set conds [lsort -index 0 $conds]
+    return [list $conds $in]
+}
+# one comparison  column OP literal  ->  list of {kind column value} conditions, or {} when it cannot be pushed safely
+proc ::mkitsql::pushOne {cols id ref op k} {
+    lassign $ref _ lvl src name rty
+    if {$lvl != 0 || $src != $id} { return {} }
+    set key [string tolower $name]
+    if {![dict exists $cols $key]} { return {} }
+    lassign [dict get $cols $key] cname letter
+    lassign $k _ kt kv
+    if {$kt eq "null"} { return {} }
+    switch -- $letter {
+        I - L {
+            if {$kt eq "int"} { set x $kv } elseif {$kt eq "real" && [string is double -strict $kv] && $kv == int($kv) && abs($kv) < 9e15} { set x [expr {int($kv)}] } else { return {} }
+            if {![string is wideinteger -strict $x]} { return {} }
+            if {$letter eq "I" && ($x < -2147483647 || $x > 2147483646)} { return {} }
+            if {$letter eq "L" && ($x < -9223372036854775806 || $x > 9223372036854775806)} { return {} }
+            switch -- $op {
+                =  { return [list [list exact $cname $x]] }
+                >= { return [list [list min $cname $x]] }
+                >  { return [list [list min $cname [expr {$x + 1}]]] }
+                <= { return [list [list max $cname $x]] }
+                <  { return [list [list max $cname [expr {$x - 1}]]] }
+            }
+        }
+        D {
+            if {$kt ni {int real} || ![string is double -strict $kv] || abs($kv) > 1e300} { return {} }
+            switch -- $op {
+                =  { return [list [list min $cname $kv] [list max $cname $kv]] }   ;# -exact compares the text of a double
+                >= - > { return [list [list min $cname $kv]] }
+                <= - < { return [list [list max $cname $kv]] }
+            }
+        }
+        S {
+            if {$op ne "=" || $kt ni {text datetime}} { return {} }
+            return [list [list exact $cname $kv]]
+        }
+    }
+    return {}
+}
+
 proc ::mkitsql::cfLeaf {s pushable stVar {latmap {}}} {
     upvar 1 $stVar st
     variable curCol
@@ -441,7 +537,7 @@ proc ::mkitsql::cfLeaf {s pushable stVar {latmap {}}} {
     set map {} ; set i 0
     foreach n [dict get $lay names] { dict set map $id,$n $i ; incr i }
     set width $i
-    set filter "" ; set lookup {} ; set sfilter "" ; set dfilter ""
+    set filter "" ; set lookup {} ; set sfilter "" ; set dfilter "" ; set push {}
     if {$pushable} {
         set own [takePool st [list $id]]
         if {[dict get $s kind] eq "table"} {
@@ -474,13 +570,14 @@ proc ::mkitsql::cfLeaf {s pushable stVar {latmap {}}} {
         foreach c $own { if {[hasOuterRef $c]} { lappend dyn $c } else { lappend stat $c } }
         set sfilter [compileFilter $stat $map [dict get $st outer]]
         set dfilter [compileFilter $dyn $map [dict get $st outer]]
+        if {[dict get $s kind] eq "table"} { set push [pushSpec $s $id $stat] }
     }
     if {!$pushable} { set sfilter "" ; set dfilter "" }
     switch -- [dict get $s kind] {
         table {
             variable scanSeq
             set plan [dict create kind scan path [dict get $s path] props [dict get $lay props] dcols [dict get $lay dcols] \
-                subs [dict get $lay subs] filter $filter sfilter $sfilter dfilter $dfilter lookup $lookup sid [incr scanSeq]]
+                subs [dict get $lay subs] filter $filter sfilter $sfilter dfilter $dfilter lookup $lookup push $push sid [incr scanSeq]]
         }
         lateral {
             if {[dict exists $s plevel]} {
@@ -715,4 +812,118 @@ proc ::mkitsql::rt::insub {id v r0 outer} {
         dict for {k _} $set { if {[string is double -strict $k] && $k == $v} { return 1 } }
     }
     return [expr {$hasNull ? $N : 0}]
+}
+
+# ============================================================================
+#  EXPLAIN: describe how a compiled query runs
+# ============================================================================
+proc ::mkitsql::execExplain {q} {
+    variable plans
+    set bq [bindQuery $q]
+    set id [compileQuery $bq {}]
+    set lines [explainPlan $id 0]
+    set rows {}
+    foreach l $lines { lappend rows [list $l] }
+    return [rowset {plan} {""} $rows]
+}
+proc ::mkitsql::explainPlan {id depth} {
+    variable plans ; variable pushMin
+    set p $plans($id) ; set ind [string repeat "  " $depth] ; set out {}
+    switch -- [dict get $p kind] {
+        select {
+            set src [dict get $p src]
+            set what "SELECT"
+            if {[dict get $p distinct]} { append what " DISTINCT" }
+            lappend out "$ind$what"
+            set i2 "$ind  "
+            if {[dict exists $p limit] && [dict get $p limit] ne ""} {}
+            # the order the stages run in: source, filter, aggregate, windows, project, distinct, sort, limit
+            lappend out "${i2}source:"
+            lappend out {*}[explainSource $src [expr {$depth + 2}]]
+            if {[dict get $p where] ne ""} { lappend out "${i2}FILTER on rows that survive the joins (WHERE conditions that span several tables)" }
+            if {[dict exists $p agg]} {
+                set a [dict get $p agg] ; set specs [dict get $a specs]
+                set countAll [expr {[dict get $p where] eq "" && [dict get $a ng] == 0 && [llength $specs] == 1 && [lindex $specs 0 0] eq "cstar" \
+                    && [dict get $src kind] eq "scan" && [dict get $src filter] eq "" && [dict get $src lookup] eq ""}]
+                if {$countAll} {
+                    lappend out "${i2}COUNT(*) answered from the row count: no rows are read"
+                } else {
+                    set nd 0 ; foreach s $specs { if {[lindex $s 1] && [lindex $s 0] in {count sum avg string_agg}} { incr nd } }
+                    set txt "AGGREGATE: [expr {[dict get $a ng] ? "[dict get $a ng] group column(s), hash table" : "one group"}], [llength $specs] function(s)"
+                    if {$nd} { append txt "; $nd DISTINCT aggregate(s) de-duplicate in separate spill-capable branches" }
+                    lappend out "$i2$txt (spills to disk beyond ::mkitsql::memBytes)"
+                }
+                if {[dict exists $p having]} { lappend out "${i2}HAVING filter" }
+            }
+            if {[dict exists $p windows]} { lappend out "${i2}WINDOW: [llength [dict get $p windows]] function(s), one sorted pass per window when the input exceeds the budget" }
+            if {[dict get $p distinct]} { lappend out "${i2}DISTINCT: streaming hash set, spills to disk beyond the budget" }
+            if {[llength [dict get $p order]]} { lappend out "${i2}SORT on [llength [dict get $p order]] key(s): top-N heap when LIMIT is small, else external merge sort" }
+            if {[dict get $p limit] ne "" || ([dict get $p offset] ne "" && [dict get $p offset] > 0)} {
+                lappend out "${i2}LIMIT [dict get $p limit] OFFSET [expr {[dict get $p offset] eq "" ? 0 : [dict get $p offset]}]"
+            }
+        }
+        values { lappend out "${ind}VALUES ([llength [dict get $p procs]] row(s))" }
+        setop {
+            lappend out "${ind}[string toupper [dict get $p op]][expr {[dict get $p all] ? { ALL} : {}}]: sorted comparison of the two inputs, spills to disk beyond the budget"
+            lappend out {*}[explainPlan [dict get $p left] [expr {$depth + 1}]]
+            lappend out {*}[explainPlan [dict get $p right] [expr {$depth + 1}]]
+        }
+        recursive {
+            lappend out "${ind}RECURSIVE CTE ([expr {[dict get $p all] ? {UNION ALL} : {UNION}}]): the anchor, then the recursive step repeated until it adds no rows"
+            lappend out "$ind  anchor:" ; lappend out {*}[explainPlan [dict get $p anchor] [expr {$depth + 2}]]
+            lappend out "$ind  step:" ; lappend out {*}[explainPlan [dict get $p step] [expr {$depth + 2}]]
+        }
+        query {
+            set txt "QUERY"
+            if {[llength [dict get $p order]]} { append txt ", ORDER BY [llength [dict get $p order]] key(s)" }
+            if {[dict get $p limit] ne ""} { append txt ", LIMIT [dict get $p limit]" }
+            lappend out "$ind$txt"
+            lappend out {*}[explainPlan [dict get $p body] [expr {$depth + 1}]]
+        }
+    }
+    return $out
+}
+proc ::mkitsql::explainSource {n depth} {
+    variable pushMin
+    set ind [string repeat "  " $depth] ; set out {}
+    switch -- [dict get $n kind] {
+        scan {
+            set path [dict get $n path]
+            set rows [expr {[catch {::mkitsql::db::size $path} sz] ? "?" : $sz}]
+            set txt "SCAN $path ($rows rows)"
+            set push [expr {[dict exists $n push] ? [dict get $n push] : ""}]
+            if {[dict exists $n lookup] && [dict get $n lookup] ne ""} {
+                append txt " - HASH LOOKUP on the join key (built once per statement)"
+            } elseif {$push ne ""} {
+                lassign $push conds in
+                set parts {}
+                foreach c $conds { lappend parts "[lindex $c 0] [lindex $c 1] [lindex $c 2]" }
+                if {$in ne ""} { lappend parts "[lindex $in 0] IN ([llength [lindex $in 1]] values)" }
+                append txt " - METAKIT-SIDE NARROWING ([join $parts {, }])"
+                if {$rows ne "?" && $rows < $pushMin} { append txt " (not used below $pushMin rows)" }
+            } elseif {[dict get $n filter] ne ""} {
+                append txt " - full scan, every row tested"
+            } else { append txt " - full scan" }
+            if {[dict get $n filter] ne "" && $push ne ""} { append txt "; remaining conditions tested on the candidates" }
+            lappend out "$ind$txt"
+        }
+        join {
+            set type [string toupper [dict get $n type]]
+            if {[dict get $n lateral]} {
+                lappend out "${ind}$type JOIN LATERAL: the right side runs once per left row"
+            } elseif {[dict get $n lkey] ne ""} {
+                lappend out "${ind}$type JOIN: equality join - hash join, or sort-merge join when the right side exceeds the memory budget"
+            } else {
+                lappend out "${ind}$type JOIN: no equality key - nested loop over a spooled right side"
+            }
+            if {[dict get $n resid] ne ""} { lappend out "$ind  with an extra join condition tested per pair" }
+            lappend out "$ind  left:" ; lappend out {*}[explainSource [dict get $n left] [expr {$depth + 2}]]
+            lappend out "$ind  right:" ; lappend out {*}[explainSource [dict get $n right] [expr {$depth + 2}]]
+        }
+        lateral - lateralouter { lappend out "${ind}SUBVIEW [dict get $n sub] of each row" }
+        derived - latderived { lappend out "${ind}SUBQUERY:" ; lappend out {*}[explainPlan [dict get $n sub] [expr {$depth + 1}]] }
+        wref { lappend out "${ind}CTE result (computed once)" }
+        info { lappend out "${ind}information_schema.[dict get $n which]" }
+    }
+    return $out
 }

@@ -1315,6 +1315,15 @@ proc ::mkitsql::parse {tokens text} {
     }
     switch -- $w {
         SELECT - WITH - VALUES - ( { set ast [list select [parseQuery]] }
+        EXPLAIN {
+            # EXPLAIN [QUERY PLAN] <query>: how the query would run (nothing is executed)
+            advance
+            set n [peek]
+            if {$n ne "" && [string toupper [lindex $n 1]] eq "QUERY"} { advance ; set n [peek] ; if {$n ne "" && [string toupper [lindex $n 1]] eq "PLAN"} { advance } }
+            set n [peek]
+            if {$n eq "" || !([string toupper [lindex $n 1]] in {SELECT WITH VALUES (})} { err "EXPLAIN takes a query (SELECT, WITH or VALUES)" $n }
+            set ast [list explain [parseQuery]]
+        }
         INSERT   { set ast [parseInsert] }
         UPDATE   { set ast [parseUpdate] }
         DELETE   { set ast [parseDelete] }

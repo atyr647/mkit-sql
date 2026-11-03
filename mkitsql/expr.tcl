@@ -169,6 +169,10 @@ proc ::mkitsql::rt::inlist {v list kind hasNull} {
     if {$v eq "\uFDD0NULL"} { return $v }
     switch -- $kind {
         n { set hit [expr {[lsearch -exact -real $list $v] >= 0}] }
+        i {
+            # whole numbers are canonical decimal text (a 32-bit lsearch -integer would not do on Tcl 8.5)
+            set hit [expr {[lsearch -exact -ascii $list $v] >= 0}]
+        }
         default { set hit [expr {[lsearch -exact -ascii $list $v] >= 0}] }
     }
     if {$hit} { return 1 }
@@ -723,15 +727,18 @@ proc ::mkitsql::cgIn {node ctx} {
     foreach it $items { if {[lindex $it 0] ne "lit"} { set allLit 0 } }
     if {$allLit} {
         set vals {} ; set hasNull 0 ; set kind s
-        set anyText 0 ; set anyNum 0
+        set anyText 0 ; set anyNum 0 ; set anyReal 0
         foreach it $items {
             lassign $it _ ty v
             if {$ty eq "null"} { set hasNull 1 ; continue }
             lappend vals $v
             if {[isNumType $ty]} { set anyNum 1 } else { set anyText 1 }
+            if {$ty eq "real"} { set anyReal 1 }
         }
         if {[isNumType $ta] && !$anyText} { set kind n }
-        if {$kind eq "n" || ([isNumType $ta] == 0 && !$anyNum)} {
+        # whole numbers compare as whole numbers: as doubles, 9223372036854775806 and ...807 are the same
+        if {$kind eq "n" && $ta in {int bool} && !$anyReal} { set kind i }
+        if {$kind in {n i} || ([isNumType $ta] == 0 && !$anyNum)} {
             set code "\[::mkitsql::rt::inlist $wa [list $vals] $kind $hasNull\]"
             if {$neg} { set code "\[::mkitsql::rt::not $code\]" }
             return [list $code bool]

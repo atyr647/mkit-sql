@@ -17,6 +17,10 @@
 # Written for Tcl 8.5 and 8.6.
 
 namespace eval ::mkitsql::db {
+    variable lockOwned       ;# tag -> {lockfile content} of the lock this process holds
+    variable lockedBy        ;# tag -> "pid host" of a live writer, for files opened read-only
+    variable requireLock 0   ;# 1 = opening for writing fails when no lock file can be created (read-only folder)
+    array set lockOwned {} ; array set lockedBy {}
     variable tags {}         ;# open tags, in open order
     variable file            ;# tag -> absolute path
     variable ro              ;# tag -> read-only flag
@@ -43,9 +47,87 @@ proc ::mkitsql::db::dirty {tag}    { variable dirty ; return $dirty($tag) }
 proc ::mkitsql::db::touch {tag}    { variable dirty ; incr dirty($tag) }
 proc ::mkitsql::db::touchPath {path} { touch [lindex [split $path .!] 0] }
 
+# ---- advisory write lock ----------------------------------------------------------------------
+# Metakit does no locking: a process reading a file while another commits can see a half-written
+# state, and two writers overwrite each other.  Exactly as MK Studio does, a file opened for writing
+# gets "<file>.lock" holding "pid host start" (MK Studio reads the first two fields), created
+# exclusively; a lock whose process is gone is stale and is taken over; programs that do not know
+# the protocol ignore it.  Files opened -readonly take no lock (they just note who holds one).
+#
+# Beyond MK Studio's version: taking over a stale lock is serialised through "<file>.lock.takeover" so
+# two processes finding the same stale lock cannot both win, a recycled pid is recognised by the process
+# start time (Linux), and closing never deletes a lock that is no longer ours.
+proc ::mkitsql::db::lockPath {path} { return $path.lock }
+proc ::mkitsql::db::thisHost {} { if {[catch {info hostname} h]} { return unknown } ; return $h }
+# a token that changes when a pid is reused (field 22 of /proc/<pid>/stat), "" where unavailable
+proc ::mkitsql::db::procStart {pid} {
+    if {[catch {set h [open /proc/$pid/stat r] ; set d [read $h] ; close $h}]} { return "" }
+    set rest [string range $d [expr {[string last ")" $d] + 2}] end]
+    return [lindex $rest 19]
+}
+proc ::mkitsql::db::lockContent {} { return "[pid] [thisHost] [procStart [pid]]" }
+# "pid host" of a live foreign holder, or "" when the file is unlocked or the lock is stale / ours
+proc ::mkitsql::db::lockHolder {path} {
+    set lf [lockPath $path]
+    if {[catch {set h [open $lf r] ; set d [string trim [read $h]] ; close $h}]} { return "" }
+    lassign [split $d " "] pid host start
+    if {![string is integer -strict $pid] || $host eq ""} {
+        # unreadable: perhaps its owner is between creating and writing it; stale only once it is old
+        if {[catch {file mtime $lf} mt] || [clock seconds] - $mt > 10} { return "" }
+        return "0 unknown"
+    }
+    if {$pid == [pid] && $host eq [thisHost]} { return "" }
+    if {$host eq [thisHost]} {
+        if {![::mkitsql::pidAlive $pid]} { return "" }
+        if {$start ne "" && [procStart $pid] ne "" && [procStart $pid] ne $start} { return "" }      ;# pid was reused
+        return "$pid $host"
+    }
+    return "$pid $host"           ;# another machine (network share): cannot tell, so respect it
+}
+proc ::mkitsql::db::lockedError {holder path} {
+    lassign $holder hpid hhost
+    return -code error -errorcode [list MKIT LOCKED $hpid $hhost] \
+        "This database is open for editing in another process (pid $hpid on $hhost):\n$path"
+}
+# Returns the lock content that was written, "" when no lock could be made (read-only folder) or raises
+# MKIT LOCKED when a live process holds it.
+proc ::mkitsql::db::takeLock {path} {
+    set lf [lockPath $path] ; set mine [lockContent]
+    for {set attempt 0} {$attempt < 5} {incr attempt} {
+        if {![catch {open $lf {WRONLY CREAT EXCL} 0644} h]} { puts -nonewline $h $mine ; close $h ; return $mine }
+        if {![file exists $lf]} { return "" }                                        ;# could not create it for another reason
+        set holder [lockHolder $path]
+        if {$holder ne ""} { return [lockedError $holder $path] }
+        # stale: remove it under a short-lived mutex, re-checking inside, so a competitor that is doing the
+        # same thing cannot delete the lock we (or it) just created
+        set mx $lf.takeover
+        if {![catch {open $mx {WRONLY CREAT EXCL} 0644} mh]} {
+            close $mh
+            if {[lockHolder $path] eq ""} {
+                catch {file delete $lf}
+                set rc [catch {open $lf {WRONLY CREAT EXCL} 0644} h]
+                catch {file delete $mx}
+                if {!$rc} { puts -nonewline $h $mine ; close $h ; return $mine }
+            } else { catch {file delete $mx} }
+        } elseif {![catch {file mtime $mx} mt] && [clock seconds] - $mt > 30} {
+            catch {file delete $mx}                                                   ;# a crashed takeover
+        }
+    }
+    return -code error -errorcode [list MKIT LOCKED 0 unknown] "Could not take the lock on this database (another process is starting at the same moment), please repeat:\n$path"
+}
+# Release our lock - only if the file still holds OUR content.
+proc ::mkitsql::db::releaseLock {path mine} {
+    set lf [lockPath $path]
+    if {![catch {set h [open $lf r] ; set d [read $h] ; close $h}] && $d eq $mine} { catch {file delete $lf} }
+}
+# Who blocks writing to this file?  "pid host" of the live writer a read-only handle noticed, else "".
+proc ::mkitsql::db::lockedBy {tag} { variable lockedBy ; if {[info exists lockedBy($tag)]} { return $lockedBy($tag) } ; return "" }
+# Does this handle hold the write lock?  (0 when it is read-only or the folder did not allow a lock file)
+proc ::mkitsql::db::holdsLock {tag} { variable lockOwned ; return [info exists lockOwned($tag)] }
+
 # Open (or with -create, create) a datafile; returns its tag.  Options: -create -readonly
 proc ::mkitsql::db::openFile {path args} {
-    variable tags ; variable file ; variable ro ; variable dirty
+    variable tags ; variable file ; variable ro ; variable dirty ; variable lockOwned ; variable lockedBy ; variable requireLock
     set create 0 ; set readonly 0
     foreach a $args {
         switch -- $a { -create {set create 1} -readonly {set readonly 1} default { error "unknown option $a" } }
@@ -53,19 +135,35 @@ proc ::mkitsql::db::openFile {path args} {
     set path [::file normalize $path]
     foreach t $tags { if {$file($t) eq $path} { error "File is already open as '$t'." } }
     if {!$create && ![::file exists $path]} { error "File not found: $path" }
+    set mine ""
+    if {!$readonly} {
+        set mine [takeLock $path]                       ;# before opening, so a refusal touches nothing
+        if {$mine eq "" && $requireLock} { error "Cannot create the lock file for $path (is the folder writable?)" }
+    }
     set tag [makeTag $path]
     set opts {-nocommit}
     if {$readonly} { lappend opts -readonly }
     if {[catch {mk::file open $tag $path {*}$opts}]} {
         # a very old Mk4tcl without -nocommit
-        mk::file open $tag $path {*}[expr {$readonly ? {-readonly} : {}}]
+        if {[catch {mk::file open $tag $path {*}[expr {$readonly ? {-readonly} : {}}]} err]} {
+            if {$mine ne ""} { releaseLock $path $mine }
+            error $err
+        }
     }
     lappend tags $tag
     set file($tag) $path ; set ro($tag) $readonly ; set dirty($tag) 0
+    if {$readonly} {
+        set h [lockHolder $path]
+        if {$h ne ""} { set lockedBy($tag) $h }
+    } elseif {$mine ne ""} {
+        set lockOwned($tag) $mine
+    }
     return $tag
 }
 proc ::mkitsql::db::closeFile {tag} {
-    variable tags ; variable file ; variable ro ; variable dirty
+    variable tags ; variable file ; variable ro ; variable dirty ; variable lockOwned ; variable lockedBy
+    if {[info exists lockOwned($tag)]} { releaseLock $file($tag) $lockOwned($tag) ; unset lockOwned($tag) }
+    unset -nocomplain lockedBy($tag)
     catch {mk::file close $tag}
     set i [lsearch -exact $tags $tag]
     if {$i >= 0} { set tags [lreplace $tags $i $i] }
@@ -144,6 +242,28 @@ proc ::mkitsql::db::rows {path props first count} {
             lappend out [mk::get $path!$i {*}$props]
         }
     }
+    return $out
+}
+
+# Row indices (ascending) that satisfy ALL of `conds`, decided inside Metakit (in C, ~40x faster than looking at
+# every row from Tcl).  conds = list of {exact|min|max column value}; min/max are inclusive.  The caller must pass
+# values valid for the column's type.
+proc ::mkitsql::db::select {path conds} {
+    set args {}
+    foreach c $conds { lassign $c op p v ; lappend args -$op $p $v }
+    return [mk::select $path {*}$args]
+}
+# the given rows (indices) in the order of `props`, like `rows`
+proc ::mkitsql::db::rowsAt {path props indices} {
+    set out {}
+    set np [llength $props]
+    if {$np == 0} { foreach i $indices { lappend out {} } ; return $out }
+    if {$np == 1} {
+        set p [lindex $props 0]
+        foreach i $indices { lappend out [list [mk::get $path!$i $p]] }
+        return $out
+    }
+    foreach i $indices { lappend out [mk::get $path!$i {*}$props] }
     return $out
 }
 

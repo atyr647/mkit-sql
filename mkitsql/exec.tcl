@@ -160,16 +160,28 @@ proc ::mkitsql::selectStream {p outer sink ids} {
         set flushes [linsert $flushes 0 [list ::mkitsql::winFlush $wi $outer $head]]
         set head [list ::mkitsql::winAdd $wi]
     }
+    set w [dict get $p where]
+    set countAll ""
     if {[dict exists $p agg]} {
         if {[dict exists $p having]} { set head [list ::mkitsql::stFilter [dict get $p having] $outer $head] }
-        set ai [aggNew [dict get $p agg]] ; lappend ids2 $ai
-        set flushes [linsert $flushes 0 [list ::mkitsql::aggFlush $ai $outer $head]]
-        set head [list ::mkitsql::aggAdd $ai $outer]
+        # SELECT COUNT(*) FROM table  with nothing else to decide: Metakit knows the row count
+        set a [dict get $p agg] ; set src [dict get $p src]
+        if {$w eq "" && [dict get $a ng] == 0 && [llength [dict get $a specs]] == 1 && [lindex [dict get $a specs] 0 0] eq "cstar" \
+                && [dict get $src kind] eq "scan" && [dict get $src filter] eq "" && [dict get $src lookup] eq ""} {
+            set countAll [::mkitsql::db::size [dict get $src path]]
+        } else {
+            set ai [aggNew $a] ; lappend ids2 $ai
+            set flushes [linsert $flushes 0 [list ::mkitsql::aggFlush $ai $outer $head]]
+            set head [list ::mkitsql::aggAdd $ai $outer]
+        }
     }
-    set w [dict get $p where]
     if {$w ne ""} { set head [list ::mkitsql::stFilter $w $outer $head] }
 
-    set stopped [srcStream [dict get $p src] $outer $head]
+    if {$countAll ne ""} {
+        set stopped [emit $head [list [list $countAll]]]
+    } else {
+        set stopped [srcStream [dict get $p src] $outer $head]
+    }
     if {!$stopped} {
         foreach f $flushes { if {[{*}$f]} break }
     }
@@ -318,6 +330,13 @@ proc ::mkitsql::scanPlain {path node outer filter sink} {
     variable chunk ; variable progressHook ; variable cancel ; variable M
     set props [dict get $node props] ; set subs [dict get $node subs] ; set dcols [dict get $node dcols]
     set n [::mkitsql::db::size $path]
+    # Conditions Metakit can decide itself (see pushSpec): it returns the candidate rows, and only those are read.
+    # The complete filter below still runs on them.  Any trouble with the shortcut falls back to the full scan.
+    variable pushMin
+    set push [expr {[dict exists $node push] ? [dict get $node push] : ""}]
+    if {$push ne "" && $n >= $pushMin && ![catch {pushCandidates $path $push} cand]} {
+        return [scanCandidates $path $node $outer $filter $sink $cand]
+    }
     for {set first 0} {$first < $n} {incr first $chunk} {
         if {$cancel} { fail "Cancelled" }
         if {$progressHook ne ""} { {*}$progressHook }
@@ -340,6 +359,38 @@ proc ::mkitsql::scanPlain {path node outer filter sink} {
                 incr i
                 if {[$filter $r $outer] eq "1"} { lappend out $r }
             }
+        }
+        if {[llength $out] && [emit $sink $out]} { return 1 }
+    }
+    return 0
+}
+
+# row indices (ascending) that can match the pushed conditions
+proc ::mkitsql::pushCandidates {path push} {
+    lassign $push conds in
+    if {$in eq ""} { return [::mkitsql::db::select $path $conds] }
+    set all {}
+    foreach pc [lindex $in 1] { lappend all {*}[::mkitsql::db::select $path [concat $pc $conds]] }
+    return [lsort -integer -unique $all]
+}
+# the same pipeline as scanPlain, over a list of candidate row indices
+proc ::mkitsql::scanCandidates {path node outer filter sink cand} {
+    variable chunk ; variable progressHook ; variable cancel ; variable M ; variable pushScans
+    incr pushScans
+    set props [dict get $node props] ; set subs [dict get $node subs] ; set dcols [dict get $node dcols]
+    set total [llength $cand]
+    for {set k 0} {$k < $total} {incr k $chunk} {
+        if {$cancel} { fail "Cancelled" }
+        if {$progressHook ne ""} { {*}$progressHook }
+        set idxs [lrange $cand $k [expr {$k + $chunk - 1}]]
+        set data [::mkitsql::db::rowsAt $path $props $idxs]
+        if {[string first $M $data] >= 0} { set data [cleanRows $data] }
+        if {[llength $dcols] && [string first -0 $data] >= 0} { set data [fixNegZero $data $dcols] }
+        set out {}
+        foreach r $data i $idxs {
+            foreach sp $subs { lappend r [::mkitsql::db::subSize $path $i $sp] }
+            lappend r $path!$i
+            if {$filter eq "" || [$filter $r $outer] eq "1"} { lappend out $r }
         }
         if {[llength $out] && [emit $sink $out]} { return 1 }
     }

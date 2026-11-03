@@ -290,6 +290,74 @@ package require mkitsql                                   ;# standalone: loads M
 set db [::mkitsql::db::openFile game.mk -create]
 ```
 
+## Query planning, `EXPLAIN` and indexes
+
+`EXPLAIN [QUERY PLAN] <query>` shows how a query would run and runs nothing: the scans, which conditions Metakit
+decides itself, the join method (hash join / sort-merge / nested loop), and the aggregate, sort and limit stages.
+
+```sql
+EXPLAIN SELECT name FROM employees WHERE id = 5;
+--   SCAN demo.employees (20 rows) - METAKIT-SIDE NARROWING (exact id 5); remaining conditions tested on the candidates
+```
+
+What the planner does:
+
+* **Metakit-side narrowing.** Top-level `AND` conditions of the form `column = / < / <= / > / >= constant`,
+  `BETWEEN`, and `IN (constants)` on number and text columns are handed to Metakit's own `mk::select`, which tests the
+  column in C. Only the rows that can match are read, and the complete `WHERE` is still evaluated on them, so this can
+  only ever skip rows that cannot match. Applies to tables of at least `::mkitsql::pushMin` (500) rows, and to
+  `UPDATE` / `DELETE` too. On a table of 1,000,000 rows `WHERE id = 777777` takes 0.1 s instead of 3.8 s; a range
+  takes about 0.6 s. (`::mkitsql::pushdown 0` turns it off.)
+* **`COUNT(*)` of a whole table** is the row count: 1 ms instead of 1.5 s on 1,000,000 rows.
+* **Equality joins** are hash joins (sort-merge when the build side exceeds the memory budget); a correlated
+  subquery's `inner.col = outer expression` becomes a hash lookup built once per statement; conditions are pushed
+  below joins (never across the nullable side of an outer join).
+
+**There are no persistent secondary indexes** (`CREATE INDEX` is refused). Mk4tcl has no hash or ordered view
+that could serve as one, so an index would have to be an ordinary view that *every* program writing the file keeps in
+step, and MK Studio (and any other Metakit tool) edits tables directly. An index that goes stale is worse than a
+slow query: it returns wrong rows silently, and a stale entry cannot be detected when a row is changed in place.
+The honest options are to maintain such an index inside the shared storage layer that all writers use, or not to have
+one; for now a lookup is a scan, but a scan done inside Metakit.
+
+## Concurrency, locking and transactions
+
+Metakit has no locking of its own. What mkit-sql guarantees, and what it does not:
+
+* **One writer per file.** Opening a file for writing creates `<file>.lock` (`pid host start`) exclusively. This is
+  the same protocol MK Studio uses, so the two exclude each other (`tests/locking.tcl` checks both directions with real
+  processes). A second writer is refused with `-errorcode {MKIT LOCKED pid host}`. A lock whose process died is stale
+  and is taken over, a recycled process id is recognised by the process start time (Linux), taking over is serialised so
+  two processes cannot both win, closing never removes a lock that is no longer ours, and a lock from another machine
+  (a network share) is always respected. If the folder is read-only no lock can be made and the file opens unlocked;
+  `::mkitsql::db::requireLock 1` turns that into an error.
+* **Readers are not locked.** `openFile -readonly` always works, notes who holds the write lock
+  (`::mkitsql::db::lockedBy`), and write statements on it say so. A reader that is open while a writer commits can see a
+  half-written state: that is Metakit, not something advisory locks can fix. Keep readers short, or have the writing
+  process serve the reads.
+* **Inside one process statements are serial.** A statement cannot be started while another is running (it fails with a
+  clear error instead of corrupting the first), so a single-threaded server must finish a statement before the next
+  starts and must not run queries from a `stream` callback or progress hook.
+* **Transactions belong to the database, not to a connection.** `BEGIN`/`COMMIT`/`ROLLBACK` act on all pending changes
+  of the database. A server that shares one database between clients sets `::mkitsql::session` to the client's id around
+  each statement: the first session to write owns the open transaction until it commits or rolls back, and other
+  sessions get `Database 'x' has uncommitted changes from another session (alice)` instead of silently joining it.
+  Reads are not blocked and see uncommitted changes (read uncommitted).
+* A server that exposes the engine should keep **one process as the only opener of the file** and put the network in
+  front of that process; the lock keeps everything else out.
+
+## Temporary files
+
+Statements that exceed `::mkitsql::memBytes` spill to disk. Spill files live in a **private folder** this process creates
+inside `::mkitsql::tempDir` (default: `TMPDIR`, `TEMP`, `TMP`, `/tmp`): `mkitsql-<user>-<pid>-<16 random hex digits>`,
+mode 0700, checked to be a real folder owned by the caller, with every file created exclusively (`O_EXCL`, so an existing
+file or symbolic link is never opened) with mode 0600. The folder is removed at the end of every statement, whether it
+succeeded, failed or was cancelled. Folders and `mkitsql_<pid>_<n>.spill` files left by a crashed run are removed by the
+next run (`::mkitsql::cleanTemp`): only those that belong to the caller, are real folders / files (never links) holding
+nothing but spill files, and whose process is gone (or are older than `::mkitsql::staleHours`, 24). Two users sharing a
+machine, or a process planting links in `/tmp`, cannot read, overwrite or redirect another user's spill files
+(`tests/tempsec.tcl`). Unusable folders and full disks are reported as errors that say what to set.
+
 ## Running statements
 
 A statement keeps its plans and working state in the engine, so **one statement cannot be started while another is

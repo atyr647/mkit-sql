@@ -43,8 +43,12 @@ set boundaries [list \
     [list exec.tcl    {(^|\[)eval }          1 "runs a command prefix that the executor itself assembled (no SQL text)"] \
     [list bind.tcl    {(^|[\[ \{])uplevel }  2 "withScopes / lmap2 run a script literal written in this file"] \
     [list expr.tcl    {^\s*proc [^ \{]*\$}   4 "defstrict (names from this file) and the three cx::pN procs, verified by verify.tcl"] \
+    [list db.tcl      {catch \{open }          3 "lock files, created exclusively (O_EXCL) - the same protocol as MK Studio"] \
+    [list db.tcl      {(^|\[)open }            3 "reads: the lock file, /proc/<pid>/stat"] \
+    [list spill.tcl   {(^|\[)open }            1 "reads /dev/urandom for the private folder's random name"] \
     [list spill.tcl   {catch \{open }          2 "the spill file path is built by spillNewPath from the temp dir + a counter"] \
     [list mkitsql.tcl {(^|[\[ \{])source -}  3 "loads this package's own files (core, and one of the two storage layers)"] \
+    [list spill.tcl   {catch \{exec }          2 "process-liveness probe (kill -0 / tasklist) with a pid already checked to be a positive integer"] \
     [list stmt.tcl    {(^|\[)rename }        1 "deletes the generated cx::pN procs"] \
     [list pkgIndex.tcl {(^|[\[ \{])source -}  1 "package index: loads mkitsql.tcl"]]
 # any other dynamic-code or process command anywhere in mkitsql/ is a lint failure

@@ -39,7 +39,7 @@ These are gaps, not bugs; each is rejected with a clear message rather than sile
 | Missing | Why / what happens instead |
 | --- | --- |
 | **Persistent constraints**: `PRIMARY KEY`, `UNIQUE`, `FOREIGN KEY`, `CHECK`, `NOT NULL`, `DEFAULT` | Metakit stores none. The statement is refused (opt in to `::mkitsql::ignoreConstraints 1` to have them parsed and silently dropped, e.g. to run a schema written for another database). Nothing enforces integrity, so applications that expect the database to reject bad rows must check themselves. |
-| **Indexes** | Metakit has no secondary indexes. Equality joins and correlated lookups use hash tables built per query; a point lookup is still a scan. |
+| **Persistent indexes** | Mk4tcl offers none and an index every writer must maintain cannot be guaranteed (MK Studio edits tables directly). Instead: simple conditions are decided inside Metakit by `mk::select` (`WHERE id = ...` on 1,000,000 rows: 3.8 s to 0.1 s), `COUNT(*)` is the row count, equality joins are hash joins, and `EXPLAIN` shows the plan. A lookup is still a scan, but a scan done in C. See [docs/SQL.md](docs/SQL.md#query-planning-explain-and-indexes). |
 | **Exact decimal arithmetic** | `DECIMAL`/`NUMERIC` are 64-bit floats. Do not use them for money. |
 | **Persistent NULL** | Metakit has no NULL. NULLs exist while a query runs (`LEFT JOIN`, `SELECT NULL`, empty aggregates...) and obey three-valued logic; storing one writes `0` / empty text, so `WHERE col IS NULL` never matches stored rows. |
 | SQL views, triggers, stored procedures, permissions, savepoints, upsert (`ON CONFLICT`; use `MERGE`) | no Metakit equivalent |
@@ -75,6 +75,17 @@ It copies the engine into `mkstudio.vfs/lib/mkitsql/` and applies [`integration/
 (loader, a standard-SQL sample script, explorer refresh after `MERGE`, and a fix so dropping a view discards its
 rows and a failure to do so aborts the drop). `mkitsql/engine_studio.tcl` is the adapter. On a patched fresh clone, MK Studio's own lint, its 38-check
 engine contract and its 41 UI-logic checks all pass.
+
+## Concurrency and temporary files
+
+* **Locking.** A file opened for writing gets `<file>.lock` with the same protocol MK Studio uses, so the two exclude each
+  other; stale locks (dead process, recycled pid) are taken over race-free, readers are never blocked but may see a
+  half-written state while a writer commits (a Metakit limitation, documented), statements cannot nest, and a server can
+  set `::mkitsql::session` so that one client's open transaction is not silently joined by another. Standalone mkit-sql
+  does **not** inherit any locking from MK Studio: it has its own, compatible one. Details and limits in
+  [docs/SQL.md](docs/SQL.md#concurrency-locking-and-transactions).
+* **Temporary files.** Spill files go into a private 0700 folder with random names and exclusive 0600 files, are removed
+  after every statement, and folders abandoned by crashed runs are swept safely at the next run.
 
 ## Storage layer
 
@@ -143,7 +154,7 @@ against **both storage layers**, and also on a Mk4tcl built from source and on t
 
 | | result |
 | --- | --- |
-| Engine suite (`tests/run.tcl`), 566 checks | pass on both kits, both storage layers, real Metakit; also on the stand-in; also with `MKIT_BULKMIN=1` (every big delete/update rebuilds the table) |
+| Engine suite (`tests/run.tcl`), 583 checks | pass on both kits, both storage layers, real Metakit; also on the stand-in; also with `MKIT_BULKMIN=1` (every big delete/update rebuilds the table) and `MKIT_PUSHMIN=0` / `MKIT_PUSHDOWN=0` (Metakit-side narrowing always / never) |
 | Same suite with tiny memory budgets (`MKIT_MEMBYTES=1..2000 MKIT_CHUNK=1..11`) | pass: every sort, group, join, distinct and DML spills, thousands of spill files, none left behind |
 | Metakit-only checks (`tests/real_metakit.tcl`, 22) | pass: persistence across close/reopen, 64-bit values, binary, Unicode, nested subviews, every `ALTER`, drop/recreate |
 | **Differential test against SQLite** (`tests/differential`) | more than 60,000 generated queries (about 10,000 window queries), 0 mismatches; repeated with a 50-byte memory budget |
@@ -157,6 +168,9 @@ against **both storage layers**, and also on a Mk4tcl built from source and on t
 | Fuzzer (`tests/fuzz.tcl`) | more than 300,000 mutated statements: every failure is a clean engine error |
 | A Metakit file we did not create (`tests/realworld.tcl`) | a tclkit's own boot database: nested tables, binary columns, joins, windows, subqueries |
 | MK Studio's engine contract (38) and UI tests (16 + 41) | pass on both kits, real Metakit, on a freshly patched checkout |
+| Locking (`tests/locking.tcl`, 55) | real processes race for one file (12 rounds x 6 processes, exactly one winner each time), die with `kill -9`, reuse pids, and open files through MK Studio's own `store.tcl` in both directions; sessions and transaction ownership |
+| Temporary files (`tests/tempsec.tcl`, 40) | private folder, 0700 / 0600, random names, planted symbolic links and files refused, safe sweep of abandoned folders (never links, never other files) |
+| Pushdown (`tests/pushdown.tcl`, ~1,500 per run) | ~1,000 random predicates over every column type with edge values (int32/int64 limits, doubles, text), with and without Metakit-side narrowing: identical results; found a real bug (`IN` lists compared whole numbers as doubles) |
 | Memory (`tests/scale_memory.tcl`) | flat; see above |
 | Lint: ASCII, no shadowed commands, nothing newer than the target runtimes, code-boundary inventory | clean |
 | **Not tested** | Windows and macOS; tables of tens of millions of rows; the GitHub Actions workflow itself (never run, YAML validated only) |
@@ -172,7 +186,7 @@ Both are handled in the storage layer and in [`integration/mkstudio.patch`](inte
 ## Tests
 
 ```sh
-tclsh tests/run.tcl                       # 566 engine checks on the pure-Tcl stand-in   (glob to filter: 'join_*')
+tclsh tests/run.tcl                       # 583 engine checks on the pure-Tcl stand-in   (glob to filter: 'join_*')
 MKIT_BACKEND=standalone tclsh tests/run.tcl   # ... on the standalone storage layer (default: MK Studio's ::store)
 MKIT_MEMBYTES=50 MKIT_CHUNK=3 tclsh tests/run.tcl   # tiny memory budget: everything spills
 tclsh tests/lint.tcl                      # static checks + inventory of code boundaries
@@ -184,6 +198,9 @@ tclsh tests/nullforge.tcl                 # NULL / interval cannot be forged
 tclsh tests/codegen_audit.tcl             # generated code verifier + mutation test
 tclsh tests/bulkwrite.tcl                 # big deletes/updates: rebuild strategy == row-by-row
 tclsh tests/dropview.tcl                  # DROP TABLE failure injection
+tclsh tests/pushdown.tcl                  # Metakit-side narrowing == full scan
+tclsh tests/locking.tcl                   # advisory lock, races between real processes (MKSTUDIO_DIR=... for interop)
+tclsh tests/tempsec.tcl                   # spill-file folder: permissions, links, sweep
 tclsh tests/spillroundtrip.tcl            # spilled results are exact
 tclsh tests/robustness.tcl                # errors, cancels, atomicity, odd corners
 python3 tests/differential/dml.py         # random DML sequences vs SQLite
@@ -219,7 +236,7 @@ mkitsql/verify.tcl        checks every generated proc before it is installed
 mkitsql/datetime.tcl      DATE / TIME / TIMESTAMP / INTERVAL
 mkitsql/plan.tcl          planner: join planning, filter pushdown, lookup/scan caches, subquery runtime
 mkitsql/exec.tcl          streaming executor: scans, joins, aggregation, DISTINCT, sort, windows, set ops, recursion
-mkitsql/spill.tcl         memory budget, temp files, spools, external merge sort
+mkitsql/spill.tcl         memory budget, private temp folder, spools, external merge sort
 mkitsql/window.tcl        window-function runtime
 mkitsql/stmt.tcl          result shaping, INSERT/UPDATE/DELETE/MERGE, DDL, transactions
 mkitsql/db.tcl            storage layer on Mk4tcl (standalone, default)

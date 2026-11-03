@@ -9,13 +9,18 @@
 #   sorter   external merge sort of records (sorted runs on disk, k-way merge)
 #   reader   walks sorted records group by group (equal first element)
 #
-# Temporary files are named mkitsql_<pid>_<n>.spill in ::mkitsql::tempDir and are removed at the
-# end of every statement, successful or not.
+# Temporary files live in a PRIVATE folder that this process creates inside ::mkitsql::tempDir
+# (mkitsql-<user>-<pid>-<random>, mode 0700, owned by the caller, never a symbolic link); every file is
+# created exclusively with mode 0600.  They are removed at the end of every statement, successful or not,
+# and folders left behind by a crashed process are removed by the next run (see cleanTemp).
 
 namespace eval ::mkitsql {
     variable memBytes 33554432       ;# working-memory budget per blocking operator, ~32 MB (an estimate, see bytesOf)
     variable tempDir ""              ;# where spill files go ("" = TMPDIR, TEMP, TMP, /tmp, ...)
     variable spillSeq 0
+    variable spillDir ""             ;# this process's private folder (made on first use)
+    variable tempCleaned 0           ;# the stale-folder sweep runs once per process
+    variable staleHours 24           ;# a folder of a vanished owner older than this is always removed
     variable spillFiles {}
     variable spillChans {}
     variable sidSeq 0
@@ -64,15 +69,106 @@ proc ::mkitsql::tmpDir {} {
     }
     fail "No writable folder for temporary files.  Set ::mkitsql::tempDir"
 }
+# ---- the private folder ----------------------------------------------------------------------
+proc ::mkitsql::randHex {n} {
+    if {![catch {set h [open /dev/urandom rb] ; set b [read $h $n] ; close $h}] && [string length $b] == $n} {
+        binary scan $b H* hex
+        return $hex
+    }
+    # no /dev/urandom (Windows): mix what is available; the folder is created exclusively and is private anyway
+    set hex ""
+    while {[string length $hex] < 2 * $n} {
+        append hex [format %08x [expr {(int(rand() * 4294967296) ^ ([clock clicks -microseconds] & 0xffffffff) ^ ([pid] * 2654435761)) & 0xffffffff}]]
+    }
+    return [string range $hex 0 [expr {2 * $n - 1}]]
+}
+proc ::mkitsql::userTag {} {
+    set u [expr {[info exists ::tcl_platform(user)] ? $::tcl_platform(user) : "user"}]
+    regsub -all {[^A-Za-z0-9_]} $u _ u
+    return [string range $u 0 20]
+}
+# Is a process alive?  (stale-lock and stale-folder detection)
+proc ::mkitsql::pidAlive {pid} {
+    if {![string is integer -strict $pid] || $pid <= 0} { return 0 }
+    if {$pid == [pid]} { return 1 }
+    if {$::tcl_platform(platform) eq "windows"} {
+        if {[catch {exec tasklist /FI "PID eq $pid" /NH /FO CSV} out]} { return 0 }
+        return [expr {[string first "\"$pid\"" $out] >= 0}]
+    }
+    if {[file isdirectory /proc/self]} { return [file isdirectory /proc/$pid] }
+    return [expr {![catch {exec kill -0 $pid}]}]
+}
+# The folder for this process's spill files, created on first use.  Any trouble is reported, not ignored:
+# a spill file in a folder somebody else could write to would be a security hole.
+proc ::mkitsql::spillDir {} {
+    variable spillDir
+    if {$spillDir ne "" && [file isdirectory $spillDir]} { return $spillDir }
+    set base [tmpDir]
+    cleanTemp
+    for {set try 0} {$try < 50} {incr try} {
+        set d [file join $base mkitsql-[userTag]-[pid]-[randHex 8]]
+        if {![catch {file lstat $d x}]} continue            ;# exists (even as a link): pick another name
+        if {[catch {file mkdir $d} msg]} { fail "Cannot create a folder for temporary files in '$base' ($msg).  Set ::mkitsql::tempDir to a writable folder" }
+        if {$::tcl_platform(platform) ne "windows"} {
+            if {[catch {file attributes $d -permissions 00700} msg]} { catch {file delete $d} ; fail "Cannot restrict the temporary folder '$d' ($msg)" }
+            if {[file type $d] ne "directory" || ![file owned $d]} { fail "The temporary folder '$d' is not ours; refusing to use it" }
+            file attributes $d -permissions 00700
+            if {([file attributes $d -permissions] & 0077) != 0} { fail "The temporary folder '$d' is not private; refusing to use it" }
+        }
+        set spillDir $d
+        return $d
+    }
+    fail "Cannot find an unused name for the temporary folder in '$base'"
+}
+# Remove what crashed runs left in the temporary area: folders mkitsql-<user>-<pid>-<random> (and the
+# mkitsql_<pid>_<n>.spill files of older versions) that belong to the caller, are real folders / files (never
+# links), whose process no longer exists - or that are older than ::mkitsql::staleHours.  Returns the count.
+proc ::mkitsql::cleanTemp {{base ""}} {
+    variable staleHours ; variable tempCleaned ; variable spillDir
+    if {$base eq ""} {
+        if {$tempCleaned} { return 0 }
+        set tempCleaned 1
+        if {[catch {tmpDir} base]} { return 0 }
+    }
+    set removed 0 ; set now [clock seconds]
+    foreach p [glob -nocomplain -directory $base mkitsql-* mkitsql_*] {
+        set tail [file tail $p]
+        if {[catch {file lstat $p st}]} continue
+        if {$st(type) ni {directory file}} continue                  ;# never touch links or specials
+        if {![file owned $p]} continue
+        set isDir [expr {$st(type) eq "directory"}]
+        if {$isDir && [regexp {^mkitsql-[A-Za-z0-9_]*-(\d+)-[0-9a-f]{16}$} $tail -> pid]} {
+        } elseif {!$isDir && [regexp {^mkitsql_(\d+)_\d+\.spill$} $tail -> pid]} {
+        } else continue
+        if {$p eq $spillDir || $pid == [pid]} continue
+        set old [expr {($now - $st(mtime)) > $staleHours * 3600}]
+        if {!$old && [pidAlive $pid]} continue
+        if {$isDir} {
+            # only if it holds nothing but our spill files
+            set ok 1 ; set inside [glob -nocomplain -directory $p * .*]
+            foreach f $inside {
+                if {[file tail $f] in {. ..}} continue
+                if {![regexp {^\d+\.spill$} [file tail $f]] || [catch {file lstat $f fs}] || $fs(type) ne "file"} { set ok 0 }
+            }
+            if {!$ok} continue
+            foreach f $inside { if {[file tail $f] ni {. ..}} { catch {file delete $f} } }
+            if {![catch {file delete $p}]} { incr removed }
+        } else {
+            if {![catch {file delete $p}]} { incr removed }
+        }
+    }
+    return $removed
+}
 proc ::mkitsql::spillNewPath {} {
     variable spillFiles ; variable spillSeq
-    set p [file join [tmpDir] mkitsql_[pid]_[incr spillSeq].spill]
+    set p [file join [spillDir] [format %06d [incr spillSeq]].spill]
     lappend spillFiles $p
     return $p
 }
 proc ::mkitsql::spillOpenW {path} {
     variable spillChans
-    if {[catch {open $path w} ch]} { fail "Cannot create a temporary file ($ch).  Set ::mkitsql::tempDir to a writable folder" }
+    # exclusive: fails if anything (a file, a link) is already there; private: 0600
+    if {[catch {open $path {WRONLY CREAT EXCL} 0600} ch]} { fail "Cannot create a temporary file ($ch).  Set ::mkitsql::tempDir to a writable folder" }
     fconfigure $ch -translation lf -encoding utf-8 -buffering full -buffersize 131072
     lappend spillChans $ch
     return $ch
@@ -97,6 +193,13 @@ proc ::mkitsql::spillCleanup {} {
     foreach ch $spillChans { catch {close $ch} }
     foreach f $spillFiles { catch {file delete $f} }
     set spillFiles {} ; set spillChans {}
+    variable spillDir
+    if {$spillDir ne ""} {
+        # the folder is ours and holds only spill files; remove it so nothing outlives the statement
+        foreach f [glob -nocomplain -directory $spillDir *] { catch {file delete $f} }
+        catch {file delete $spillDir}
+        set spillDir ""
+    }
     array unset S
     array set S {}
     catch {namespace delete ::mkitsql::agg}

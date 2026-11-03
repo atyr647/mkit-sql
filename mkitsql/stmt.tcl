@@ -14,6 +14,9 @@ namespace eval ::mkitsql {
     variable streamCb ""         ;# set while ::mkitsql::stream runs
     variable autocommit 0        ;# 1 = commit after every successful write statement
     variable busy 0              ;# 1 while a statement runs (statements cannot be nested)
+    variable session ""          ;# who is running the statement ("" = a single user, no transaction ownership)
+    variable txnOwner            ;# database tag -> the session whose uncommitted changes it holds
+    array set txnOwner {}
     variable intMin -2147483648
     variable intMax 2147483647
 }
@@ -78,6 +81,7 @@ proc ::mkitsql::execStatement1 {ast db plist nulls} {
     set ::mkitsql::params $pd
     switch -- [lindex $ast 0] {
         select   { return [execSelect [lindex $ast 1]] }
+        explain  { return [execExplain [lindex $ast 1]] }
         insert   { return [afterWrite [execInsert [lindex $ast 1]]] }
         update   { return [afterWrite [execUpdate [lindex $ast 1]]] }
         delete   { return [afterWrite [execDelete [lindex $ast 1]]] }
@@ -104,11 +108,33 @@ proc ::mkitsql::msg {text {affected -1}} {
     dict create kind message text $text affected $affected
 }
 
+# Writing needs a read/write handle and - when sessions are used - no uncommitted changes of another session.
+# Sessions are for a server that shares one database between clients: set ::mkitsql::session to the client's
+# id around each statement.  The first session to write owns the open transaction until it COMMITs or ROLLs BACK;
+# others get a clear error instead of silently joining it (reads are not blocked: they see uncommitted data).
+proc ::mkitsql::assertWritable {tag} {
+    variable session ; variable txnOwner
+    if {[::mkitsql::db::readonly $tag]} {
+        set by [::mkitsql::db::lockedBy $tag]
+        if {$by ne ""} {
+            fail "Database '$tag' is open read-only: process [lindex $by 0] on [lindex $by 1] has it open for editing (its write lock)."
+        }
+        fail "Database '$tag' is open read-only."
+    }
+    if {$session ne "" && [info exists txnOwner($tag)] && $txnOwner($tag) ne $session && [::mkitsql::db::dirty $tag] > 0} {
+        fail "Database '$tag' has uncommitted changes from another session ($txnOwner($tag)); wait until it commits or rolls back."
+    }
+}
 proc ::mkitsql::afterWrite {res} {
-    variable autocommit
+    variable autocommit ; variable session ; variable txnOwner
     if {$autocommit && [dict exists $res tag]} {
         ::mkitsql::db::commit [dict get $res tag]
         dict set res text "[dict get $res text]  (committed)"
+    }
+    if {$session ne "" && [dict exists $res tag]} {
+        set t [dict get $res tag]
+        if {[::mkitsql::db::dirty $t] > 0 && ![info exists txnOwner($t)]} { set txnOwner($t) $session }
+        if {[::mkitsql::db::dirty $t] == 0} { unset -nocomplain txnOwner($t) }
     }
     return $res
 }
@@ -213,7 +239,7 @@ proc ::mkitsql::resultSink {c cfg chunk} {
 # {tag view path layout label}.
 proc ::mkitsql::resolveTarget {parts subs} {
     lassign [resolveTable $parts] tag view
-    if {[::mkitsql::db::readonly $tag]} { fail "Database '$tag' is open read-only." }
+    assertWritable $tag
     set path $tag.$view
     set layout [::mkitsql::db::layout $path]
     set label $view
@@ -703,7 +729,7 @@ proc ::mkitsql::defsToLayout {defs} {
 
 proc ::mkitsql::execCreate {st} {
     lassign [newTableName [dict get $st parts]] tag name
-    if {[::mkitsql::db::readonly $tag]} { fail "Database '$tag' is open read-only." }
+    assertWritable $tag
     checkName $name Table
     if {[findView $tag $name] ne ""} {
         if {[dict get $st ifnotexists]} { return [dict create kind message text "Table '$name' already exists in '$tag'; nothing to do." affected 0 tag $tag] }
@@ -786,7 +812,7 @@ proc ::mkitsql::execDrop {st} {
         }
     }
     lassign [resolveTable $parts] tag view
-    if {[::mkitsql::db::readonly $tag]} { fail "Database '$tag' is open read-only." }
+    assertWritable $tag
     ::mkitsql::db::dropView $tag $view
     return [dict create kind message text "Table '$view' dropped from '$tag'." affected 0 tag $tag]
 }
@@ -868,7 +894,7 @@ proc ::mkitsql::copyRows {src dst layout} {
 #  Transactions and administration
 # ============================================================================
 proc ::mkitsql::execTxn {what db} {
-    variable defaultDb
+    variable defaultDb ; variable session ; variable txnOwner
     set tags [::mkitsql::db::tags]
     if {$db ne ""} {
         set t [findTag $db]
@@ -876,21 +902,27 @@ proc ::mkitsql::execTxn {what db} {
         set targets [list $t]
     } else {
         set targets {}
-        foreach t $tags { if {[::mkitsql::db::dirty $t] > 0} { lappend targets $t } }
+        foreach t $tags {
+            if {[::mkitsql::db::dirty $t] > 0 && ($session eq "" || ![info exists txnOwner($t)] || $txnOwner($t) eq $session)} { lappend targets $t }
+        }
         if {![llength $targets]} {
             return [msg "Nothing to $what: there are no pending changes." 0]
         }
     }
     set total 0
     foreach t $targets {
+        if {$session ne "" && [info exists txnOwner($t)] && $txnOwner($t) ne $session && [::mkitsql::db::dirty $t] > 0} {
+            fail "Database '$t' has uncommitted changes from another session ($txnOwner($t)); only that session can $what them."
+        }
         if {$what eq "commit"} {
-            if {[::mkitsql::db::readonly $t]} { fail "Database '$t' is open read-only." }
+            assertWritable $t
             set n [::mkitsql::db::dirty $t]
             ::mkitsql::db::commit $t
         } else {
             set n [::mkitsql::db::dirty $t]
             ::mkitsql::db::rollback $t
         }
+        unset -nocomplain txnOwner($t)
         incr total $n
     }
     if {$what eq "commit"} {

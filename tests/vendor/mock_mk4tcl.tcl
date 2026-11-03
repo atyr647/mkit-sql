@@ -64,7 +64,7 @@ proc ::mkmock::cmd_file {cmd tag args} {
             set path [expr {[llength $args] && [string index [lindex $args 0] 0] ne "-" ? [lindex $args 0] : ""}]
             set db($tag) [dict create path $path views {} ro [expr {"-readonly" in $args}]]
             if {$path ne "" && [::file exists $path] && [::file size $path] > 0} {
-                set f [::open $path r] ; set data [read $f] ; close $f
+                set f [::open $path r] ; fconfigure $f -encoding utf-8 ; set data [read $f] ; close $f
                 if {[string range $data 0 6] ne "MKMOCK1"} { unset db($tag) ; error "file format error" }
                 _load $tag [string range $data 8 end]
             } elseif {$path ne ""} {
@@ -77,14 +77,14 @@ proc ::mkmock::cmd_file {cmd tag args} {
         commit {
             set path [dict get $db($tag) path]
             if {[dict get $db($tag) ro]} { error "file is read-only" }
-            set f [::open $path w] ; puts -nonewline $f "MKMOCK1\n[_dump $tag]" ; close $f
+            set f [::open $path w] ; fconfigure $f -encoding utf-8 ; puts -nonewline $f "MKMOCK1\n[_dump $tag]" ; close $f
             return
         }
         rollback {
             set path [dict get $db($tag) path] ; set ro [dict get $db($tag) ro]
             set db($tag) [dict create path $path views {} ro $ro]
             if {[::file size $path] > 0} {
-                set f [::open $path r] ; set data [read $f] ; close $f
+                set f [::open $path r] ; fconfigure $f -encoding utf-8 ; set data [read $f] ; close $f
                 _load $tag [string range $data 8 end]
             }
             return
@@ -116,7 +116,8 @@ proc ::mkmock::_loadvo {d} {
         set r {}
         dict for {k tv} $rd {
             lassign $tv kind v
-            dict set r $k [expr {$kind eq "sub" ? [_loadvo $v] : $v}]
+            # (an expr ternary would turn the text "007" into 7)
+            if {$kind eq "sub"} { dict set r $k [_loadvo $v] } else { dict set r $k $v }
         }
         dict lappend vo($id) rows $r
     }
@@ -260,7 +261,34 @@ proc ::mkmock::cmd_set {cursor args} {
 # public mk:: commands are thin wrappers so the implementation can freely use
 # Tcl's own set/file/etc. inside its namespace
 namespace eval ::mk {}
-foreach c {file view row get set} {
+# mk::select path ?-exact p v? ?-min p v? ?-max p v? ...: row indices, ascending, matching ALL criteria.  Like the real
+# thing: integer columns compare as integers, doubles with -min/-max as numbers, and -exact compares the TEXT
+# of a double ("7" does not match 7.0); strings compare as strings.
+proc ::mkmock::cmd_select {path args} {
+    variable vo
+    lassign [_resolve $path] id idx
+    set layout [dict get $vo($id) layout]
+    set out {} ; set i 0
+    foreach row [dict get $vo($id) rows] {
+        set ok 1
+        foreach {op p v} $args {
+            set t [_type $layout [string range $p 0 end]]
+            if {$t eq ""} { error "no such property: $p" }
+            set x [dict get $row $p]
+            switch -- $op {
+                -exact { if {$t in {I L}} { set ok [expr {$x == $v}] } else { set ok [expr {$x eq $v}] } }
+                -min   { if {$t in {I L F D}} { set ok [expr {$x >= $v}] } else { set ok [expr {[string compare $x $v] >= 0}] } }
+                -max   { if {$t in {I L F D}} { set ok [expr {$x <= $v}] } else { set ok [expr {[string compare $x $v] <= 0}] } }
+                default { error "unknown select option $op" }
+            }
+            if {!$ok} break
+        }
+        if {$ok} { lappend out $i }
+        incr i
+    }
+    return $out
+}
+foreach c {file view row get set select} {
     proc ::mk::$c {args} "::mkmock::cmd_$c {*}\$args"
 }
 package provide Mk4tcl 2.4.9.7

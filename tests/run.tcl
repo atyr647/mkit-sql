@@ -675,6 +675,33 @@ check dt_leap_ok [rows "SELECT DATE '2024-02-29', DATE '2000-02-29', DATE '2026-
 check dt_century_not_leap [expr {[catch {q "SELECT DATE '1900-02-29'"}] ? "error" : "accepted"}] error
 check dt_cast_from_timestamp_text [rows "SELECT CAST('2026-03-05 10:11:12' AS DATE), CAST('2026-3-5' AS DATE)"] {{2026-03-05 2026-03-05}}
 check dt_extremes [rows "SELECT DATE '0001-01-01' + INTERVAL '1' DAY, DATE '9999-12-31' - INTERVAL '1' DAY"] {{0001-01-02 9999-12-30}}
+# EXPLAIN describes the plan and runs nothing
+set mkitsql::pushMin 0
+set pl [join [lmap_ [rows "EXPLAIN SELECT name FROM employees WHERE id = 5"] {r {lindex $r 0}}] "\n"]
+check explain_pushdown [string match "*METAKIT-SIDE NARROWING (exact id 5)*" $pl] $mkitsql::pushdown
+check explain_count [string match "*COUNT(*) answered from the row count*" [join [lmap_ [rows "EXPLAIN QUERY PLAN SELECT COUNT(*) FROM employees"] {r {lindex $r 0}}] "\n"]] 1
+set pl [join [lmap_ [rows "EXPLAIN SELECT e.name FROM employees e JOIN departments d ON d.id = e.dept ORDER BY e.name LIMIT 3"] {r {lindex $r 0}}] "\n"]
+check explain_join [expr {[string match "*equality join - hash join*" $pl] && [string match "*SORT on 1 key*" $pl] && [string match "*LIMIT 3*" $pl]}] 1
+check explain_nested [string match "*nested loop*" [join [lmap_ [rows "EXPLAIN SELECT 1 FROM employees e JOIN departments d ON d.id < e.dept"] {r {lindex $r 0}}] "\n"]] 1
+check explain_not_a_query [string match "EXPLAIN takes a query*" [errmsg "EXPLAIN DELETE FROM employees"]] 1
+check explain_runs_nothing [one "SELECT COUNT(*) FROM employees"] [one "SELECT COUNT(id) FROM employees"]
+set mkitsql::pushMin 500
+set cnt [one "SELECT COUNT(id) FROM employees"]
+check count_star_shortcut [rows "SELECT COUNT(*), COUNT(*) + 1 FROM employees"] [list [list $cnt [expr {$cnt + 1}]]]
+check count_star_having [rows "SELECT COUNT(*) FROM employees HAVING COUNT(*) > 100"] {}
+check count_star_where_not_shortcut [one "SELECT COUNT(*) FROM employees WHERE id > 5"] [one "SELECT COUNT(id) FROM employees WHERE id > 5"]
+check count_star_subquery_limit [one "SELECT COUNT(*) FROM (SELECT * FROM employees LIMIT 5) x"] 5
+# whole numbers beyond 2^53 are not doubles: IN, =, ordering and grouping tell neighbours apart
+q "CREATE TABLE bigs (id INT, b BIGINT)"
+q "INSERT INTO bigs VALUES (1, 9223372036854775807), (2, 9223372036854775806), (3, 9007199254740993), (4, 9007199254740992), (5, -9223372036854775808)"
+check bigint_in [rows "SELECT id FROM bigs WHERE b IN (9223372036854775806, 9007199254740993) ORDER BY id"] {2 3}
+check bigint_in_not [rows "SELECT id FROM bigs WHERE b NOT IN (9223372036854775806, 9007199254740993) ORDER BY id"] {1 4 5}
+check bigint_eq [rows "SELECT id FROM bigs WHERE b = 9223372036854775807"] {1}
+check bigint_distinct [one "SELECT COUNT(DISTINCT b) FROM bigs"] 5
+check bigint_group [one "SELECT COUNT(*) FROM (SELECT b FROM bigs GROUP BY b) g"] 5
+check bigint_order [rows "SELECT id FROM bigs ORDER BY b"] {5 4 3 2 1}
+check bigint_join [one "SELECT COUNT(*) FROM bigs x JOIN bigs y ON x.b = y.b"] 5
+q "DROP TABLE bigs"
 # string function corners found by tests/differential/strings.py
 check trim_two_args [rows "SELECT TRIM('xxhixx', 'x'), LTRIM('xxhixx', 'x'), RTRIM('xxhixx', 'x'), TRIM('  a  '), TRIM(BOTH 'x' FROM 'xxaxx')"] {{hi hixx xxhi a a}}
 check trim_two_args_col [rows "SELECT TRIM(name, 'e') FROM departments WHERE id = 2"] {Design}
