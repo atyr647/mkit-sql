@@ -118,7 +118,7 @@ setBudget 33554432 2000
 proc dumpTable {name} { rows "SELECT * FROM $name ORDER BY 1, 2, 3" }
 foreach {label setup stmt} {
     ctas   {}  {CREATE TABLE w AS SELECT id, s, b, r FROM t WHERE g <> 2}
-    insel  {CREATE TABLE w (id INT, s TEXT, b BLOB, r REAL)} {INSERT INTO w SELECT id, s, b, r FROM t WHERE id % 3 = 0}
+    insel  {CREATE TABLE w (id INT, s TEXT, b BLOB, r DOUBLE PRECISION)} {INSERT INTO w SELECT id, s, b, r FROM t WHERE id % 3 = 0}
     update {CREATE TABLE w AS SELECT id, s, b, r FROM t} {UPDATE w SET s = s || '|' || s, r = r + 1 WHERE id % 2 = 0}
     delete {CREATE TABLE w AS SELECT id, s, b, r FROM t} {DELETE FROM w WHERE s IN (SELECT k FROM u WHERE w % 3 = 0) OR id % 7 = 0}
     merge  {CREATE TABLE w AS SELECT id, s, b, r FROM t WHERE id < 40} {MERGE INTO w USING (SELECT w AS i, k AS kk FROM u) src ON w.id = src.i WHEN MATCHED AND w.id % 2 = 0 THEN UPDATE SET s = src.kk WHEN MATCHED THEN DELETE WHEN NOT MATCHED THEN INSERT (id, s, b, r) VALUES (src.i + 1000, src.kk, 'x', 1.5)}

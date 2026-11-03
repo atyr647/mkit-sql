@@ -26,6 +26,7 @@ namespace eval ::mkitsql::db {
     variable ro              ;# tag -> read-only flag
     variable dirty           ;# tag -> number of uncommitted changes
     array set file {} ; array set ro {} ; array set dirty {}
+
 }
 
 # ---- files ---------------------------------------------------------------------------------
@@ -48,79 +49,134 @@ proc ::mkitsql::db::touch {tag}    { variable dirty ; incr dirty($tag) }
 proc ::mkitsql::db::touchPath {path} { touch [lindex [split $path .!] 0] }
 
 # ---- advisory write lock ----------------------------------------------------------------------
-# Metakit does no locking: a process reading a file while another commits can see a half-written
-# state, and two writers overwrite each other.  Exactly as MK Studio does, a file opened for writing
-# gets "<file>.lock" holding "pid host start" (MK Studio reads the first two fields), created
-# exclusively; a lock whose process is gone is stale and is taken over; programs that do not know
-# the protocol ignore it.  Files opened -readonly take no lock (they just note who holds one).
-#
-# Beyond MK Studio's version: taking over a stale lock is serialised through "<file>.lock.takeover" so
-# two processes finding the same stale lock cannot both win, a recycled pid is recognised by the process
-# start time (Linux), and closing never deletes a lock that is no longer ours.
+# Metakit does no locking: a process reading a file while another commits can see a half-written state, and two
+# writers overwrite each other.  This is the protocol of MK Studio's docs/CONCURRENCY.md, implemented to the letter so
+# that mkit-sql, MK Studio and a server exclude each other (tests/locking.tcl runs the spec's checks against this code,
+# and MKSTUDIO_DIR=... runs real MK Studio processes against it):
+#   * a file opened for writing owns "<file>.lock", one line "pid host [role [endpoint]]", created with O_EXCL;
+#   * a lock is HELD (respected) when its process is alive on this host or when it names another host, STALE when
+#     this host's process is gone or the file is empty/garbled and older than 5 s, OURS when it names this process;
+#   * stale and ours are taken over under "<file>.lock.guard" (created exclusively; a guard older than 10 s was
+#     abandoned by a crash): classify again with the guard held, delete the lock, delete the guard, create again;
+#   * closing deletes the lock only if it still names us.  Files opened -readonly take no lock.
+# Beyond the letter of the protocol (all of it only makes the checks stricter, never looser):
+#   * a lock file that is not a regular file (a link, a folder, a fifo) is refused, never followed or read;
+#   * a pid that was recycled (the process is younger than the lock file; Linux) counts as dead;
+#   * the path is resolved through symbolic links first, so two names of one file share one lock.
+# Limits (see docs/SQL.md): the lock is advisory; a hard link is another name Metakit cannot tell apart; processes
+# in different PID namespaces that share a host name and a folder cannot see each other's pids.
+namespace eval ::mkitsql::db {
+    variable lockRole "" ; variable lockEndpoint ""     ;# a server announces itself: set before openFile
+}
 proc ::mkitsql::db::lockPath {path} { return $path.lock }
 proc ::mkitsql::db::thisHost {} { if {[catch {info hostname} h]} { return unknown } ; return $h }
-# a token that changes when a pid is reused (field 22 of /proc/<pid>/stat), "" where unavailable
-proc ::mkitsql::db::procStart {pid} {
+proc ::mkitsql::db::lockText {} {
+    variable lockRole ; variable lockEndpoint
+    set t "[pid] [thisHost]"
+    if {$lockRole ne "" || $lockEndpoint ne ""} { append t " [expr {$lockRole eq {} ? {-} : $lockRole}]" }
+    if {$lockEndpoint ne ""} { append t " $lockEndpoint" }
+    return $t
+}
+# the real location of a file: symbolic links in the last component are followed too (`file normalize` does not)
+proc ::mkitsql::db::realPath {p} {
+    set p [::file normalize $p]
+    for {set n 0} {$n < 40} {incr n} {
+        if {[catch {::file readlink $p} t]} break
+        set p [::file normalize [::file join [::file dirname $p] $t]]
+    }
+    return $p
+}
+# epoch second when a local process started (Linux: /proc/<pid>/stat field 22 and /proc/stat btime), "" where unknown
+proc ::mkitsql::db::procStartTime {pid} {
     if {[catch {set h [open /proc/$pid/stat r] ; set d [read $h] ; close $h}]} { return "" }
     set rest [string range $d [expr {[string last ")" $d] + 2}] end]
-    return [lindex $rest 19]
+    set ticks [lindex $rest 19]
+    if {![string is integer -strict $ticks]} { return "" }
+    if {[catch {set h [open /proc/stat r] ; set st [read $h] ; close $h}] || ![regexp {btime (\d+)} $st -> btime]} { return "" }
+    return [expr {$btime + $ticks / 100}]
 }
-proc ::mkitsql::db::lockContent {} { return "[pid] [thisHost] [procStart [pid]]" }
-# "pid host" of a live foreign holder, or "" when the file is unlocked or the lock is stale / ours
-proc ::mkitsql::db::lockHolder {path} {
+# The lock file as a dict: state free|ours|stale|held, and pid host role endpoint when there is one.
+proc ::mkitsql::db::lockInfo {path} {
     set lf [lockPath $path]
-    if {[catch {set h [open $lf r] ; set d [string trim [read $h]] ; close $h}]} { return "" }
-    lassign [split $d " "] pid host start
+    if {[catch {::file lstat $lf st}]} { return [dict create state free] }
+    if {$st(type) ne "file"} {
+        return -code error -errorcode [list MKIT BADLOCK $lf] "The lock path is not a regular file ($st(type)); refusing to use it:\n$lf"
+    }
+    # a bounded read of a regular file: a hostile or damaged lock file cannot make us read for ever
+    if {[catch {set h [open $lf r] ; set d [string trim [read $h 512]] ; close $h}]} { return [dict create state free] }   ;# vanished meanwhile
+    lassign [split $d " "] pid host role endpoint
+    set info [dict create pid $pid host $host role [expr {$role eq "-" ? "" : $role}] endpoint $endpoint]
+    set state held
     if {![string is integer -strict $pid] || $host eq ""} {
-        # unreadable: perhaps its owner is between creating and writing it; stale only once it is old
-        if {[catch {file mtime $lf} mt] || [clock seconds] - $mt > 10} { return "" }
-        return "0 unknown"
-    }
-    if {$pid == [pid] && $host eq [thisHost]} { return "" }
-    if {$host eq [thisHost]} {
-        if {![::mkitsql::pidAlive $pid]} { return "" }
-        if {$start ne "" && [procStart $pid] ne "" && [procStart $pid] ne $start} { return "" }      ;# pid was reused
-        return "$pid $host"
-    }
-    return "$pid $host"           ;# another machine (network share): cannot tell, so respect it
-}
-proc ::mkitsql::db::lockedError {holder path} {
-    lassign $holder hpid hhost
-    return -code error -errorcode [list MKIT LOCKED $hpid $hhost] \
-        "This database is open for editing in another process (pid $hpid on $hhost):\n$path"
-}
-# Returns the lock content that was written, "" when no lock could be made (read-only folder) or raises
-# MKIT LOCKED when a live process holds it.
-proc ::mkitsql::db::takeLock {path} {
-    set lf [lockPath $path] ; set mine [lockContent]
-    for {set attempt 0} {$attempt < 5} {incr attempt} {
-        if {![catch {open $lf {WRONLY CREAT EXCL} 0644} h]} { puts -nonewline $h $mine ; close $h ; return $mine }
-        if {![file exists $lf]} { return "" }                                        ;# could not create it for another reason
-        set holder [lockHolder $path]
-        if {$holder ne ""} { return [lockedError $holder $path] }
-        # stale: remove it under a short-lived mutex, re-checking inside, so a competitor that is doing the
-        # same thing cannot delete the lock we (or it) just created
-        set mx $lf.takeover
-        if {![catch {open $mx {WRONLY CREAT EXCL} 0644} mh]} {
-            close $mh
-            if {[lockHolder $path] eq ""} {
-                catch {file delete $lf}
-                set rc [catch {open $lf {WRONLY CREAT EXCL} 0644} h]
-                catch {file delete $mx}
-                if {!$rc} { puts -nonewline $h $mine ; close $h ; return $mine }
-            } else { catch {file delete $mx} }
-        } elseif {![catch {file mtime $mx} mt] && [clock seconds] - $mt > 30} {
-            catch {file delete $mx}                                                   ;# a crashed takeover
+        # empty or garbled: its creator is probably between creating and writing it; stale only once it has stayed so for a while
+        if {[clock seconds] - $st(mtime) > 5} { set state stale }
+    } elseif {$pid == [pid] && $host eq [thisHost]} {
+        set state ours
+    } elseif {$host eq [thisHost]} {
+        if {![::mkitsql::pidAlive $pid]} {
+            set state stale
+        } else {
+            set started [procStartTime $pid]
+            if {$started ne "" && $started > $st(mtime) + 2} { set state stale }      ;# the pid was recycled: that process started after the lock was made
         }
     }
-    return -code error -errorcode [list MKIT LOCKED 0 unknown] "Could not take the lock on this database (another process is starting at the same moment), please repeat:\n$path"
+    return [dict merge $info [dict create state $state]]
 }
-# Release our lock - only if the file still holds OUR content.
+# "pid host role endpoint" of a live foreign holder, or "" when the file is unlocked / stale / ours
+proc ::mkitsql::db::lockHolder {path} {
+    set i [lockInfo $path]
+    if {[dict get $i state] ne "held"} { return "" }
+    return [list [dict get $i pid] [dict get $i host] [dict get $i role] [dict get $i endpoint]]
+}
+proc ::mkitsql::db::lockedError {holder path} {
+    lassign $holder hpid hhost hrole hend
+    set who "pid $hpid on $hhost"
+    if {$hrole ne ""} { append who ", $hrole" }
+    if {$hend ne ""} { append who " at $hend" }
+    return -code error -errorcode [list MKIT LOCKED $hpid $hhost $hrole $hend] \
+        "This database is open for editing in another process ($who):\n$path"
+}
+# Create our lock file; returns its text, "" when no lock could be made (read-only folder or disk: carry on unlocked),
+# or raises MKIT LOCKED when somebody else owns it.
+proc ::mkitsql::db::createLock {lf mine} {
+    if {[catch {open $lf {WRONLY CREAT EXCL} 0644} h]} { return -1 }
+    if {[catch {puts -nonewline $h $mine ; close $h} err]} {
+        # the write failed (a full disk): an empty lock would keep everybody out until it is old - remove it and go on unlocked
+        catch {close $h} ; catch {::file delete $lf}
+        return ""
+    }
+    return $mine
+}
+proc ::mkitsql::db::takeLock {path} {
+    set lf [lockPath $path] ; set mine [lockText]
+    for {set attempt 0} {$attempt < 4} {incr attempt} {
+        set r [createLock $lf $mine]
+        if {$r ne "-1"} { return $r }
+        if {[catch {::file lstat $lf st}]} { return "" }                      ;# could not create it here (read-only folder)
+        set holder [lockHolder $path]
+        if {$holder ne ""} { return [lockedError $holder $path] }
+        # stale (or ours from an earlier run): replace it, one process at a time
+        set guard $lf.guard ; set got 0
+        for {set w 0} {$w < 50 && !$got} {incr w} {
+            if {![catch {set gh [open $guard {WRONLY CREAT EXCL} 0644] ; close $gh}]} { set got 1 ; break }
+            if {![catch {::file mtime $guard} mt] && [clock seconds] - $mt > 10} { catch {::file delete $guard} ; continue }   ;# abandoned by a crash
+            after 40
+        }
+        if {!$got} continue
+        set again [lockHolder $path]                                           ;# look again now that nobody else is replacing it
+        if {$again eq "" && [dict get [lockInfo $path] state] in {stale ours}} { catch {::file delete $lf} }
+        catch {::file delete $guard}
+        if {$again ne ""} { return [lockedError $again $path] }
+    }
+    return -code error -errorcode [list MKIT LOCKED 0 unknown {} {}] "Could not take the lock on this database (another process is starting at the same moment), please repeat:\n$path"
+}
+# Release our lock - only if the file still holds OUR content (a regular file, read with a bound).
 proc ::mkitsql::db::releaseLock {path mine} {
     set lf [lockPath $path]
-    if {![catch {set h [open $lf r] ; set d [read $h] ; close $h}] && $d eq $mine} { catch {file delete $lf} }
+    if {[catch {::file lstat $lf st}] || $st(type) ne "file"} return
+    if {![catch {set h [open $lf r] ; set d [read $h 512] ; close $h}] && $d eq $mine} { catch {::file delete $lf} }
 }
-# Who blocks writing to this file?  "pid host" of the live writer a read-only handle noticed, else "".
+# Who blocks writing to this file?  "pid host role endpoint" of the live writer a read-only handle noticed, else "".
 proc ::mkitsql::db::lockedBy {tag} { variable lockedBy ; if {[info exists lockedBy($tag)]} { return $lockedBy($tag) } ; return "" }
 # Does this handle hold the write lock?  (0 when it is read-only or the folder did not allow a lock file)
 proc ::mkitsql::db::holdsLock {tag} { variable lockOwned ; return [info exists lockOwned($tag)] }
@@ -128,14 +184,15 @@ proc ::mkitsql::db::holdsLock {tag} { variable lockOwned ; return [info exists l
 # Open (or with -create, create) a datafile; returns its tag.  Options: -create -readonly
 proc ::mkitsql::db::openFile {path args} {
     variable tags ; variable file ; variable ro ; variable dirty ; variable lockOwned ; variable lockedBy ; variable requireLock
-    set create 0 ; set readonly 0 ; set unchecked 0
+    set create 0 ; set readonly 0 ; set unchecked 0 ; set verify 0
     foreach a $args {
-        switch -- $a { -create {set create 1} -readonly {set readonly 1} -unchecked {set unchecked 1} default { error "unknown option $a" } }
+        switch -- $a { -create {set create 1} -readonly {set readonly 1} -unchecked {set unchecked 1} -verify {set verify 1} default { error "unknown option $a (use -create, -readonly, -unchecked or -verify)" } }
     }
-    set path [::file normalize $path]
-    foreach t $tags { if {$file($t) eq $path} { error "File is already open as '$t'." } }
+    set path [realPath $path]
+    foreach t $tags { if {$file($t) eq $path} { error "File is already open as '$t': $path" } }
     if {!$create && ![::file exists $path]} { error "File not found: $path" }
     if {!$unchecked} { ::mkitsql::dbRequireIntact $path }       ;# a damaged file would open as an empty database
+    if {$verify && [::file exists $path] && [::file size $path] > 0} { ::mkitsql::dbVerify $path }   ;# untrusted: read it all in a throw-away process first
     set mine ""
     if {!$readonly} {
         set mine [takeLock $path]                       ;# before opening, so a refusal touches nothing
@@ -148,10 +205,10 @@ proc ::mkitsql::db::openFile {path args} {
         # a very old Mk4tcl without -nocommit
         if {[catch {mk::file open $tag $path {*}[expr {$readonly ? {-readonly} : {}}]} err]} {
             if {$mine ne ""} { releaseLock $path $mine }
-            error $err
+            error "Cannot open $path: $err"
         }
     }
-    if {!$unchecked && !$create && ![::mkitsql::dbSignatureOk $path [llength [mk::file views $tag]]]} {
+    if {!$unchecked && ![::mkitsql::dbSignatureOk $path [llength [mk::file views $tag]]]} {
         catch {mk::file close $tag}
         if {$mine ne ""} { releaseLock $path $mine }
         return -code error -errorcode [list MKIT DAMAGED "not a Metakit database"] "This file isn't a Metakit database, so it was not opened:\n$path"
@@ -174,6 +231,7 @@ proc ::mkitsql::db::closeFile {tag} {
     set i [lsearch -exact $tags $tag]
     if {$i >= 0} { set tags [lreplace $tags $i $i] }
     unset -nocomplain file($tag) ro($tag) dirty($tag)
+    ::mkitsql::typeForget $tag                       ;# what Metakit remembers about column types dies with the open file
 }
 proc ::mkitsql::db::commit {tag} {
     variable dirty
@@ -190,6 +248,32 @@ proc ::mkitsql::db::rollback {tag} {
         mk::file open $tag $file($tag) {*}$opts
     }
     set dirty($tag) 0
+}
+
+# Close and reopen the file (same tag, same lock): resets Metakit's memory of column types.  Only with nothing pending.
+proc ::mkitsql::db::reopen {tag} {
+    variable file ; variable ro ; variable dirty
+    if {$dirty($tag) > 0} { error "cannot reopen '$tag' with uncommitted changes" }
+    catch {mk::file close $tag}
+    set opts {-nocommit}
+    if {$ro($tag)} { lappend opts -readonly }
+    mk::file open $tag $file($tag) {*}$opts
+    ::mkitsql::typeForget $tag
+}
+# Before a view gets a layout: remember what it has now, and refuse (or reopen first) if the new layout would change the
+# type of a column that has already existed under that name (see dbcheck.tcl).
+proc ::mkitsql::db::typeGuard {tag view newLayout} {
+    variable dirty
+    if {![catch {parseLayout [mk::view layout $tag.$view]} old]} { ::mkitsql::typeRecord $tag $view $old }
+    set c [::mkitsql::typeConflict $tag $view $newLayout]
+    if {$c eq ""} return
+    if {$dirty($tag) == 0} {
+        reopen $tag
+        if {![catch {parseLayout [mk::view layout $tag.$view]} old]} { ::mkitsql::typeRecord $tag $view $old }
+        set c [::mkitsql::typeConflict $tag $view $newLayout]
+        if {$c eq ""} return
+    }
+    ::mkitsql::typeConflictError $view $c
 }
 
 # ---- structure ------------------------------------------------------------------------------
@@ -232,25 +316,6 @@ proc ::mkitsql::db::layout {path} { parseLayout [mk::view layout $path] }
 proc ::mkitsql::db::size   {path} { mk::view size $path }
 proc ::mkitsql::db::subSize {path idx prop} { mk::view size $path!$idx.$prop }
 
-# ---- reading rows ---------------------------------------------------------------------------
-# `count` rows from `first`, as lists of values in the order of `props` (scalar properties only).
-proc ::mkitsql::db::rows {path props first count} {
-    set out {}
-    set n [mk::view size $path]
-    set last [expr {min($n, $first + $count) - 1}]
-    set np [llength $props]
-    for {set i $first} {$i <= $last} {incr i} {
-        if {$np == 0} {
-            lappend out {}
-        } elseif {$np == 1} {
-            lappend out [list [mk::get $path!$i [lindex $props 0]]]     ;# a single property comes back unwrapped
-        } else {
-            lappend out [mk::get $path!$i {*}$props]
-        }
-    }
-    return $out
-}
-
 # Row indices (ascending) that satisfy ALL of `conds`, decided inside Metakit (in C, ~40x faster than looking at
 # every row from Tcl).  conds = list of {exact|min|max column value}; min/max are inclusive.  The caller must pass
 # values valid for the column's type.
@@ -259,20 +324,6 @@ proc ::mkitsql::db::select {path conds} {
     foreach c $conds { lassign $c op p v ; lappend args -$op $p $v }
     return [mk::select $path {*}$args]
 }
-# the given rows (indices) in the order of `props`, like `rows`
-proc ::mkitsql::db::rowsAt {path props indices} {
-    set out {}
-    set np [llength $props]
-    if {$np == 0} { foreach i $indices { lappend out {} } ; return $out }
-    if {$np == 1} {
-        set p [lindex $props 0]
-        foreach i $indices { lappend out [list [mk::get $path!$i $p]] }
-        return $out
-    }
-    foreach i $indices { lappend out [mk::get $path!$i {*}$props] }
-    return $out
-}
-
 # ---- writing rows ---------------------------------------------------------------------------
 proc ::mkitsql::db::appendRow {path props values} {
     set args {}
@@ -305,7 +356,9 @@ proc ::mkitsql::db::clearView {path} {
 # ---- changing structure ---------------------------------------------------------------------
 proc ::mkitsql::db::createView {tag name layout} {
     if {[hasView $tag $name]} { error "View '$name' already exists in '$tag'." }
+    typeGuard $tag $name $layout
     mk::view layout $tag.$name [formatLayout $layout]
+    ::mkitsql::typeRecord $tag $name $layout
     touch $tag
 }
 # `mk::view delete` leaves the ROWS behind: a view created again under the same name would get its old
@@ -313,6 +366,7 @@ proc ::mkitsql::db::createView {tag name layout} {
 # original error (nothing is caught): a table is never dropped while its old rows could resurface.
 proc ::mkitsql::db::dropView {tag name} {
     if {![hasView $tag $name]} { error "View '$name' does not exist in '$tag'." }
+    if {![catch {parseLayout [mk::view layout $tag.$name]} old]} { ::mkitsql::typeRecord $tag $name $old }   ;# its types stay "seen"
     mk::view size $tag.$name 0
     set left [mk::view size $tag.$name]
     if {$left != 0} { error "Cannot drop '$name': $left rows could not be cleared." }
@@ -321,40 +375,8 @@ proc ::mkitsql::db::dropView {tag name} {
 }
 # Apply a new layout.  Metakit keeps data for properties whose name AND type are unchanged.
 proc ::mkitsql::db::restructure {path layout} {
+    if {[string first ! $path] < 0} { lassign [split $path .] tag view ; typeGuard $tag $view $layout }
     mk::view layout $path [formatLayout $layout]
+    if {[string first ! $path] < 0} { ::mkitsql::typeRecord $tag $view $layout }
     touchPath $path
-}
-# Rename and/or retype a top-level scalar column, keeping its data.  Metakit identifies a property by
-# (name, type), so the new column is added, filled from the old one (coercing numbers) and the old one
-# dropped; the rebuilt column ends up last.
-proc ::mkitsql::db::rebuildColumn {path oldName newName newType} {
-    set layout [layout $path]
-    set oldType ""
-    foreach c $layout { if {[lindex $c 0] eq $oldName} { set oldType [lindex $c 1] } }
-    if {$oldType eq "" || $oldType eq "V"} { error "'$oldName' is not a scalar column." }
-    if {$newName ne $oldName} {
-        foreach c $layout { if {[lindex $c 0] eq $newName} { error "Column '$newName' already exists." } }
-    }
-    set tmp __mks_tmp
-    set base {}
-    foreach c $layout { if {[lindex $c 0] ne $oldName} { lappend base $c } }
-    set T [list $tmp $newType {}]
-    set Nw [list $newName $newType {}]
-    restructure $path [concat $layout [list $T]]
-    copyColumn $path $oldName $tmp $newType
-    restructure $path [concat $base [list $T]]
-    restructure $path [concat $base [list $T $Nw]]
-    copyColumn $path $tmp $newName $newType
-    restructure $path [concat $base [list $Nw]]
-}
-proc ::mkitsql::db::copyColumn {path from to type} {
-    set n [size $path]
-    for {set i 0} {$i < $n} {incr i} {
-        set v [mk::get $path!$i $from]
-        switch -- $type {
-            I - L { if {![string is integer -strict $v]} { set v [expr {[string is double -strict $v] ? int($v) : 0}] } }
-            F - D { if {![string is double -strict $v]} { set v 0 } }
-        }
-        mk::set $path!$i $to $v
-    }
 }

@@ -18,7 +18,7 @@ proc ::mkitsql::runWindows {specs rows outer} {
     for {set i 0} {$i < $n} {incr i} {
         set r [lindex $rows $i]
         foreach c $cols { lappend r [lindex $c $i] }
-        lappend out $r
+        lappend out [::mkitsql::rt::sk $r]
     }
     return $out
 }
@@ -33,10 +33,10 @@ proc ::mkitsql::evalWindow {w rows outer n} {
         set ev [$pr $r $outer]
         lappend oks [lrange $ev $np [expr {$np + $no - 1}]]
         lappend args [lrange $ev [expr {$np + $no}] end]
-        dict lappend parts [lrange $ev 0 [expr {$np - 1}]] $i
+        dict lappend parts [::mkitsql::rt::sk [lrange $ev 0 [expr {$np - 1}]]] $i
         incr i
     }
-    set res [lrepeat $n $N]
+    set res [::mkitsql::rep $n $N]
     # sort specification for the ORDER BY inside OVER
     set sspec {}
     set k 0

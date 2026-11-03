@@ -73,11 +73,12 @@ for {set k 0} {$k < $N} {incr k} {
     if {[catch {mkitsql::run $sql $db {1 1}} res opts]} {
         set code [dict get $opts -errorcode]
         # engine errors (MKQL ...) are clean by construction; anything else must not look like a Tcl internal
-        if {[lindex $code 0] ne "MKQL"} {
+        if {[lindex $code 0] ne "MKQL" || [lindex $code 2] eq "RUNTIME"} {
             dict incr nonengine [string range $res 0 90]
             if {[info exists ::env(FUZZ_SHOW)] && ![dict exists $seen2 [string range $res 0 30]]} { dict set seen2 [string range $res 0 30] 1 ; puts "NONENGINE: $res\n   sql: $sql" }
         }
-        if {[lindex $code 0] eq "MKQL" || ![isInternal $res]} {
+        # MKQL ERROR RUNTIME = the statement-level safety net caught a raw Tcl error: still counted as a defect to fix
+        if {([lindex $code 0] eq "MKQL" && [lindex $code 2] ne "RUNTIME") || ![isInternal $res]} {
             incr clean
         } else {
             incr bad

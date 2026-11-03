@@ -732,7 +732,8 @@ check addcol [lindex [store::layout $db.notes] end] {flag I {}}
 check addcol_default [one "SELECT flag FROM notes WHERE id = 1"] 0
 q "ALTER TABLE notes RENAME COLUMN body TO text"
 check ren [rows "SELECT text FROM notes WHERE id = 1"] {hello}
-q "ALTER TABLE notes ALTER COLUMN id SET DATA TYPE VARCHAR"
+check retype_refused [string match "Metakit cannot change the type of column*CREATE TABLE*" [errmsg "ALTER TABLE notes ALTER COLUMN id SET DATA TYPE VARCHAR"]] 1
+check retype_same_type [string match "*nothing to do*" [dict get [q "ALTER TABLE notes ALTER COLUMN id TYPE INT"] text]] 1
 check retype [rows "SELECT id FROM notes ORDER BY id"] {1 2}
 q "ALTER TABLE notes DROP COLUMN flag"
 check dropcol [lsearch -exact [lmap_ [store::layout $db.notes] {c {lindex $c 0}}] flag] -1

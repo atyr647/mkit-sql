@@ -45,6 +45,18 @@ jobs:
         run: for m in standalone studio; do $T85 tests/pkg_check.tcl $m; done
       - name: Engine tests on the pure-Tcl stand-in (system Tcl)
         run: sudo apt-get install -y tcl8.6 && tclsh8.6 tests/run.tcl
+      - name: Tcl 8.5 / 8.6.3 list bug - identical results on the old runtimes and on a healthy Tcl, every budget, both storage layers
+        run: |
+          for seed in 1 2 3; do
+            LB_SEED=$seed sh tests/listbug.sh tclsh8.6 $T86 $T85
+            MKIT_BACKEND=studio LB_SEED=$seed sh tests/listbug.sh tclsh8.6 $T86
+          done
+      - name: Findings of the independent reviews (regression tests), tclkit 8.6.3 and 8.5.17, both storage layers, tiny budget
+        run: |
+          for k in $T86 $T85; do
+            for b in standalone studio; do MKIT_BACKEND=$b MKIT_MK4TCL=builtin $k tests/review_regress.tcl; done
+            MKIT_MEMBYTES=20000 MKIT_CHUNK=3 MKIT_MK4TCL=builtin $k tests/review_regress.tcl
+          done
       - name: Differential tests against SQLite (engine runs on tclkit 8.6.3, real Metakit)
         env:
           MKIT_TCLSH: tclkit/tclkit-8.6.3
@@ -190,7 +202,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: atyr647/mkstudio
-          ref: ${{ vars.MKSTUDIO_REF || 'main' }}
+          ref: ${{ vars.MKSTUDIO_REF }}               # empty = the repository's default branch
           path: mkstudio
           token: ${{ secrets.MKSTUDIO_READ_TOKEN || github.token }}
       - name: MK Studio could not be checked out - interoperability tests SKIPPED
@@ -233,12 +245,16 @@ jobs:
       - uses: actions/checkout@v4
       - name: Tcl (macOS)
         if: runner.os == 'macOS'
-        run: brew install tcl-tk && echo "TCLSH=$(brew --prefix tcl-tk)/bin/tclsh8.6" >> "$GITHUB_ENV"
+        run: brew install tcl-tk@8 && echo "TCLSH=$(brew --prefix tcl-tk@8)/bin/tclsh8.6" >> "$GITHUB_ENV"
       - name: Tcl (Windows)
         if: runner.os == 'Windows'
         run: |
           choco install magicsplat-tcl-tk --no-progress -y || true
-          T=$(ls -d /c/Program\ Files/Tcl*/bin/tclsh*.exe /c/Tcl*/bin/tclsh*.exe 2>/dev/null | head -1)
+          # find the interpreter wherever the installer put it, and show what was found (so a failure can be diagnosed from the log)
+          FOUND=$(find /c/Tcl /c/Program\ Files/Tcl* /c/Program\ Files/Magicsplat* /c/ProgramData/chocolatey/lib /c/tools -iname 'tclsh*.exe' 2>/dev/null || true)
+          echo "found: $FOUND"
+          T=$(echo "$FOUND" | grep -iv 'tclsh.*s\.exe' | head -1)
+          [ -n "$T" ] || T=$(echo "$FOUND" | head -1)
           echo "TCLSH=$T" >> "$GITHUB_ENV"
       - name: Which Tcl
         run: |
@@ -255,6 +271,7 @@ jobs:
           "$TCLSH" tests/robustness.tcl
           "$TCLSH" tests/injection.tcl
           "$TCLSH" tests/nullforge.tcl
+          "$TCLSH" tests/review_regress.tcl
       - name: Temp files and locking (Unix semantics; skipped on Windows)
         run: |
           "$TCLSH" tests/tempsec.tcl

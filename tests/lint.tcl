@@ -43,17 +43,22 @@ set boundaries [list \
     [list exec.tcl    {(^|\[)eval }          1 "runs a command prefix that the executor itself assembled (no SQL text)"] \
     [list bind.tcl    {(^|[\[ \{])uplevel }  2 "withScopes / lmap2 run a script literal written in this file"] \
     [list expr.tcl    {^\s*proc [^ \{]*\$}   4 "defstrict (names from this file) and the three cx::pN procs, verified by verify.tcl"] \
-    [list db.tcl      {catch \{open }          3 "lock files, created exclusively (O_EXCL) - the same protocol as MK Studio"] \
-    [list db.tcl      {(^|\[)open }            3 "reads: the lock file, /proc/<pid>/stat"] \
+    [list db.tcl      {catch \{open }          1 "the lock file, created exclusively (O_EXCL) - the protocol of MK Studio's docs/CONCURRENCY.md"] \
+    [list db.tcl      {(^|\[)open }            5 "the lock file (create, bounded read), its takeover guard (O_EXCL), /proc/<pid>/stat and /proc/stat"] \
+    [list db.tcl      {(^|\[)after }           1 "waits 40 ms for another process's takeover guard, as the lock protocol says (no event loop is entered)"] \
     [list dbcheck.tcl {(^|\[)open }            2 "reads the first and last bytes of a database file to validate its frame"] \
-    [list spill.tcl   {(^|\[)open }            1 "reads /dev/urandom for the private folder's random name"] \
+    [list spill.tcl   {(^|\[)open }            2 "reads /dev/urandom for the private folder's random name, and /proc/<pid>/stat"] \
+    [list dbcheck.tcl {catch \{open }          1 "the verifier helper process (a pipe to verify_child.tcl)"] \
+    [list dbcheck.tcl {\{exec }                1 "kills the verifier helper if it hangs (a pid it started itself)"] \
+    [list spill.tcl   {\{exec }                2 "process-liveness probe (see above)"] \
+    [list dbcheck.tcl {(^|\[)after }           1 "sleeps 10 ms while polling the verifier helper (no event loop is entered)"] \
     [list spill.tcl   {catch \{open }          2 "the spill file path is built by spillNewPath from the temp dir + a counter"] \
-    [list mkitsql.tcl {(^|[\[ \{])source -}  3 "loads this package's own files (core, and one of the two storage layers)"] \
+    [list mkitsql.tcl {(^|[\[ \{])source -}  5 "loads this package's own files (core, shared storage code, and one of the two storage layers)"] \
     [list spill.tcl   {catch \{exec }          2 "process-liveness probe (kill -0 / tasklist) with a pid already checked to be a positive integer"] \
     [list stmt.tcl    {(^|\[)rename }        1 "deletes the generated cx::pN procs"] \
     [list pkgIndex.tcl {(^|[\[ \{])source -}  1 "package index: loads mkitsql.tcl"]]
 # any other dynamic-code or process command anywhere in mkitsql/ is a lint failure
-set forbidden {{(^|\[)subst } {(^|\[)interp } {(^|\[)exec } {(^|\[)trace } {(^|\[)after } {(^|\[)socket }
+set forbidden {{(^|\[)subst } {(^|\[)interp } {(^|\[)exec } {(^|\[)trace } {(^|\[)socket }
     {(^|\[)fileevent } {info body} {regsub [^#\n]*-command} {(^|\[)uplevel #0} {(^|\[)namespace inscope}
     {(^|\[)interp alias} {(^|\[)load } {(^|\[)vwait }}
 foreach f [glob -directory $root/mkitsql *.tcl] {

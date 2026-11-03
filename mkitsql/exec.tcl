@@ -111,6 +111,7 @@ proc ::mkitsql::streamPlan {id outer sink {ids 0}} {
     switch -- [dict get $p kind] {
         select    { return [selectStream $p $outer $sink $ids] }
         values {
+            if {[dict exists $p lits]} { return [emitAll $sink [dict get $p lits]] }
             set out {}
             foreach pr [dict get $p procs] { lappend out [$pr {} $outer] }
             return [emitAll $sink $out]
@@ -269,7 +270,7 @@ proc ::mkitsql::distAdd {i chunk} {
     set keyIdx $S($i,key)
     set fresh {} ; set spill {}
     foreach rec $chunk {
-        set k [expr {$keyIdx < 0 ? $rec : [lindex $rec $keyIdx]}]
+        if {$keyIdx < 0} { set k [::mkitsql::rt::sk $rec] } else { set k [lindex $rec $keyIdx] }
         if {[dict exists $S($i,seen) $k]} continue
         if {$S($i,over)} { lappend spill [list $k $rec] ; continue }
         dict set S($i,seen) $k 1
@@ -341,8 +342,8 @@ proc ::mkitsql::scanPlain {path node outer filter sink} {
         if {$cancel} { fail "Cancelled" }
         if {$progressHook ne ""} { {*}$progressHook }
         set data [::mkitsql::db::rows $path $props $first $chunk]
-        if {[string first $M $data] >= 0} { set data [cleanRows $data] }
-        if {[llength $dcols] && [string first -0 $data] >= 0} { set data [fixNegZero $data $dcols] }
+        if {[string first $M [::mkitsql::rt::flat $data]] >= 0} { set data [cleanRows $data] }
+        if {[llength $dcols] && [string first -0 [::mkitsql::rt::flat $data]] >= 0} { set data [fixNegZero $data $dcols] }
         set i $first
         set out {}
         if {$filter eq ""} {
@@ -350,14 +351,14 @@ proc ::mkitsql::scanPlain {path node outer filter sink} {
                 foreach sp $subs { lappend r [::mkitsql::db::subSize $path $i $sp] }
                 lappend r $path!$i
                 incr i
-                lappend out $r
+                lappend out [::mkitsql::rt::sk $r]
             }
         } else {
             foreach r $data {
                 foreach sp $subs { lappend r [::mkitsql::db::subSize $path $i $sp] }
                 lappend r $path!$i
                 incr i
-                if {[$filter $r $outer] eq "1"} { lappend out $r }
+                if {[$filter $r $outer] eq "1"} { lappend out [::mkitsql::rt::sk $r] }
             }
         }
         if {[llength $out] && [emit $sink $out]} { return 1 }
@@ -384,13 +385,13 @@ proc ::mkitsql::scanCandidates {path node outer filter sink cand} {
         if {$progressHook ne ""} { {*}$progressHook }
         set idxs [lrange $cand $k [expr {$k + $chunk - 1}]]
         set data [::mkitsql::db::rowsAt $path $props $idxs]
-        if {[string first $M $data] >= 0} { set data [cleanRows $data] }
-        if {[llength $dcols] && [string first -0 $data] >= 0} { set data [fixNegZero $data $dcols] }
+        if {[string first $M [::mkitsql::rt::flat $data]] >= 0} { set data [cleanRows $data] }
+        if {[llength $dcols] && [string first -0 [::mkitsql::rt::flat $data]] >= 0} { set data [fixNegZero $data $dcols] }
         set out {}
         foreach r $data i $idxs {
             foreach sp $subs { lappend r [::mkitsql::db::subSize $path $i $sp] }
             lappend r $path!$i
-            if {$filter eq "" || [$filter $r $outer] eq "1"} { lappend out $r }
+            if {$filter eq "" || [$filter $r $outer] eq "1"} { lappend out [::mkitsql::rt::sk $r] }
         }
         if {[llength $out] && [emit $sink $out]} { return 1 }
     }
@@ -486,7 +487,7 @@ proc ::mkitsql::stLateral {node outer sink chunk} {
     set type [dict get $node type] ; set wr [dict get $node wr] ; set resid [dict get $node resid]
     set rn [dict get $node right] ; set latDerived [dict get $node latderived]
     if {!$latDerived} { set curPos [dict get $node curPos] ; set sub [dict get $rn sub] }
-    set nullR [lrepeat $wr $N]
+    set nullR [::mkitsql::rep $wr $N]
     set out {}
     foreach l $chunk {
         if {$latDerived} {
@@ -498,11 +499,11 @@ proc ::mkitsql::stLateral {node outer sink chunk} {
         }
         set hit 0
         foreach r $R {
-            set t [list {*}$l {*}$r]
+            set t [::mkitsql::rt::sk [list {*}$l {*}$r]]
             if {$resid ne "" && [$resid $t $outer] ne "1"} continue
             lappend out $t ; set hit 1
         }
-        if {!$hit && $type eq "left"} { lappend out [list {*}$l {*}$nullR] }
+        if {!$hit && $type eq "left"} { lappend out [::mkitsql::rt::sk [list {*}$l {*}$nullR]] }
         if {[llength $out] >= $cap} { if {[emit $sink $out]} { return 1 } ; set out {} }
     }
     return [emit $sink $out]
@@ -532,9 +533,9 @@ proc ::mkitsql::keyedJoin {node outer sink} {
     set S($j,ht) $ht ; set S($j,rows) $rows ; set S($j,matched) [dict create]
     set stop [srcStream [dict get $node left] $outer [list ::mkitsql::stProbe $j $node $outer $sink]]
     if {!$stop && [dict get $node type] in {right full}} {
-        set nullL [lrepeat [dict get $node wl] $N] ; set out {} ; set ri 0
+        set nullL [::mkitsql::rep [dict get $node wl] $N] ; set out {} ; set ri 0
         foreach r $rows {
-            if {![dict exists $S($j,matched) $ri]} { lappend out [list {*}$nullL {*}$r] }
+            if {![dict exists $S($j,matched) $ri]} { lappend out [::mkitsql::rt::sk [list {*}$nullL {*}$r]] }
             incr ri
         }
         set stop [emitAll $sink $out]
@@ -545,20 +546,20 @@ proc ::mkitsql::keyedJoin {node outer sink} {
 proc ::mkitsql::stProbe {j node outer sink chunk} {
     variable S ; variable N
     set type [dict get $node type] ; set resid [dict get $node resid] ; set lkey [dict get $node lkey]
-    set nullR [lrepeat [dict get $node wr] $N]
+    set nullR [::mkitsql::rep [dict get $node wr] $N]
     set rows $S($j,rows) ; set out {} ; set cap [set ::mkitsql::chunk]
     foreach l $chunk {
         set k [$lkey $l $outer]
         set hit 0
         if {[lsearch -exact $k $N] < 0 && [dict exists $S($j,ht) $k]} {
             foreach ri [dict get $S($j,ht) $k] {
-                set t [list {*}$l {*}[lindex $rows $ri]]
+                set t [::mkitsql::rt::sk [list {*}$l {*}[lindex $rows $ri]]]
                 if {$resid ne "" && [$resid $t $outer] ne "1"} continue
                 lappend out $t ; set hit 1
                 dict set S($j,matched) $ri 1
             }
         }
-        if {!$hit && $type in {left full}} { lappend out [list {*}$l {*}$nullR] }
+        if {!$hit && $type in {left full}} { lappend out [::mkitsql::rt::sk [list {*}$l {*}$nullR]] }
         if {[llength $out] >= $cap} { if {[emit $sink $out]} { return 1 } ; set out {} }
     }
     return [emit $sink $out]
@@ -576,7 +577,7 @@ proc ::mkitsql::stKeyRecSpool {kproc outer sorter chunk} { return [stKeyRec $kpr
 proc ::mkitsql::mergeJoin {node outer sink bs} {
     variable N
     set type [dict get $node type] ; set resid [dict get $node resid]
-    set nullR [lrepeat [dict get $node wr] $N] ; set nullL [lrepeat [dict get $node wl] $N]
+    set nullR [::mkitsql::rep [dict get $node wr] $N] ; set nullL [::mkitsql::rep [dict get $node wl] $N]
     set spec {{key 0 asc "" text}}
     set rs [sorterNew $spec] ; set ls [sorterNew $spec]
     spoolEach $bs [list ::mkitsql::stKeyRec [dict get $node rkey] $outer $rs]
@@ -598,16 +599,16 @@ proc ::mkitsql::mergeJoin {node outer sink bs} {
             foreach l $Ls {
                 set hit 0 ; set ri 0
                 foreach r $Rs {
-                    set t [list {*}$l {*}$r]
+                    set t [::mkitsql::rt::sk [list {*}$l {*}$r]]
                     if {$resid eq "" || [$resid $t $outer] eq "1"} { lappend out $t ; set hit 1 ; dict set rhit $ri 1 }
                     incr ri
                 }
-                if {!$hit && $type in {left full}} { lappend out [list {*}$l {*}$nullR] }
+                if {!$hit && $type in {left full}} { lappend out [::mkitsql::rt::sk [list {*}$l {*}$nullR]] }
                 if {[llength $out] >= 2000} { if {[emit $sink $out]} { set stop 1 ; break } ; set out {} }
             }
             if {$type in {right full}} {
                 set ri 0
-                foreach r $Rs { if {![dict exists $rhit $ri]} { lappend out [list {*}$nullL {*}$r] } ; incr ri }
+                foreach r $Rs { if {![dict exists $rhit $ri]} { lappend out [::mkitsql::rt::sk [list {*}$nullL {*}$r]] } ; incr ri }
             }
             set lg [readerGroup $lr] ; set rg [readerGroup $rr]
         } else {
@@ -618,10 +619,10 @@ proc ::mkitsql::mergeJoin {node outer sink bs} {
             } elseif {$rnull} { set takeLeft 0
             } else { set takeLeft [expr {[string compare $lk $rk] < 0}] }
             if {$takeLeft} {
-                if {$type in {left full}} { foreach rec [lindex $lg 1] { lappend out [list {*}[lindex $rec 1] {*}$nullR] } }
+                if {$type in {left full}} { foreach rec [lindex $lg 1] { lappend out [::mkitsql::rt::sk [list {*}[lindex $rec 1] {*}$nullR]] } }
                 set lg [readerGroup $lr]
             } else {
-                if {$type in {right full}} { foreach rec [lindex $rg 1] { lappend out [list {*}$nullL {*}[lindex $rec 1]] } }
+                if {$type in {right full}} { foreach rec [lindex $rg 1] { lappend out [::mkitsql::rt::sk [list {*}$nullL {*}[lindex $rec 1]]] } }
                 set rg [readerGroup $rr]
             }
         }
@@ -653,8 +654,8 @@ proc ::mkitsql::stNested {j node outer sink chunk} {
     set S($j,l) $chunk ; set S($j,lm) [dict create] ; set S($j,rc) 0
     set stop [spoolEach $S($j,bs) [list ::mkitsql::stNestedInner $j $node $outer $sink]]
     if {!$stop && $type in {left full}} {
-        set nullR [lrepeat [dict get $node wr] $N] ; set out {} ; set i 0
-        foreach l $chunk { if {![dict exists $S($j,lm) $i]} { lappend out [list {*}$l {*}$nullR] } ; incr i }
+        set nullR [::mkitsql::rep [dict get $node wr] $N] ; set out {} ; set i 0
+        foreach l $chunk { if {![dict exists $S($j,lm) $i]} { lappend out [::mkitsql::rt::sk [list {*}$l {*}$nullR]] } ; incr i }
         set stop [emit $sink $out]
     }
     return $stop
@@ -669,7 +670,7 @@ proc ::mkitsql::stNestedInner {j node outer sink rchunk} {
     foreach r $rchunk {
         set i 0 ; set rc $S($j,rc)
         foreach l $S($j,l) {
-            set t [list {*}$l {*}$r]
+            set t [::mkitsql::rt::sk [list {*}$l {*}$r]]
             if {$resid eq "" || [$resid $t $outer] eq "1"} {
                 lappend out $t ; dict set S($j,lm) $i 1
                 if {$track} { dict set S($j,rmatched) $rc 1 }
@@ -683,9 +684,9 @@ proc ::mkitsql::stNestedInner {j node outer sink rchunk} {
 }
 proc ::mkitsql::stRightRest {j node sink rchunk} {
     variable S ; variable N
-    set nullL [lrepeat [dict get $node wl] $N] ; set out {}
+    set nullL [::mkitsql::rep [dict get $node wl] $N] ; set out {}
     foreach r $rchunk {
-        if {![dict exists $S($j,rmatched) $S($j,rc)]} { lappend out [list {*}$nullL {*}$r] }
+        if {![dict exists $S($j,rmatched) $S($j,rc)]} { lappend out [::mkitsql::rt::sk [list {*}$nullL {*}$r]] }
         incr S($j,rc)
     }
     return [emit $sink $out]
@@ -804,19 +805,19 @@ proc ::mkitsql::aggPartial {i gi key} {
     set parts {} ; set k 0
     foreach spec [dict get $S($i,a) specs] {
         lassign $spec kind distinct
-        set sep [expr {[info exists ST(sep,$gi,$k)] ? [list $ST(sep,$gi,$k)] : {}}]
+        set sep [expr {[info exists ST(sep,$gi,$k)] ? [::mkitsql::rt::sk [list $ST(sep,$gi,$k)]] : {}}]
         if {$distinct && $kind in {count sum avg string_agg}} {
-            lappend parts [list $ST(dv,$gi,$k) $sep]
+            lappend parts [::mkitsql::rt::sk [list [::mkitsql::rt::sk $ST(dv,$gi,$k)] $sep]]
         } else {
             switch -- $kind {
                 avg { lappend parts [list $ST($gi,$k) $ST(c,$gi,$k)] }
-                string_agg { lappend parts [list $ST($gi,$k) $sep] }
+                string_agg { lappend parts [::mkitsql::rt::sk [list [::mkitsql::rt::sk $ST($gi,$k)] $sep]] }
                 default { lappend parts $ST($gi,$k) }
             }
         }
         incr k
     }
-    return [list $key $parts]
+    return [list $key [::mkitsql::rt::sk $parts]]
 }
 proc ::mkitsql::aggDump {i} {
     variable S
@@ -873,7 +874,7 @@ proc ::mkitsql::aggFlush1 {i outer next} {
         foreach key $S($i,order) {
             set t $key ; set k 0
             foreach spec $specs { lappend t [aggResult $i $gi $k [lindex $spec 0]] ; incr k }
-            lappend out $t
+            lappend out [::mkitsql::rt::sk $t]
             incr gi
             if {[llength $out] >= 2000} { if {[emit $next $out]} { return 1 } ; set out {} }
         }
@@ -888,7 +889,7 @@ proc ::mkitsql::aggFlush1 {i outer next} {
         foreach rec [lindex $g 1] { aggMerge $i 0 [lindex $rec 1] }
         set t [lindex $g 0] ; set k 0
         foreach spec $specs { lappend t [aggResult $i 0 $k [lindex $spec 0]] ; incr k }
-        lappend out $t
+        lappend out [::mkitsql::rt::sk $t]
         if {[llength $out] >= 2000} { if {[emit $next $out]} { set stop 1 ; break } ; set out {} }
     }
     readerFree $r
@@ -977,7 +978,7 @@ proc ::mkitsql::aggComb {i slots chunk} {
     variable S ; variable memBytes
     set ng [dict get $S($i,a) ng]
     foreach t $chunk {
-        set key [lrange $t 0 [expr {$ng - 1}]]
+        set key [::mkitsql::rt::sk [lrange $t 0 [expr {$ng - 1}]]]
         set sd {}
         foreach sl $slots v [lrange $t $ng end] { lappend sd $sl $v }
         if {$S($i,cbSort) eq ""} {
@@ -986,7 +987,7 @@ proc ::mkitsql::aggComb {i slots chunk} {
             } else {
                 dict set S($i,cbMem) $key $sd
             }
-            incr S($i,cbBytes) [expr {4 * [string length $t] + 200}]
+            incr S($i,cbBytes) [expr {4 * [string length [::mkitsql::rt::flat $t]] + 200}]
             if {$S($i,cbBytes) > $memBytes} {
                 set sr [sorterNew {{key 0 asc "" text}}]
                 set recs {}
@@ -1041,7 +1042,7 @@ proc ::mkitsql::aggAssemble {key sd defaults} {
         if {[dict exists $sd $k]} { lappend t [dict get $sd $k] } else { lappend t $d }
         incr k
     }
-    return $t
+    return [::mkitsql::rt::sk $t]
 }
 
 # ============================================================================
@@ -1084,7 +1085,7 @@ proc ::mkitsql::winFlush {i outer next} {
 }
 proc ::mkitsql::stWinKey {w outer sorter chunk} {
     set np [dict get $w np] ; set pr [dict get $w proc] ; set recs {}
-    foreach r $chunk { lappend recs [list [lrange [$pr $r $outer] 0 [expr {$np - 1}]] $r] }
+    foreach r $chunk { lappend recs [list [::mkitsql::rt::sk [lrange [$pr $r $outer] 0 [expr {$np - 1}]]] $r] }
     sorterAdd $sorter $recs
     return 0
 }
@@ -1148,7 +1149,7 @@ proc ::mkitsql::recursiveStream {p outer sink} {
     while {[llength $rows]} {
         if {!$all} {
             set fresh {}
-            foreach r $rows { if {![dict exists $seen $r]} { dict set seen $r 1 ; lappend fresh $r } }
+            foreach r $rows { set sr [::mkitsql::rt::sk $r] ; if {![dict exists $seen $sr]} { dict set seen $sr 1 ; lappend fresh $r } }
             set rows $fresh
             if {[dict size $seen] > $maxWorkRows} {
                 catch {unset wtable($tid)}

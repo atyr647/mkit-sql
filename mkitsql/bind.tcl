@@ -14,6 +14,9 @@
 namespace eval ::mkitsql {
     variable srcSeq 0
     variable needed            ;# needed(srcId,lowername) = 1
+    variable bindCount 0 ; variable maxBinds 4000
+    variable derivedBq         ;# derivedBq(srcId) = the bound query of a derived table or CTE
+    array set derivedBq {}
     variable scopes {}         ;# stack of scopes (innermost first); scope = list of source dicts
     variable ctes {}           ;# stack of {name cols query} visible CTEs (innermost first)
     variable refLog {}         ;# stack of lists of {level srcId} (outer references)
@@ -130,6 +133,26 @@ proc ::mkitsql::newSource {kind alias cols args} {
         display $alias cols $cols hidden {}]
     foreach {k v} $args { dict set d $k $v }
     return $d
+}
+
+# A derived table / CTE source.  Its bound query is kept in `derivedBq` (by source id), NOT inside the source dict: the source
+# dict is copied into the select's `srcs` and into its FROM tree, so a bound query stored in it would be stored twice per
+# nesting level and the size of every bound tree would double with each level of subquery.
+proc ::mkitsql::newDerived {alias cols bq args} {
+    variable derivedBq
+    set src [newSource derived $alias $cols {*}$args]
+    set derivedBq([dict get $src id]) $bq
+    return $src
+}
+
+# a derived table cannot have two columns of the same name (a reference to either one could not be told apart)
+proc ::mkitsql::checkDistinctNames {names what} {
+    set seen {}
+    foreach n $names {
+        set l [string tolower $n]
+        if {[lsearch -exact $seen $l] >= 0} { fail "$what has two columns named '$n'; give one of them a different name (AS ...)" }
+        lappend seen $l
+    }
 }
 
 proc ::mkitsql::srcColIndex {src name} {
@@ -274,7 +297,8 @@ proc ::mkitsql::bindSource {node} {
                 }
                 set outNames $cols
             }
-            return [newSource derived $alias [derivedCols $outNames $outTypes $bq] bq $bq outerok [expr {$outerok eq "outerok"}] lateralq [expr {$outerok eq "lateral"}]]
+            checkDistinctNames $outNames "Subquery '$alias'"
+            return [newDerived $alias [derivedCols $outNames $outTypes $bq] $bq outerok [expr {$outerok eq "outerok"}] lateralq [expr {$outerok eq "lateral"}]]
         }
         table {
             lassign $node _ parts subs alias
@@ -309,8 +333,8 @@ proc ::mkitsql::bindSource {node} {
                             }
                             set outNames $ccols
                         }
-                        return [newSource derived [pickName $alias $cname] \
-                            [derivedCols $outNames [dict get $bq outTypes] $bq] bq $bq]
+                        checkDistinctNames $outNames "CTE '$cname'"
+                        return [newDerived [pickName $alias $cname] [derivedCols $outNames [dict get $bq outTypes] $bq] $bq]
                     }
                 }
             }
@@ -413,7 +437,7 @@ proc ::mkitsql::bindRecursiveCte {ci cname ccols cq} {
     set rt {}
     foreach a $types b [dict get $step outTypes] { lappend rt [unify $a $b] }
     return [dict create kind recursive anchor $anchor step $step all [dict get $body all] tid $tid \
-        outNames $names outTypes $rt outLetters [lrepeat [llength $names] ""] outDrill [lrepeat [llength $names] 0]]
+        outNames $names outTypes $rt outLetters [::mkitsql::rep [llength $names] ""] outDrill [::mkitsql::rep [llength $names] 0]]
 }
 
 proc ::mkitsql::derivedCols {names types bq} {
@@ -942,7 +966,12 @@ proc ::mkitsql::outerSrcsAt1 {refs} {
 #   outLetters  Metakit letters ("" if not a plain column)    outDrill (list of 0/1)
 #   order limit offset   (kind-specific bodies below)
 proc ::mkitsql::bindQuery {q} {
-    variable ctes
+    variable ctes ; variable bindCount ; variable maxBinds
+    # a CTE is bound again at every reference, so a chain of CTEs that each use the previous one twice doubles the work at
+    # every level: stop a statement that expands to an absurd number of subqueries instead of hanging
+    if {[incr bindCount] > $maxBinds} {
+        fail "The statement expands to more than $maxBinds subqueries (a CTE or view that is referenced several times in a chain of CTEs is expanded at every reference); simplify it or put an intermediate result in a table"
+    }
     set savedCtes $ctes
     foreach c [dict get $q with] {
         lassign $c cname ccols cq crec
@@ -1022,7 +1051,7 @@ proc ::mkitsql::bindBody {body} {
         values {
             set rows {}
             set ncol [llength [lindex [dict get $body rows] 0]]
-            set types [lrepeat $ncol null]
+            set types [::mkitsql::rep $ncol null]
             foreach r [dict get $body rows] {
                 set br {} ; set i 0
                 foreach e $r {
@@ -1037,7 +1066,7 @@ proc ::mkitsql::bindBody {body} {
             foreach t $types { lappend names column[incr i] }
             set types [lmap_ $types {t {expr {$t eq "null" ? "text" : $t}}}]
             return [dict create kind values rows $rows outNames $names outTypes $types \
-                outLetters [lrepeat $ncol ""] outDrill [lrepeat $ncol 0]]
+                outLetters [::mkitsql::rep $ncol ""] outDrill [::mkitsql::rep $ncol 0]]
         }
         setop {
             set l [bindBody [dict get $body left]]
@@ -1049,7 +1078,7 @@ proc ::mkitsql::bindBody {body} {
             foreach a [dict get $l outTypes] b [dict get $r outTypes] { lappend types [unify $a $b] }
             return [dict create kind setop op [dict get $body op] all [dict get $body all] \
                 left $l right $r outNames [dict get $l outNames] outTypes $types \
-                outLetters [lrepeat [llength $types] ""] outDrill [lrepeat [llength $types] 0]]
+                outLetters [::mkitsql::rep [llength $types] ""] outDrill [::mkitsql::rep [llength $types] 0]]
         }
     }
     error "bindBody"

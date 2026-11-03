@@ -41,7 +41,8 @@ q "SELECT s FROM t ORDER BY s DESC"
 set mkitsql::progressHook ""
 check seen_one_folder [dict size $::seen] 1
 set d [lindex [dict keys $::seen] 0]
-check folder_name [regexp {^mkitsql-[A-Za-z0-9_]+-\d+-[0-9a-f]{16}$} [file tail $d]] 1
+check folder_name [regexp {^mkitsql-[A-Za-z0-9_]+-\d+-\d+-[0-9a-f]{16}$} [file tail $d]] 1
+check folder_has_our_namespace [string match "*-[pid]-[mkitsql::pidNs]-*" [file tail $d]] 1
 check folder_has_our_pid [string match "*-[pid]-*" [file tail $d]] 1
 lassign [dict get $::seen $d] type owned perm fperms fowned nfiles
 check folder_is_directory $type directory
@@ -78,8 +79,8 @@ check victim_survived [file exists $victim] 1
 set ::picks {}
 rename ::mkitsql::randHex ::mkitsql::randHex_real
 proc ::mkitsql::randHex {n} { if {[llength $::picks]} { set x [lindex $::picks 0] ; set ::picks [lrange $::picks 1 end] ; return $x } ; return [::mkitsql::randHex_real $n] }
-set want1 mkitsql-[mkitsql::userTag]-[pid]-aaaaaaaaaaaaaaaa
-set want2 mkitsql-[mkitsql::userTag]-[pid]-bbbbbbbbbbbbbbbb
+set want1 mkitsql-[mkitsql::userTag]-[pid]-[mkitsql::pidNs]-aaaaaaaaaaaaaaaa
+set want2 mkitsql-[mkitsql::userTag]-[pid]-[mkitsql::pidNs]-bbbbbbbbbbbbbbbb
 exec ln -s $area/elsewhere $area/$want1
 file mkdir $area/$want2
 set ::picks {aaaaaaaaaaaaaaaa bbbbbbbbbbbbbbbb}
@@ -97,7 +98,10 @@ proc mkdirWith {name files} { file mkdir $::area/$name ; foreach f $files { set 
 set u [mkitsql::userTag]
 mkdirWith mkitsql-$u-999999-0123456789abcdef {000001.spill 000002.spill}        ;# dead process
 mkdirWith mkitsql-$u-1-0123456789abcdef {000001.spill}                          ;# pid 1 is alive and the folder is fresh
-mkdirWith mkitsql-$u-2-0123456789abcdef {000001.spill}                          ;# pid 2 (alive or not) but made old below
+mkdirWith mkitsql-$u-1-1111111111111111 {000001.spill}                           ;# pid 1 is alive; made OLD below: a running process's folder is never swept, however old
+set ns [mkitsql::pidNs]
+mkdirWith mkitsql-$u-999991-$ns-0123456789abcdef {000001.spill}                 ;# dead process, our namespace
+mkdirWith mkitsql-$u-999990-4242424242-0123456789abcdef {000001.spill}          ;# another PID namespace: its pid means nothing here
 mkdirWith mkitsql-$u-999998-0123456789abcdef {000001.spill notmine.txt}         ;# contains something that is not a spill file
 mkdirWith mkitsql-$u-999997-0123456789abcdef {}                                 ;# empty, dead
 mkdirWith mkitsql-$u-999996-xyz {000001.spill}                                  ;# does not match the name pattern
@@ -107,7 +111,7 @@ set fh [open $area/unrelated.txt w] ; close $fh
 file mkdir $area/elsewhere_dir ; set fh [open $area/elsewhere_dir/000001.spill w] ; close $fh
 file link -symbolic $area/mkitsql-$u-999994-0123456789abcdef $area/elsewhere_dir
 set old [expr {[clock seconds] - 3 * 86400}]
-file mtime $area/mkitsql-$u-2-0123456789abcdef $old
+file mtime $area/mkitsql-$u-1-1111111111111111 $old
 file mtime $area/mkitsql-$u-1-0123456789abcdef [clock seconds]
 check pid_999999_dead [mkitsql::pidAlive 999999] 0
 check pid_1_alive [mkitsql::pidAlive 1] 1
@@ -117,7 +121,9 @@ set left [lmap_ [entries] {p {file tail $p}}]
 check swept_count $n 4
 check dead_folder_removed [expr {[lsearch $left mkitsql-$u-999999-0123456789abcdef] < 0}] 1
 check live_fresh_folder_kept [expr {[lsearch $left mkitsql-$u-1-0123456789abcdef] >= 0}] 1
-check old_folder_removed [expr {[lsearch $left mkitsql-$u-2-0123456789abcdef] < 0}] 1
+check old_folder_of_live_process_kept [expr {[lsearch $left mkitsql-$u-1-1111111111111111] >= 0}] 1
+check dead_folder_with_namespace_removed [expr {[lsearch $left mkitsql-$u-999991-$ns-0123456789abcdef] < 0}] 1
+check foreign_namespace_kept [expr {[lsearch $left mkitsql-$u-999990-4242424242-0123456789abcdef] >= 0}] 1
 check folder_with_foreign_file_kept [expr {[lsearch $left mkitsql-$u-999998-0123456789abcdef] >= 0}] 1
 check empty_dead_folder_removed [expr {[lsearch $left mkitsql-$u-999997-0123456789abcdef] < 0}] 1
 check odd_name_kept [expr {[lsearch $left mkitsql-$u-999996-xyz] >= 0}] 1

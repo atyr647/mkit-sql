@@ -26,6 +26,7 @@ namespace eval ::mkitsql {
     #   - CHR() refuses to create it, and blobs are bytes (0-255), so they cannot hold it
     #   - every string operation only rearranges characters it was given
     # so no expression can ever build the sentinel from data: NULL cannot be forged.
+    variable maxString 67108864      ;# characters: the longest string a function or || may build
     variable M "\uFDD0"
     variable N "\uFDD0NULL"
     variable R [format %c 65533]
@@ -38,6 +39,68 @@ namespace eval ::mkitsql {
     array set planCorr {}
 }
 namespace eval ::mkitsql::rt {}
+
+# ---- a bug in the list code of Tcl 8.5 and 8.6.3 (fixed later) ------------------------------------------------------------
+# When the string form of a list is made, a list whose FIRST element starts with '#' and contains two or more of the
+# characters ] and " comes out damaged: extra blanks or stray bytes after the element, sometimes a different element
+# count.  Rows (lists of cells) whose first cell is such text would be corrupted whenever they are written to a temporary
+# file, used as a dictionary key (DISTINCT, GROUP BY, joins, UNION) or handed to a caller that prints them.  The
+# engine finds out at load time whether the Tcl it runs on has the bug; if so every list the engine builds that way
+# goes through `rt::sk`, which writes such a list with its first element in the (correct) non-first-element form.
+# lrepeat with a count of 0 is an error in Tcl 8.5
+proc ::mkitsql::rep {n v} { if {$n <= 0} { return {} } ; return [lrepeat $n $v] }
+
+proc ::mkitsql::tclListBug {} {
+    foreach s [list "#\]\]x" "#\"\"x" "#\]\"x" "#\"\]\]x\"y"] {
+        set l [list $s]
+        set str [string range $l 0 end]
+        if {[catch {expr {[llength $str] != 1 || [lindex $str 0] ne $s || [string length $str] > [string length $s] + 3 + 1}} bad] || $bad} { return 1 }
+    }
+    return 0
+}
+set ::mkitsql::listBug [::mkitsql::tclListBug]
+# (tests can force the workaround on or off:  MKIT_LISTBUG=0|1)
+if {[info exists ::env(MKIT_LISTBUG)] && $::env(MKIT_LISTBUG) in {0 1}} { set ::mkitsql::listBug $::env(MKIT_LISTBUG) }
+if {$::mkitsql::listBug} {
+    # Can this element be written in braces?  (balanced braces, no backslash-newline, no backslash at the end)
+    proc ::mkitsql::rt::braceable {e} {
+        set n [string length $e] ; set depth 0
+        for {set i 0} {$i < $n} {incr i} {
+            switch -exact -- [string index $e $i] {
+                "\\" { if {$i + 1 >= $n || [string index $e [expr {$i + 1}]] eq "\n"} { return 0 } ; incr i }
+                "\{" { incr depth }
+                "\}" { if {[incr depth -1] < 0} { return 0 } }
+            }
+        }
+        return [expr {$depth == 0}]
+    }
+    # The string form of a list whose first element starts with '#', written the way a healthy Tcl writes it (first element in
+    # braces when that is possible, else with backslashes), but built here so that the damaged routine is not used.  If this
+    # construction ever does not read back as the same list, the always-valid non-first-element form is used instead.
+    proc ::mkitsql::rt::sk {l} {
+        set e [lindex $l 0]
+        if {[string index $e 0] ne "#"} { return $l }
+        set head [string range [list x $e] 2 end]
+        set rest [string range [list x {*}[lrange $l 1 end]] 1 end]
+        if {[string index $head 0] eq "\{"} {
+            set cand $head$rest
+        } elseif {[::mkitsql::rt::braceable $e]} {
+            set cand "\{$e\}$rest"
+        } else {
+            set cand "\\$head$rest"
+        }
+        if {[catch {expr {[llength $cand] == [llength $l] && [lindex $cand 0] eq $e}} ok] || !$ok} {
+            return [string range [list x {*}$l] 2 end]
+        }
+        return $cand
+    }
+    # the text of a list for searching / measuring WITHOUT turning the list itself into a string (which would throw away its
+    # list form and re-read the damaged string form)
+    proc ::mkitsql::rt::flat {l} { return [join $l] }
+} else {
+    proc ::mkitsql::rt::sk {l} { return $l }
+    proc ::mkitsql::rt::flat {l} { return $l }
+}
 namespace eval ::mkitsql::cx {}
 
 # ============================================================================
@@ -119,7 +182,10 @@ proc ::mkitsql::rt::num {v} {
     if {$b == 0} { ::mkitsql::fail "Division by zero" }
     set r [expr {fmod($a, $b)}] ; if {$r eq "-0.0"} { return 0.0 } ; return $r
 }
-::mkitsql::defstrict cat {a b} { return $a$b }
+::mkitsql::defstrict cat {a b} {
+    if {[string length $a] + [string length $b] > $::mkitsql::maxString} { ::mkitsql::fail "The result would be longer than $::mkitsql::maxString characters (::mkitsql::maxString)" }
+    return $a$b
+}
 
 # ---- comparison ------------------------------------------------------------
 # n = numeric, s = text/blob, m = mixed (text vs number: compare as numbers when
@@ -233,13 +299,25 @@ proc ::mkitsql::rt::inlist {v list kind hasNull} {
 ::mkitsql::defstrict fn_FLOOR {a} { set r [expr {double(floor($a))}] ; if {$r eq "-0.0"} { return 0.0 } ; return $r }
 # ROUND / TRUNC work on the number's shortest decimal form, so ROUND(2.675, 2) is 2.68
 # and ties round away from zero (the SQL rule) instead of following binary noise.
-::mkitsql::defstrict fn_ROUND {a {n 0}} { ::mkitsql::decRound $a $n 1 }
-::mkitsql::defstrict fn_TRUNC {a {n 0}} { ::mkitsql::decRound $a $n 0 }
+# (digit counts beyond what a double can hold change nothing / give zero: clamped, since 10 ** n is a bignum)
+::mkitsql::defstrict fn_ROUND {a {n 0}} {
+    set n [::mkitsql::rt::toInt $n]
+    if {$n > 400} { return [expr {double($a)}] } ; if {$n < -400} { return 0.0 }
+    ::mkitsql::decRound $a $n 1
+}
+::mkitsql::defstrict fn_TRUNC {a {n 0}} {
+    set n [::mkitsql::rt::toInt $n]
+    if {$n > 400} { return [expr {double($a)}] } ; if {$n < -400} { return 0.0 }
+    ::mkitsql::decRound $a $n 0
+}
 ::mkitsql::defstrict fn_SQRT {a} {
     if {$a < 0} { ::mkitsql::fail "Cannot take square root of a negative number" }
     expr {sqrt($a)}
 }
-::mkitsql::defstrict fn_POWER {a b} { expr {double($a) ** $b} }
+::mkitsql::defstrict fn_POWER {a b} {
+    if {[catch {expr {double($a) ** $b}} r]} { ::mkitsql::fail "Cannot compute POWER($a, $b)" }
+    return $r
+}
 ::mkitsql::defstrict fn_EXP {a} { expr {exp($a)} }
 ::mkitsql::defstrict fn_LN {a} {
     if {$a <= 0} { ::mkitsql::fail "Cannot take logarithm of zero or a negative number" }
@@ -252,8 +330,8 @@ proc ::mkitsql::rt::inlist {v list kind hasNull} {
 ::mkitsql::defstrict fn_SIN {a} { expr {sin($a)} }
 ::mkitsql::defstrict fn_COS {a} { expr {cos($a)} }
 ::mkitsql::defstrict fn_TAN {a} { expr {tan($a)} }
-::mkitsql::defstrict fn_ASIN {a} { expr {asin($a)} }
-::mkitsql::defstrict fn_ACOS {a} { expr {acos($a)} }
+::mkitsql::defstrict fn_ASIN {a} { if {abs($a) > 1} { ::mkitsql::fail "ASIN needs a number from -1 to 1" } ; expr {asin($a)} }
+::mkitsql::defstrict fn_ACOS {a} { if {abs($a) > 1} { ::mkitsql::fail "ACOS needs a number from -1 to 1" } ; expr {acos($a)} }
 ::mkitsql::defstrict fn_ATAN {a} { expr {atan($a)} }
 ::mkitsql::defstrict fn_ATAN2 {a b} { expr {atan2($a, $b)} }
 ::mkitsql::defstrict fn_DEGREES {a} { expr {$a * 180.0 / 3.141592653589793} }
@@ -288,10 +366,24 @@ proc ::mkitsql::rt::fn_RANDOM {} { expr {rand()} }
     if {$from eq ""} { return $s }
     string map [list $from $to] $s
 }
+# A whole-number argument (a count, a position, a code point): integers as they are, other numbers rounded, anything else
+# an error - never a raw Tcl error, and never a value that wraps around (found by an adversarial review: CHR(-4294902320)
+# wrapped to U+FDD0 and forged NULL).
+proc ::mkitsql::rt::toInt {v} {
+    if {[string is wideinteger -strict $v]} { return $v }
+    if {[string is double -strict $v] && $v == $v && abs($v) < 9.2e18} { return [expr {int(round($v))}] }
+    ::mkitsql::fail "A whole number was expected, not '[string range $v 0 40]'"
+}
+# longest string a function may build (a LPAD / REPEAT / || chain can otherwise exhaust memory from one short statement)
+proc ::mkitsql::rt::room {n} {
+    if {$n > $::mkitsql::maxString} { ::mkitsql::fail "The result would be longer than $::mkitsql::maxString characters (::mkitsql::maxString)" }
+}
 # SUBSTR(s, start [, len])  -- 1-based; follows the SQL standard for
 # out-of-range start / length.
 ::mkitsql::defstrict fn_SUBSTR {s start {len ""}} {
     if {$len eq "\uFDD0NULL"} { return $len }
+    set start [::mkitsql::rt::toInt $start]
+    if {$len ne ""} { set len [::mkitsql::rt::toInt $len] }
     set from $start
     if {$len eq ""} {
         set to [string length $s]
@@ -306,11 +398,13 @@ proc ::mkitsql::rt::fn_RANDOM {} { expr {rand()} }
 }
 # a negative count means "all but that many from the other end" (PostgreSQL)
 ::mkitsql::defstrict fn_LEFT {s n} {
+    set n [::mkitsql::rt::toInt $n]
     if {$n < 0} { set n [expr {[string length $s] + $n}] }
     if {$n <= 0} { return "" }
     string range $s 0 [expr {$n - 1}]
 }
 ::mkitsql::defstrict fn_RIGHT {s n} {
+    set n [::mkitsql::rt::toInt $n]
     if {$n < 0} { set n [expr {[string length $s] + $n}] }
     if {$n <= 0} { return "" }
     string range $s [expr {[string length $s] - $n}] end
@@ -319,13 +413,20 @@ proc ::mkitsql::rt::fn_RANDOM {} { expr {rand()} }
     if {$needle eq ""} { return 1 }
     expr {[string first $needle $hay] + 1}
 }
-::mkitsql::defstrict fn_REPEAT {s n} { string repeat $s [expr {$n < 0 ? 0 : $n}] }
+::mkitsql::defstrict fn_REPEAT {s n} {
+    set n [::mkitsql::rt::toInt $n]
+    if {$n <= 0 || $s eq ""} { return "" }
+    ::mkitsql::rt::room [expr {$n * [string length $s]}]
+    string repeat $s $n
+}
 ::mkitsql::defstrict fn_REVERSE {s} {
     set out ""
     foreach c [split $s ""] { set out $c$out }
     return $out
 }
 ::mkitsql::defstrict fn_LPAD {s n {fill " "}} {
+    set n [::mkitsql::rt::toInt $n]
+    ::mkitsql::rt::room $n
     set len [string length $s]
     if {$n <= $len} { return [string range $s 0 [expr {$n - 1}]] }
     if {$fill eq ""} { return $s }
@@ -333,6 +434,8 @@ proc ::mkitsql::rt::fn_RANDOM {} { expr {rand()} }
     return $pad$s
 }
 ::mkitsql::defstrict fn_RPAD {s n {fill " "}} {
+    set n [::mkitsql::rt::toInt $n]
+    ::mkitsql::rt::room $n
     set len [string length $s]
     if {$n <= $len} { return [string range $s 0 [expr {$n - 1}]] }
     if {$fill eq ""} { return $s }
@@ -341,6 +444,8 @@ proc ::mkitsql::rt::fn_RANDOM {} { expr {rand()} }
 }
 ::mkitsql::defstrict fn_ASCII {s} { if {$s eq ""} { return 0 } ; scan [string index $s 0] %c }
 ::mkitsql::defstrict fn_CHR {n} {
+    set n [::mkitsql::rt::toInt $n]
+    if {$n < 0 || $n > 0x10FFFF || ($n >= 0xD800 && $n <= 0xDFFF)} { ::mkitsql::fail "CHR() needs a code point from 0 to 1114111 (not a surrogate)" }
     if {$n == 64976} { ::mkitsql::fail "CHR(64976) is reserved: U+FDD0 marks NULL inside the engine" }
     format %c $n
 }
@@ -945,6 +1050,7 @@ proc ::mkitsql::compileList {nodes ctx} {
     }
     set name ::mkitsql::cx::p[incr cxCount]
     set body "list [join $words { }]"
+    if {$::mkitsql::listBug} { set body "::mkitsql::rt::sk \[$body\]" }
     verifyCode $body
     proc $name {r0 outer} $body
     return [list $name $types]

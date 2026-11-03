@@ -21,7 +21,7 @@ PostgreSQL rather than SQLite or MySQL, it says so. Examples use the sample data
 | --- | --- | --- |
 | `INT`, `INTEGER`, `SMALLINT`, `TINYINT` | `I` (32-bit) | writing a bigger value is an error that suggests `BIGINT` |
 | `BIGINT` | `L` (64-bit) | |
-| `REAL` | `F` (32-bit float) | low precision |
+| `REAL` | `F` (32-bit float) | low precision; a value beyond about 3.4e38 is an error (it would be stored as infinity) |
 | `DOUBLE PRECISION`, `FLOAT`, `DECIMAL`, `NUMERIC` | `D` (64-bit float) | **`DECIMAL`/`NUMERIC` are not exact** |
 | `BOOLEAN` | `I` (0/1) | `TRUE` / `FALSE` literals |
 | `VARCHAR(n)`, `CHAR(n)`, `TEXT` | `S` | the length is ignored |
@@ -201,11 +201,19 @@ MERGE INTO stock s USING incoming i ON s.sku = i.sku
 CREATE TABLE [IF NOT EXISTS] t (col type, ..., sub TABLE (col type, ...));    CREATE TABLE t AS SELECT ...;
 DROP TABLE [IF EXISTS] t;
 ALTER TABLE t ADD [COLUMN] col type | DROP [COLUMN] col | RENAME [COLUMN] a TO b
-           | ALTER COLUMN col [SET DATA] TYPE type | RENAME TO new_name;
+           | RENAME TO new_name;
 ```
 
-Names may only contain letters, digits and underscores. Renaming or retyping a column moves it to the end of
-the table (Metakit limitation). Renaming a table copies it (subviews included).
+Names may only contain letters, digits and underscores, and may not start with `__mks` (reserved for the scratch views
+and columns the engine and MK Studio create and delete themselves). Renaming a column moves it to the end of the table
+(Metakit limitation). Renaming a table copies it (subviews included).
+
+**`ALTER COLUMN ... TYPE` is refused, on purpose.** Metakit identifies a column by name *and* type; changing the type
+under the same name makes it keep the old storage, and on real Metakit that corrupted data and could hang the file on
+close. The error shows the safe recipe: add a new column, fill it with `CAST`, drop the old one, rename if wanted. The
+same Metakit rule applies to dropping a table or column and re-creating the name with another type in the same open
+file: while changes are pending the engine refuses with a clear message (`COMMIT`, then close and reopen, or reopen
+automatically when nothing is pending and the engine owns the file) instead of letting the file be damaged.
 `PRIMARY KEY`, `UNIQUE`, `FOREIGN KEY`, `CHECK`, `NOT NULL`, `DEFAULT` are rejected with a clear message because
 Metakit stores none of them; `::mkitsql::ignoreConstraints 1` parses and drops them instead.
 
@@ -324,13 +332,24 @@ one; for now a lookup is a scan, but a scan done inside Metakit.
 
 Metakit has no locking of its own. What mkit-sql guarantees, and what it does not:
 
-* **One writer per file.** Opening a file for writing creates `<file>.lock` (`pid host start`) exclusively. This is
-  the same protocol MK Studio uses, so the two exclude each other (`tests/locking.tcl` checks both directions with real
-  processes). A second writer is refused with `-errorcode {MKIT LOCKED pid host}`. A lock whose process died is stale
-  and is taken over, a recycled process id is recognised by the process start time (Linux), taking over is serialised so
-  two processes cannot both win, closing never removes a lock that is no longer ours, and a lock from another machine
-  (a network share) is always respected. If the folder is read-only no lock can be made and the file opens unlocked;
-  `::mkitsql::db::requireLock 1` turns that into an error.
+* **One writer per file.** Opening a file for writing creates `<file>.lock` containing `pid host [role [endpoint]]`
+  exclusively (`O_EXCL`). This is the protocol of MK Studio's `docs/CONCURRENCY.md`, implemented to the letter: the two
+  exclude each other, and a server can announce itself (`::mkitsql::db::lockRole`, `lockEndpoint`, set before opening).
+  A second writer is refused with `-errorcode {MKIT LOCKED pid host role endpoint}`. A lock is *held* when its process
+  is alive on this host or it names another host (a network share: always respected), *stale* when the process is gone
+  or the file is empty/garbled and older than 5 seconds, and *ours* when it names this process; stale and ours are
+  taken over under `<file>.lock.guard` (created exclusively, abandoned after 10 seconds, the lock classified again with
+  the guard held), so two processes finding the same stale lock cannot both win, and closing never removes a lock that
+  is no longer ours. Beyond the letter of the protocol, and only ever stricter: a lock path that is not a regular file
+  (a link, a folder, a fifo) is refused and never followed or read, a lock file is read with a bound, a recycled pid
+  counts as dead when that process is younger than the lock file (Linux), and the database path is resolved through
+  symbolic links so two names of one file share one lock. `tests/locking.tcl` runs the spec's checks against this code,
+  races real processes, kills holders with `kill -9`, and (with `MKSTUDIO_DIR`) runs MK Studio's own `store.tcl` against
+  it in both directions. If the folder is read-only, or the disk is full, no lock can be made and the file opens unlocked;
+  `::mkitsql::db::requireLock 1` turns that into an error. **Limits:** the lock is advisory (a program that does not
+  follow it is not stopped); a *hard link* is a different name Metakit cannot tell apart, so two hard links to one file
+  can both be opened for writing; and processes in different PID namespaces (containers) that share a folder *and* a
+  host name cannot see each other's pids - give such containers different host names, or run one server.
 * **Readers are not locked.** `openFile -readonly` always works, notes who holds the write lock
   (`::mkitsql::db::lockedBy`), and write statements on it say so. A reader that is open while a writer commits can see a
   half-written state: that is Metakit, not something advisory locks can fix. Keep readers short, or have the writing
@@ -349,14 +368,47 @@ Metakit has no locking of its own. What mkit-sql guarantees, and what it does no
 ## Temporary files
 
 Statements that exceed `::mkitsql::memBytes` spill to disk. Spill files live in a **private folder** this process creates
-inside `::mkitsql::tempDir` (default: `TMPDIR`, `TEMP`, `TMP`, `/tmp`): `mkitsql-<user>-<pid>-<16 random hex digits>`,
+inside `::mkitsql::tempDir` (default: `TMPDIR`, `TEMP`, `TMP`, `/tmp`): `mkitsql-<user>-<pid>-<pid namespace>-<16 random hex digits>`,
 mode 0700, checked to be a real folder owned by the caller, with every file created exclusively (`O_EXCL`, so an existing
 file or symbolic link is never opened) with mode 0600. The folder is removed at the end of every statement, whether it
 succeeded, failed or was cancelled. Folders and `mkitsql_<pid>_<n>.spill` files left by a crashed run are removed by the
 next run (`::mkitsql::cleanTemp`): only those that belong to the caller, are real folders / files (never links) holding
-nothing but spill files, and whose process is gone (or are older than `::mkitsql::staleHours`, 24). Two users sharing a
+nothing but spill files, whose process is gone, and that were made in this process's PID namespace. The folder of a
+running process is never touched, however old (a long statement may hold spill files for hours), and a folder made in
+another PID namespace (a container sharing the folder) is never touched, because its pid means nothing here. Every spill
+file ends with a trailer line holding its record count: a file that ends early, is damaged, or was removed behind the
+engine's back stops the statement with an error instead of returning fewer rows, and a failed final write (a full disk)
+is reported at close, never ignored. Two users sharing a
 machine, or a process planting links in `/tmp`, cannot read, overwrite or redirect another user's spill files
 (`tests/tempsec.tcl`). Unusable folders and full disks are reported as errors that say what to set.
+
+## Damaged files, untrusted files, and what Metakit remembers
+
+Mk4tcl opens a damaged or truncated file as an *empty database*, and a later `COMMIT` would then overwrite the real
+data. `openFile` therefore checks the file's frame (header, size word, 16-byte footer) first and refuses a file that is
+not a complete Metakit file (`-errorcode {MKIT DAMAGED ...}`), and it checks again after opening that the number of views
+matches the file. Metakit has no checksums, so damage *inside* the data can still crash the process that reads it:
+`openFile ... -verify` reads the whole file in a throw-away child process first (with a timeout) and refuses the file if
+that process crashes, hangs or reports an error. Use it for files you did not create. `-unchecked` skips both checks (only
+for tools that repair files). Metakit also remembers a column's type by name for as long as the file is open; the engine
+tracks that (see `ALTER COLUMN ... TYPE` under *Changing structure*) and forgets it when the file is closed.
+
+## Known bug in Tcl 8.5 and 8.6.3 (MK Studio's runtimes), and how the engine copes
+
+When the string form of a list is made, Tcl 8.5 and 8.6.3 damage a list whose *first element* starts with `#` and
+contains certain characters (`]` or `"` together with others; for example `#]]x`): stray blanks or bytes appear after
+the element and the element count can change. A row whose first cell is such text is exactly that, so anywhere a row's
+string form is made - writing it to a spill file, using it as a dictionary key (`DISTINCT`, `GROUP BY`, joins, `UNION`),
+searching it as text, or handing it to a caller that prints it - the data could silently change. The engine detects the
+bug when it loads (`::mkitsql::listBug`), and on an affected Tcl it reads Metakit one property at a time (a multi-property
+`mk::get` returns exactly such a list) and writes the affected lists with `::mkitsql::rt::sk`, which produces the string a
+healthy Tcl would. `tests/listbug_forms.tcl` checks that string, for 111,110 short strings, against a healthy Tcl, and
+`tests/listbug.sh` runs ~55 query shapes (joins, grouping, windows, set operations, CTEs, recursion, `INSERT ... SELECT`,
+`UPDATE`, `DELETE`, `MERGE`, `CREATE TABLE AS`) over data of this kind on both old runtimes and on a healthy Tcl at eight
+memory budgets and both storage layers, and requires identical results (switching the workaround off makes it fail).
+**Limits:** the workaround protects the engine's own lists; a list *your* code builds from query results has the same bug
+on those runtimes, and MK Studio's own `::store::rows` (used if you force `MKIT_BACKEND=studio` and read rows through it
+yourself) is not changed. The bug does not exist on Tcl 8.6.4 and later.
 
 ## Running statements
 
@@ -367,11 +419,24 @@ cancelled, leaves behind no temporary file, no scratch table and no working stat
 statement that changes data is all-or-nothing, including when it spills or rebuilds the table; if the *copy back*
 of a rebuild fails half way, the error says so and `ROLLBACK` restores the table.
 
+If a write statement fails *after* it has already changed something (a storage error or a full disk while the rows were
+being applied), the file must not be left half changed: when it was the first change of the transaction it is rolled
+back automatically (the error says so); when earlier uncommitted changes are pending the single statement cannot be
+undone on its own, so the transaction is marked failed and only `ROLLBACK` is accepted (no `COMMIT` of a half-applied
+statement). Statements that fail *before* writing (type errors, bad values, constraints you asked for) change nothing.
+
 ## Errors
 
 Syntax errors carry the character position and length (`-errorcode {MKQL SYNTAX pos len}`) so an editor can
 underline the problem. Runtime errors say what was wrong and, where it helps, what was available:
 `Unknown column 'nope'.  Available: id, name, ...`.
+
+Every error has an `-errorcode` that says what kind it is: `MKQL SYNTAX ...` (the statement is not valid),
+`MKQL ERROR` (the statement was refused or failed for a reason the message explains), `MKQL ERROR DATA` (arithmetic on
+the data went out of range: overflow, division by zero, a value that is not a number), `MKQL ERROR MKIT code ...` (the
+storage layer: `LOCKED pid host role endpoint`, `DAMAGED`, `TYPECONFLICT`, `BADLOCK`) and `MKQL ERROR RUNTIME ...` (a Tcl
+error from inside the engine that no check anticipated: always a bug - please report it; the fuzzer counts these as
+failures). A caller never sees a Tcl stack trace as the *only* signal: the message is readable and the code classifies it.
 
 ## Not supported
 
@@ -386,3 +451,5 @@ underline the problem. Runtime errors say what was wrong and, where it helps, wh
 | `GROUP BY ROLLUP / CUBE / GROUPING SETS` | not built yet |
 | `COLLATE`, `SIMILAR TO`, `EXCLUDE` in window frames, `IGNORE NULLS` | not built yet |
 | `INTERVAL` columns; exact `DECIMAL` | Metakit has no such types |
+| Two columns of the same name in a derived table or CTE (`SELECT * FROM (SELECT a.id, b.id FROM ...)`) | refused with a clear message (give one an alias); other databases allow it until you refer to the name |
+| A statement that expands to more than 4,000 subqueries | a CTE is bound again at every reference, so a chain of CTEs that each use the previous one twice doubles at every level; refused instead of hanging (`::mkitsql::maxBinds`) |

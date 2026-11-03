@@ -20,7 +20,7 @@
 package require Tcl 8.5
 
 namespace eval ::mkitsql {
-    variable version 0.3.0
+    variable version 0.4.0
     variable dir [file dirname [file normalize [info script]]]
 }
 foreach f {parser expr datetime verify bind plan spill exec window stmt dbcheck} { source -encoding utf-8 [file join $::mkitsql::dir $f.tcl] }
@@ -32,9 +32,11 @@ namespace eval ::mkitsql {
     if {![info exists backend]} { variable backend [expr {[info exists ::env(MKIT_BACKEND)] ? $::env(MKIT_BACKEND) : "auto"}] }
     if {$backend eq "auto"} { set backend [expr {[llength [info commands ::store::tags]] ? "studio" : "standalone"}] }
     if {$backend eq "studio"} {
+        source -encoding utf-8 [file join $dir dbcommon.tcl]
         source -encoding utf-8 [file join $dir db_studio.tcl]
     } elseif {$backend eq "standalone"} {
         if {![llength [info commands ::mk::file]]} { catch {package require Mk4tcl} }
+        source -encoding utf-8 [file join $dir dbcommon.tcl]
         source -encoding utf-8 [file join $dir db.tcl]
     } else {
         error "::mkitsql::backend must be auto, standalone or studio, not '$backend'"

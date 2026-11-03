@@ -15,6 +15,8 @@ namespace eval ::mkitsql {
     variable autocommit 0        ;# 1 = commit after every successful write statement
     variable busy 0              ;# 1 while a statement runs (statements cannot be nested)
     variable session ""          ;# who is running the statement ("" = a single user, no transaction ownership)
+    variable poisoned            ;# database tag -> 1 after a statement failed halfway with earlier changes pending (only ROLLBACK is accepted)
+    array set poisoned {}
     variable txnOwner            ;# database tag -> the session whose uncommitted changes it holds
     array set txnOwner {}
     variable intMin -2147483648
@@ -25,13 +27,25 @@ namespace eval ::mkitsql {
 #  Entry point
 # ============================================================================
 proc ::mkitsql::resetStatement {} {
-    variable plans ; variable subCache ; variable planCorr ; variable needed
+    variable plans ; variable subCache ; variable planCorr ; variable needed ; variable derivedBq ; variable bindCount
+    set bindCount 0
     variable scopes ; variable ctes ; variable refLog ; variable fromSoFar ; variable lookupIdx ; variable scanCache ; variable scanRuns
     foreach p [info procs ::mkitsql::cx::*] { rename $p {} }
     array unset lookupIdx ; array set lookupIdx {} ; array unset scanCache ; array set scanCache {} ; array unset scanRuns ; array set scanRuns {}
-    array unset plans ; array unset subCache ; array unset planCorr ; array unset needed
+    array unset derivedBq ; array set derivedBq {} ; array unset plans ; array unset subCache ; array unset planCorr ; array unset needed
     array set plans {} ; array set subCache {} ; array set planCorr {} ; array set needed {}
     set scopes {} ; set ctes {} ; set refLog {} ; set fromSoFar {}
+}
+
+# Tcl's own arithmetic errors, in the words of the engine ("" = not one of them)
+proc ::mkitsql::dataError {msg code} {
+    switch -glob -- $code {
+        {ARITH DIVZERO*}   { return "Division by zero" }
+        {ARITH IOVERFLOW*} - {ARITH OVERFLOW*} { return "A number went out of range during the calculation (overflow)" }
+        {ARITH DOMAIN*}    { return "A function was given a number outside its valid range" }
+        {TCL VALUE NUMBER*} { return "A value used in a calculation is not a number" }
+    }
+    return ""
 }
 
 proc ::mkitsql::execStatement {ast {db ""} {plist {}} {nulls {}}} {
@@ -42,6 +56,18 @@ proc ::mkitsql::execStatement {ast {db ""} {plist {}} {nulls {}}} {
     set busy 1
     set rc [catch {execStatement1 $ast $db $plist $nulls} res opts]
     set busy 0
+    # errors raised by the storage layer (MKIT ...) are reported as ordinary engine errors, keeping the detail
+    if {$rc && [lindex [dict get $opts -errorcode] 0] eq "MKIT"} {
+        dict set opts -errorcode [concat {MKQL ERROR} [dict get $opts -errorcode]]
+    } elseif {$rc && [lindex [dict get $opts -errorcode] 0] ne "MKQL" && [set clean [dataError $res [dict get $opts -errorcode]]] ne ""} {
+        # arithmetic on the data went out of range (overflow, domain, a value that is not a number): an ordinary data error
+        dict set opts -errorcode [list MKQL ERROR DATA]
+        set res $clean
+    } elseif {$rc && [lindex [dict get $opts -errorcode] 0] ne "MKQL"} {
+        # a Tcl error from inside the engine (arithmetic overflow, a value no function expected ...): still an ordinary
+        # error to the caller - never a stack trace - but tagged RUNTIME so the fuzzer and the tests can see it
+        dict set opts -errorcode [concat {MKQL ERROR RUNTIME} [dict get $opts -errorcode]]
+    }
     spillCleanup
     if {$rc} {
         if {[string match "too many nested evaluations*" $res]} {
@@ -82,13 +108,13 @@ proc ::mkitsql::execStatement1 {ast db plist nulls} {
     switch -- [lindex $ast 0] {
         select   { return [execSelect [lindex $ast 1]] }
         explain  { return [execExplain [lindex $ast 1]] }
-        insert   { return [afterWrite [execInsert [lindex $ast 1]]] }
-        update   { return [afterWrite [execUpdate [lindex $ast 1]]] }
-        delete   { return [afterWrite [execDelete [lindex $ast 1]]] }
-        merge    { return [afterWrite [execMerge [lindex $ast 1]]] }
-        create   { return [afterWrite [execCreate [lindex $ast 1]]] }
-        drop     { return [afterWrite [execDrop [lindex $ast 1]]] }
-        alter    { return [afterWrite [execAlter [lindex $ast 1]]] }
+        insert   { return [writeStmt execInsert [lindex $ast 1]] }
+        update   { return [writeStmt execUpdate [lindex $ast 1]] }
+        delete   { return [writeStmt execDelete [lindex $ast 1]] }
+        merge    { return [writeStmt execMerge [lindex $ast 1]] }
+        create   { return [writeStmt execCreate [lindex $ast 1]] }
+        drop     { return [writeStmt execDrop [lindex $ast 1]] }
+        alter    { return [writeStmt execAlter [lindex $ast 1]] }
         begin    { return [msg "Transaction started.  Changes stay in memory until COMMIT." 0] }
         commit   { return [execTxn commit [lindex $ast 1]] }
         rollback { return [execTxn rollback [lindex $ast 1]] }
@@ -102,6 +128,42 @@ proc ::mkitsql::execStatement1 {ast db plist nulls} {
         describe  { return [execDescribe [lindex $ast 1]] }
     }
     error "execStatement: unknown statement [lindex $ast 0]"
+}
+
+# A statement that changes data.  If it fails AFTER it already changed something (a Metakit error or a full disk while the rows
+# were being applied) the file would be left half changed: when the statement was the first change of the transaction it is
+# rolled back, so the error leaves the database as it was; when earlier uncommitted work is in the same transaction the one
+# statement cannot be undone on its own, so the transaction is marked failed and only ROLLBACK is accepted (no COMMIT of a
+# half-applied statement).
+proc ::mkitsql::writeStmt {proc arg} {
+    variable poisoned
+    set before [dict create]
+    foreach t [::mkitsql::db::tags] { dict set before $t [::mkitsql::db::dirty $t] }
+    set rc [catch {$proc $arg} res opts]
+    if {$rc} {
+        dict for {t d0} $before {
+            if {[catch {::mkitsql::db::dirty $t} d1] || $d1 <= $d0} continue
+            if {$d0 == 0} {
+                if {![catch {::mkitsql::db::rollback $t}]} {
+                    append res "\n(The statement had already changed data in '$t' when it failed; those changes were rolled back.)"
+                } else {
+                    set poisoned($t) 1
+                    append res "\n(The statement failed halfway through changing '$t' and could not be undone: run ROLLBACK.)"
+                }
+            } else {
+                set poisoned($t) 1
+                append res "\n(The statement failed halfway through changing '$t', and earlier uncommitted changes are pending, so it cannot be undone on its own: the transaction is marked failed - run ROLLBACK.)"
+            }
+        }
+        releaseIdleClaims
+        return -options $opts $res
+    }
+    return [afterWrite $res]
+}
+# a session that claimed a database but changed nothing (the statement failed or changed no rows) does not own a transaction
+proc ::mkitsql::releaseIdleClaims {} {
+    variable txnOwner
+    foreach t [array names txnOwner] { if {[catch {::mkitsql::db::dirty $t} d] || $d == 0} { unset -nocomplain txnOwner($t) } }
 }
 
 proc ::mkitsql::msg {text {affected -1}} {
@@ -121,8 +183,19 @@ proc ::mkitsql::assertWritable {tag} {
         }
         fail "Database '$tag' is open read-only."
     }
+    variable poisoned
+    if {[::mkitsql::db::dirty $tag] == 0} { unset -nocomplain poisoned($tag) }
+    if {[info exists poisoned($tag)]} {
+        fail "A previous statement on '$tag' failed halfway through its changes, so nothing more can be written until you ROLLBACK."
+    }
     if {$session ne "" && [info exists txnOwner($tag)] && $txnOwner($tag) ne $session && [::mkitsql::db::dirty $tag] > 0} {
         fail "Database '$tag' has uncommitted changes from another session ($txnOwner($tag)); wait until it commits or rolls back."
+    }
+    if {$session ne ""} {
+        # a stale record (the transaction ended behind our back, e.g. through ::store::commit) is dropped; then this session claims the
+        # transaction BEFORE it changes anything, so a statement that fails midway cannot leave changes nobody owns
+        if {[::mkitsql::db::dirty $tag] == 0} { unset -nocomplain txnOwner($tag) }
+        if {![info exists txnOwner($tag)]} { set txnOwner($tag) $session }
     }
 }
 proc ::mkitsql::afterWrite {res} {
@@ -198,7 +271,7 @@ proc ::mkitsql::streamSink {c cb nullValue ivCols chunk} {
             foreach v $r { if {$v eq $N} { lappend r2 $nullValue } else { lappend r2 $v } }
             set r $r2
         }
-        lappend out $r
+        lappend out [::mkitsql::rt::sk $r]
     }
     incr S($c,count) [llength $out]
     if {[{*}$cb $out] eq "1"} { return 1 }
@@ -226,7 +299,7 @@ proc ::mkitsql::resultSink {c cfg chunk} {
                 lset r $i "\u25B8 $n row[expr {$n == 1 ? {} : {s}}]"
             }
         }
-        lappend S($c,rows) $r
+        lappend S($c,rows) [::mkitsql::rt::sk $r]
         incr S($c,n)
     }
     return 0
@@ -270,8 +343,11 @@ proc ::mkitsql::coerceValue {col letter v} {
             if {[regexp {^[-+]?\d+$} $x]} {
                 regsub {^([-+]?)0+(?=\d)} $x {\1} x
                 set x [expr {$x + 0}]
-            } elseif {[regexp {^[-+]?(\d+\.?\d*|\.\d+)([eE][-+]?\d+)?$} $x] && $x == int($x)} {
-                set x [expr {int($x)}]
+            } elseif {[regexp {^[-+]?(\d+\.?\d*|\.\d+)([eE][-+]?\d+)?$} $x]} {
+                set d [expr {double($x)}]
+                if {$d == Inf || $d == -Inf || $d >= 9.3e18 || $d <= -9.3e18} { fail "Value '[string range $v 0 40]' is out of range for the whole-number column '$col'" }
+                if {$d != double(int($d))} { fail "Column '$col' holds [letterWords $letter], but '[string range $v 0 40]' is not a whole number" }
+                set x [expr {int($d)}]
             } else {
                 fail "Column '$col' holds [letterWords $letter], but '[string range $v 0 40]' is not a whole number"
             }
@@ -289,6 +365,12 @@ proc ::mkitsql::coerceValue {col letter v} {
                 fail "Column '$col' holds numbers, but '[string range $v 0 40]' is not one"
             }
             regsub {^([-+]?)0+(?=\d)} $x {\1} x
+            set d [expr {double($x)}]
+            if {$d == Inf || $d == -Inf} { fail "Value '[string range $v 0 40]' is out of range for the numeric column '$col'" }
+            # a REAL column is single precision: beyond about 3.4e38 it would be stored as infinity
+            if {$letter eq "F" && ($d > 3.4028234663852886e38 || $d < -3.4028234663852886e38)} {
+                fail "Value '[string range $v 0 40]' is out of range for the single-precision (REAL) column '$col'; use DOUBLE PRECISION"
+            }
             if {[string index $x 0] eq "-" && $x == 0} { set x 0.0 }       ;# no negative zero
             return $x
         }
@@ -324,7 +406,7 @@ proc ::mkitsql::execInsert {st} {
     set conv [list ::mkitsql::convInsert $targets]
     set sp [spoolNew]
     if {[dict get $src type] eq "defaults"} {
-        set rows [list [lrepeat [llength $targets] $N]]
+        set rows [list [::mkitsql::rep [llength $targets] $N]]
         if {[llength $cols] == 0} { set rows [list {}] }
         convSink $sp $conv $rows
     } else {
@@ -354,7 +436,7 @@ proc ::mkitsql::convSink {sp conv chunk} {
 proc ::mkitsql::convInsert {targets r} {
     set vals {}
     foreach t $targets v $r { lappend vals [coerceValue [lindex $t 0] [lindex $t 1] $v] }
-    return $vals
+    return [::mkitsql::rt::sk $vals]
 }
 proc ::mkitsql::convUpdate {targets r} {
     set vals {} ; set i 0
@@ -362,7 +444,7 @@ proc ::mkitsql::convUpdate {targets r} {
         lappend vals [coerceValue [lindex $t 0] [lindex $t 1] [lindex $r $i]]
         incr i
     }
-    return [list [lindex $r end] $vals]
+    return [list [lindex $r end] [::mkitsql::rt::sk $vals]]
 }
 proc ::mkitsql::applyUpdate {path targets chunk} {
     foreach pr $chunk {
@@ -654,13 +736,13 @@ proc ::mkitsql::mergeSink {mg plan chunk} {
                     } else {
                         set vals {} ; set k [lindex $cl 3]
                         foreach t [lindex $cl 4] { lappend vals [coerceValue [lindex $t 0] [lindex $t 1] [lindex $r $k]] ; incr k }
-                        lappend ups [list $rid [lindex $cl 4] $vals]
+                        lappend ups [list $rid [lindex $cl 4] [::mkitsql::rt::sk $vals]]
                     }
                 }
                 insert {
                     set vals {} ; set props {} ; set k [lindex $cl 3]
                     foreach t [lindex $cl 4] { lappend props [lindex $t 0] ; lappend vals [coerceValue [lindex $t 0] [lindex $t 1] [lindex $r $k]] ; incr k }
-                    lappend ins [list $props $vals]
+                    lappend ins [::mkitsql::rt::sk [list [::mkitsql::rt::sk $props] [::mkitsql::rt::sk $vals]]]
                 }
             }
             break
@@ -705,6 +787,10 @@ proc ::mkitsql::newTableName {parts} {
 proc ::mkitsql::checkName {name what} {
     if {![regexp {^[[:alpha:]_][[:alnum:]_]*$} $name]} {
         fail "$what name '$name' is not allowed: Metakit names may only contain letters, digits and underscores, and cannot start with a digit"
+    }
+    # the engine and MK Studio use names starting with __mks for scratch views and columns they create and delete themselves
+    if {[string match -nocase {__mks*} $name]} {
+        fail "$what name '$name' is not allowed: names starting with __mks are reserved for temporary objects"
     }
 }
 
@@ -798,7 +884,7 @@ proc ::mkitsql::ctasConvert {dst names layout chunk} {
     foreach r $chunk {
         set vals {} ; set j 0
         foreach v $r { lappend vals [coerceValue [lindex $names $j] [lindex $layout $j 1] $v] ; incr j }
-        lappend out $vals
+        lappend out [::mkitsql::rt::sk $vals]
     }
     spoolAdd $dst $out
     return 0
@@ -852,8 +938,13 @@ proc ::mkitsql::execAlter {st} {
             if {$c eq ""} { fail "Unknown column '$a1' in '$label'." }
             if {[lindex $c 1] eq "V"} { fail "A subview column cannot change type." }
             set letter [lindex [sqlType $a2] 0]
-            ::mkitsql::db::rebuildColumn $path [lindex $c 0] [lindex $c 0] $letter
-            set text "Column '[lindex $c 0]' changed to $a2.  (Metakit moves it to the end of the table.)"
+            if {$letter eq [lindex $c 1]} {
+                set text "Column '[lindex $c 0]' already has that type; nothing to do."
+            } else {
+                # Metakit keeps the old storage when a column's type changes under the same name: writes then fail or store
+                # garbage and the file can hang on close (found on real Metakit).  Refuse, and say how to do it safely.
+                fail "Metakit cannot change the type of column '[lindex $c 0]' in place (it would corrupt the file). Copy the table instead:  CREATE TABLE ${view}_new AS SELECT ..., CAST([lindex $c 0] AS $a2) AS [lindex $c 0], ... FROM $view;  DROP TABLE $view;  then COMMIT and create the table again from ${view}_new under the old name."
+            }
         }
         renametable {
             if {[llength [dict get $st subs]]} { fail "Only a top-level table can be renamed." }
@@ -894,7 +985,7 @@ proc ::mkitsql::copyRows {src dst layout} {
 #  Transactions and administration
 # ============================================================================
 proc ::mkitsql::execTxn {what db} {
-    variable defaultDb ; variable session ; variable txnOwner
+    variable defaultDb ; variable session ; variable txnOwner ; variable poisoned
     set tags [::mkitsql::db::tags]
     if {$db ne ""} {
         set t [findTag $db]
@@ -922,7 +1013,7 @@ proc ::mkitsql::execTxn {what db} {
             set n [::mkitsql::db::dirty $t]
             ::mkitsql::db::rollback $t
         }
-        unset -nocomplain txnOwner($t)
+        unset -nocomplain txnOwner($t) poisoned($t)
         incr total $n
     }
     if {$what eq "commit"} {

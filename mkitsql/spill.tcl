@@ -20,9 +20,10 @@ namespace eval ::mkitsql {
     variable spillSeq 0
     variable spillDir ""             ;# this process's private folder (made on first use)
     variable tempCleaned 0           ;# the stale-folder sweep runs once per process
-    variable staleHours 24           ;# a folder of a vanished owner older than this is always removed
     variable spillFiles {}
     variable spillChans {}
+    variable spillN ; variable spillG ; variable spillEnd   ;# per channel: tuples written / read so far, trailer seen
+    array set spillN {} ; array set spillG {} ; array set spillEnd {}
     variable sidSeq 0
     variable S
     array set S {}
@@ -33,7 +34,7 @@ proc ::mkitsql::newId {} { variable sidSeq ; return [incr sidSeq] }
 # Estimated memory held by a chunk of tuples.  Tcl objects cost far more than their text: measured on
 # real data, a narrow row of 43 characters takes ~700 bytes and a wide one ~4 bytes per character, so
 # this charges 8 per character plus 150 per row.  It is deliberately a little pessimistic for wide rows.
-proc ::mkitsql::bytesOf {chunk} { expr {8 * [string length $chunk] + 150 * [llength $chunk]} }
+proc ::mkitsql::bytesOf {chunk} { expr {8 * [string length [::mkitsql::rt::flat $chunk]] + 150 * [llength $chunk]} }
 
 # 1 if the sink asked to stop; sinks may return "" or 0 to continue
 proc ::mkitsql::emit {sink chunk} {
@@ -82,6 +83,12 @@ proc ::mkitsql::randHex {n} {
     }
     return [string range $hex 0 [expr {2 * $n - 1}]]
 }
+# The PID namespace this process lives in ("0" where unknown).  Containers can share a folder such as /tmp while
+# each has its own pid numbering, so a pid in a folder name only means something to processes of the same namespace.
+proc ::mkitsql::pidNs {} {
+    if {[catch {::file readlink /proc/self/ns/pid} l] || ![regexp {\[(\d+)\]} $l -> n]} { return 0 }
+    return $n
+}
 proc ::mkitsql::userTag {} {
     set u [expr {[info exists ::tcl_platform(user)] ? $::tcl_platform(user) : "user"}]
     regsub -all {[^A-Za-z0-9_]} $u _ u
@@ -95,7 +102,14 @@ proc ::mkitsql::pidAlive {pid} {
         if {[catch {exec tasklist /FI "PID eq $pid" /NH /FO CSV} out]} { return 0 }
         return [expr {[string first "\"$pid\"" $out] >= 0}]
     }
-    if {[file isdirectory /proc/self]} { return [file isdirectory /proc/$pid] }
+    if {[file isdirectory /proc/self]} {
+        if {![file isdirectory /proc/$pid]} { return 0 }
+        # a killed process that nobody has reaped yet (zombie) is dead
+        if {![catch {set h [open /proc/$pid/stat r] ; set d [read $h] ; close $h}]} {
+            if {[string index $d [expr {[string last ")" $d] + 2}]] eq "Z"} { return 0 }
+        }
+        return 1
+    }
     return [expr {![catch {exec kill -0 $pid}]}]
 }
 # The folder for this process's spill files, created on first use.  Any trouble is reported, not ignored:
@@ -106,7 +120,7 @@ proc ::mkitsql::spillDir {} {
     set base [tmpDir]
     cleanTemp
     for {set try 0} {$try < 50} {incr try} {
-        set d [file join $base mkitsql-[userTag]-[pid]-[randHex 8]]
+        set d [file join $base mkitsql-[userTag]-[pid]-[pidNs]-[randHex 8]]
         if {![catch {file lstat $d x}]} continue            ;# exists (even as a link): pick another name
         if {[catch {file mkdir $d} msg]} { fail "Cannot create a folder for temporary files in '$base' ($msg).  Set ::mkitsql::tempDir to a writable folder" }
         if {$::tcl_platform(platform) ne "windows"} {
@@ -122,9 +136,10 @@ proc ::mkitsql::spillDir {} {
 }
 # Remove what crashed runs left in the temporary area: folders mkitsql-<user>-<pid>-<random> (and the
 # mkitsql_<pid>_<n>.spill files of older versions) that belong to the caller, are real folders / files (never
-# links), whose process no longer exists - or that are older than ::mkitsql::staleHours.  Returns the count.
+# links), whose process no longer exists and that belong to this PID namespace.  A folder of a running process is never touched,
+# however old.  Returns the count.
 proc ::mkitsql::cleanTemp {{base ""}} {
-    variable staleHours ; variable tempCleaned ; variable spillDir
+    variable tempCleaned ; variable spillDir
     if {$base eq ""} {
         if {$tempCleaned} { return 0 }
         set tempCleaned 1
@@ -137,12 +152,17 @@ proc ::mkitsql::cleanTemp {{base ""}} {
         if {$st(type) ni {directory file}} continue                  ;# never touch links or specials
         if {![file owned $p]} continue
         set isDir [expr {$st(type) eq "directory"}]
-        if {$isDir && [regexp {^mkitsql-[A-Za-z0-9_]*-(\d+)-[0-9a-f]{16}$} $tail -> pid]} {
+        set ns [pidNs]
+        if {$isDir && [regexp {^mkitsql-[A-Za-z0-9_]*-(\d+)-(\d+)-[0-9a-f]{16}$} $tail -> pid fns]} {
+            # made by a process of another PID namespace (a container sharing this folder): its pid means nothing here, so
+            # whether it is still running cannot be known - never touch it
+            if {$fns != $ns} continue
+        } elseif {$isDir && [regexp {^mkitsql-[A-Za-z0-9_]*-(\d+)-[0-9a-f]{16}$} $tail -> pid]} {
         } elseif {!$isDir && [regexp {^mkitsql_(\d+)_\d+\.spill$} $tail -> pid]} {
         } else continue
         if {$p eq $spillDir || $pid == [pid]} continue
-        set old [expr {($now - $st(mtime)) > $staleHours * 3600}]
-        if {!$old && [pidAlive $pid]} continue
+        # a process that is still running owns its folder, however old it is (a long statement may hold spill files for hours)
+        if {[pidAlive $pid]} continue
         if {$isDir} {
             # only if it holds nothing but our spill files
             set ok 1 ; set inside [glob -nocomplain -directory $p * .*]
@@ -166,31 +186,48 @@ proc ::mkitsql::spillNewPath {} {
     return $p
 }
 proc ::mkitsql::spillOpenW {path} {
-    variable spillChans
+    variable spillChans ; variable spillN
     # exclusive: fails if anything (a file, a link) is already there; private: 0600
     if {[catch {open $path {WRONLY CREAT EXCL} 0600} ch]} { fail "Cannot create a temporary file ($ch).  Set ::mkitsql::tempDir to a writable folder" }
-    fconfigure $ch -translation lf -encoding utf-8 -buffering full -buffersize 131072
+    fconfigure $ch -translation lf -encoding utf-8 -buffering full -buffersize 131072 -eofchar {}
     lappend spillChans $ch
+    set spillN($ch) 0
     return $ch
 }
 proc ::mkitsql::spillOpenR {path} {
-    variable spillChans
+    variable spillChans ; variable spillG ; variable spillEnd
     if {[catch {open $path r} ch]} { fail "Cannot read back a temporary file ($ch)" }
-    fconfigure $ch -translation lf -encoding utf-8 -buffersize 131072
+    fconfigure $ch -translation lf -encoding utf-8 -buffersize 131072 -eofchar {}
     lappend spillChans $ch
+    set spillG($ch) 0 ; set spillEnd($ch) 0
     return $ch
 }
+# Closes a spill file.  A file being written gets its trailer line (`\E<number of tuples>`: data lines can never start with a
+# backslash followed by E, because every backslash in the data is doubled) and the close is checked - a full disk shows up
+# here, at the last buffered write, and must not be ignored.  A file being read must have shown its trailer.
 proc ::mkitsql::spillClose {ch} {
-    variable spillChans
-    catch {close $ch}
+    variable spillChans ; variable spillN ; variable spillG ; variable spillEnd
+    set err ""
+    if {[info exists spillN($ch)]} {
+        if {[catch { puts $ch "\\E$spillN($ch)" ; close $ch } msg]} { set err "Writing a temporary file failed ($msg).  The disk may be full; set ::mkitsql::tempDir to a folder with more room" }
+        unset spillN($ch)
+    } else {
+        catch {close $ch}
+    }
+    unset -nocomplain spillG($ch) spillEnd($ch)
     set i [lsearch -exact $spillChans $ch]
     if {$i >= 0} { set spillChans [lreplace $spillChans $i $i] }
+    if {$err ne ""} { fail $err }
 }
+# close without caring about errors (cleanup after a failed statement)
+proc ::mkitsql::spillAbandon {ch} { catch {spillClose $ch} }
 # End of every statement (also after an error or a cancel): close and delete the spill files and drop
 # all operator state, so a failed statement leaves nothing behind.
 proc ::mkitsql::spillCleanup {} {
-    variable spillFiles ; variable spillChans ; variable S
+    variable spillFiles ; variable spillChans ; variable S ; variable spillN ; variable spillG ; variable spillEnd
     foreach ch $spillChans { catch {close $ch} }
+    array unset spillN ; array unset spillG ; array unset spillEnd
+    array set spillN {} ; array set spillG {} ; array set spillEnd {}
     foreach f $spillFiles { catch {file delete $f} }
     set spillFiles {} ; set spillChans {}
     variable spillDir
@@ -206,16 +243,28 @@ proc ::mkitsql::spillCleanup {} {
 }
 # one tuple per line; backslash, newline and carriage return are escaped
 proc ::mkitsql::spillWrite {ch rows} {
+    variable spillN
     if {[catch {
-        foreach t $rows { puts $ch [string map {\\ \\\\ \n \\n \r \\r} $t] }
+        foreach t $rows { puts $ch [string map {\\ \\\\ \n \\n \r \\r} [::mkitsql::rt::sk $t]] }
+        incr spillN($ch) [llength $rows]
     } msg]} { fail "Writing a temporary file failed ($msg).  The disk may be full; set ::mkitsql::tempDir to a folder with more room" }
 }
 proc ::mkitsql::spillUnesc {line} { return [string map {\\\\ \\ \\n \n \\r \r} $line] }
 # read up to n tuples from an open channel
 proc ::mkitsql::spillReadBlock {ch n} {
+    variable spillG ; variable spillEnd
     set out {}
-    while {$n > 0 && [gets $ch line] >= 0} {
+    if {$spillEnd($ch)} { return {} }
+    while {$n > 0} {
+        if {[catch {gets $ch line} got]} { fail "Reading a temporary file failed ($got)" }
+        if {$got < 0} { fail "A temporary file ended early (the disk may be full, or something else removed or changed the file); the statement was stopped" }
+        if {[string index $line 0] eq "\\" && [string index $line 1] eq "E"} {
+            if {[string range $line 2 end] ne $spillG($ch)} { fail "A temporary file is damaged (it holds $spillG($ch) records, it should hold [string range $line 2 end]); the statement was stopped" }
+            set spillEnd($ch) 1
+            break
+        }
         lappend out [string map {\\\\ \\ \\n \n \\r \r} $line]
+        incr spillG($ch)
         incr n -1
     }
     return $out
@@ -281,7 +330,7 @@ proc ::mkitsql::spoolList {i} {
 }
 proc ::mkitsql::spoolFree {i} {
     variable S
-    if {[info exists S($i,ch)] && $S($i,ch) ne ""} { spillClose $S($i,ch) }
+    if {[info exists S($i,ch)] && $S($i,ch) ne ""} { spillAbandon $S($i,ch) }
     if {[info exists S($i,path)] && $S($i,path) ne ""} { catch {file delete $S($i,path)} }
     array unset S $i,*
 }

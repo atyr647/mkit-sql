@@ -17,24 +17,35 @@ proc ::mkitsql::db::readonly {tag} { ::store::readonly $tag }
 proc ::mkitsql::db::dirty {tag} { ::store::dirty $tag }
 proc ::mkitsql::db::touch {tag} { ::store::touch $tag }
 proc ::mkitsql::db::openFile {path args} {
-    set unchecked [expr {"-unchecked" in $args}]
+    set unchecked [expr {"-unchecked" in $args}] ; set verify [expr {"-verify" in $args}]
     set fargs {}
-    foreach a $args { if {$a ne "-unchecked"} { lappend fargs $a } }
+    foreach a $args { if {$a ni {-unchecked -verify}} { lappend fargs $a } }
     if {!$unchecked && [file exists [file normalize $path]]} { ::mkitsql::dbRequireIntact [file normalize $path] }
-    return [::store::openFile $path {*}$fargs]
+    if {$verify && [file exists [file normalize $path]] && [file size [file normalize $path]] > 0} { ::mkitsql::dbVerify [file normalize $path] }
+    set tag [::store::openFile $path {*}$fargs]
+    # Mk4tcl opens a damaged file as an empty database; the frame check above catches most damage before the open, this one
+    # catches a file that opened with fewer views than its header promises
+    set real [file normalize $path]
+    if {!$unchecked && [file exists $real] && ![::mkitsql::dbSignatureOk $real [llength [mk::file views $tag]]]} {
+        catch {::store::closeFile $tag}
+        return -code error -errorcode [list MKIT DAMAGED "not a Metakit database"] "This file isn't a Metakit database, so it was not opened:\n$real"
+    }
+    return $tag
 }
-proc ::mkitsql::db::closeFile {tag} { ::store::closeFile $tag }
+proc ::mkitsql::db::closeFile {tag} { ::store::closeFile $tag ; ::mkitsql::typeForget $tag }
 proc ::mkitsql::db::commit {tag} { ::store::commit $tag }
 proc ::mkitsql::db::rollback {tag} { ::store::rollback $tag }
 proc ::mkitsql::db::layout {path} { ::store::layout $path }
 proc ::mkitsql::db::size {path} { ::store::size $path }
 proc ::mkitsql::db::subSize {path idx prop} { ::store::subSize $path $idx $prop }
-proc ::mkitsql::db::rows {path props first count} { ::store::rows $path $props $first $count }
 proc ::mkitsql::db::appendRow {path props values} { ::store::appendRow $path $props $values }
 proc ::mkitsql::db::setCell {path idx prop value} { ::store::setCell $path $idx $prop $value }
 proc ::mkitsql::db::deleteRows {path indices} { ::store::deleteRows $path $indices }
-proc ::mkitsql::db::restructure {path layout} { ::store::restructure $path $layout }
-proc ::mkitsql::db::rebuildColumn {path oldName newName newType} { ::store::rebuildColumn $path $oldName $newName $newType }
+proc ::mkitsql::db::restructure {path layout} {
+    if {[string first ! $path] < 0} { lassign [split $path .] tag view ; typeGuard $tag $view $layout }
+    ::store::restructure $path $layout
+    if {[string first ! $path] < 0} { ::mkitsql::typeRecord $tag $view $layout }
+}
 proc ::mkitsql::db::parseLayout {spec} { ::store::parseLayout $spec }
 proc ::mkitsql::db::formatLayout {layout} { ::store::formatLayout $layout }
 
@@ -46,20 +57,6 @@ proc ::mkitsql::db::select {path conds} {
     foreach c $conds { lassign $c op p v ; lappend args -$op $p $v }
     return [mk::select $path {*}$args]
 }
-# the given rows (indices) in the order of `props`, like `rows`
-proc ::mkitsql::db::rowsAt {path props indices} {
-    set out {}
-    set np [llength $props]
-    if {$np == 0} { foreach i $indices { lappend out {} } ; return $out }
-    if {$np == 1} {
-        set p [lindex $props 0]
-        foreach i $indices { lappend out [list [mk::get $path!$i $p]] }
-        return $out
-    }
-    foreach i $indices { lappend out [mk::get $path!$i {*}$props] }
-    return $out
-}
-
 proc ::mkitsql::db::deleteRange {path first count} {
     mk::row delete $path!$first $count
     ::store::touchPath $path
@@ -88,6 +85,7 @@ proc ::mkitsql::db::hasView {tag name} { expr {[lsearch -exact [views $tag] $nam
 
 proc ::mkitsql::db::dropView {tag name} {
     if {![hasView $tag $name]} { error "View '$name' does not exist in '$tag'." }
+    if {![catch {::store::parseLayout [mk::view layout $tag.$name]} old]} { ::mkitsql::typeRecord $tag $name $old }
     mk::view size $tag.$name 0
     set left [mk::view size $tag.$name]
     if {$left != 0} { error "Cannot drop '$name': $left rows could not be cleared." }
@@ -97,8 +95,15 @@ proc ::mkitsql::db::dropView {tag name} {
 
 # (not ::store::createView: older store.tcl versions check for an existing view with their own hasView,
 # which still lists a dropped view until the next commit)
+proc ::mkitsql::db::typeGuard {tag view newLayout} {
+    if {![catch {::store::parseLayout [mk::view layout $tag.$view]} old]} { ::mkitsql::typeRecord $tag $view $old }
+    set c [::mkitsql::typeConflict $tag $view $newLayout]
+    if {$c ne ""} { ::mkitsql::typeConflictError $view $c }
+}
 proc ::mkitsql::db::createView {tag name layout} {
     if {[hasView $tag $name]} { error "View '$name' already exists in '$tag'." }
+    typeGuard $tag $name $layout
     mk::view layout $tag.$name [::store::formatLayout $layout]
+    ::mkitsql::typeRecord $tag $name $layout
     ::store::touch $tag
 }

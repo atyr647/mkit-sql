@@ -169,6 +169,13 @@ proc ::mkitsql::normNum {s} {
     return $s
 }
 
+# A real literal must be finite: 1e999 is an error, not Inf.
+proc ::mkitsql::realLiteral {v} {
+    set d [expr {double($v)}]
+    if {$d == Inf || $d == -Inf || $d != $d} { err "The number '[string range $v 0 40]' is too large (outside the range of a double precision number)" [peek -1] }
+    return $d
+}
+
 proc ::mkitsql::parseInt {what} {
     set t [peek]
     if {$t eq "" || [lindex $t 0] ne "number" || ![regexp {^\d+$} [lindex $t 1]]} {
@@ -415,9 +422,9 @@ proc ::mkitsql::parsePrimary {} {
             set v [normNum $v]
             if {[regexp {^\d+$} $v]} {
                 if {[string is wideinteger -strict $v]} { return [list lit int [expr {$v + 0}]] }
-                return [list lit real [expr {double($v)}]]
+                return [list lit real [realLiteral $v]]
             }
-            return [list lit real [expr {double($v)}]]
+            return [list lit real [realLiteral $v]]
         }
         string { advance ; return [list lit text $v] }
         qident { return [parseColumnOrCall] }

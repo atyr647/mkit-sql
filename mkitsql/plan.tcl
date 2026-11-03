@@ -84,12 +84,30 @@ proc ::mkitsql::compileQuery {bq outerMaps} {
     switch -- [dict get $bq kind] {
         select { set p [compileSelect $bq $outerMaps] }
         values {
-            set procs {}
+            # a list of plain literals (INSERT ... VALUES (1, 'a'), ...) needs no code at all: compiling one proc per row
+            # made a 10,000-row INSERT take 2.4 s; the rows are used as they are
+            variable N
+            set allLit 1 ; set lits {}
             foreach row [dict get $bq rows] {
-                lassign [compileList $row [dict create maps [concat [list {}] $outerMaps]]] pr ts
-                lappend procs $pr
+                set tuple {}
+                foreach e $row {
+                    if {[lindex $e 0] ne "lit"} { set allLit 0 ; break }
+                    # (never route data through an expr ternary: it would turn the text '007' into 7)
+                    if {[lindex $e 1] eq "null"} { lappend tuple $N } else { lappend tuple [lindex $e 2] }
+                }
+                if {!$allLit} break
+                lappend lits $tuple
             }
-            set p [dict create kind values procs $procs]
+            if {$allLit} {
+                set p [dict create kind values lits $lits]
+            } else {
+                set procs {}
+                foreach row [dict get $bq rows] {
+                    lassign [compileList $row [dict create maps [concat [list {}] $outerMaps]]] pr ts
+                    lappend procs $pr
+                }
+                set p [dict create kind values procs $procs]
+            }
         }
         setop {
             set p [dict create kind setop op [dict get $bq op] all [dict get $bq all] \
@@ -531,7 +549,7 @@ proc ::mkitsql::pushOne {cols id ref op k} {
 
 proc ::mkitsql::cfLeaf {s pushable stVar {latmap {}}} {
     upvar 1 $stVar st
-    variable curCol
+    variable curCol ; variable derivedBq
     set id [dict get $s id]
     set lay [dict get $st lay $id]
     set map {} ; set i 0
@@ -596,10 +614,10 @@ proc ::mkitsql::cfLeaf {s pushable stVar {latmap {}}} {
         derived {
             if {[dict exists $s lateralq] && [dict get $s lateralq]} {
                 set plan [dict create kind latderived \
-                    sub [compileQuery [dict get $s bq] [concat [list $latmap] [dict get $st outer]]] filter $filter]
+                    sub [compileQuery $derivedBq([dict get $s id]) [concat [list $latmap] [dict get $st outer]]] filter $filter]
             } else {
                 set om [expr {[dict exists $s outerok] && [dict get $s outerok] ? [dict get $st outer] : {}}]
-                set plan [dict create kind derived sub [compileQuery [dict get $s bq] $om] filter $filter]
+                set plan [dict create kind derived sub [compileQuery $derivedBq([dict get $s id]) $om] filter $filter]
             }
         }
         wref {
@@ -862,7 +880,7 @@ proc ::mkitsql::explainPlan {id depth} {
                 lappend out "${i2}LIMIT [dict get $p limit] OFFSET [expr {[dict get $p offset] eq "" ? 0 : [dict get $p offset]}]"
             }
         }
-        values { lappend out "${ind}VALUES ([llength [dict get $p procs]] row(s))" }
+        values { lappend out "${ind}VALUES ([expr {[dict exists $p lits] ? [llength [dict get $p lits]] : [llength [dict get $p procs]]}] row(s))" }
         setop {
             lappend out "${ind}[string toupper [dict get $p op]][expr {[dict get $p all] ? { ALL} : {}}]: sorted comparison of the two inputs, spills to disk beyond the budget"
             lappend out {*}[explainPlan [dict get $p left] [expr {$depth + 1}]]
