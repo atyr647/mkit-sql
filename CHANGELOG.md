@@ -35,6 +35,7 @@ All notable changes to mkit-sql. The versioning and compatibility rules are in
   transaction failed (earlier changes pending), instead of leaving a half-applied statement that could be committed.
 * **Workaround for a bug in the list code of Tcl 8.5 and 8.6.3** that corrupted rows whose first cell is text starting
   with `#` (see docs/SQL.md); verified against a healthy Tcl by `tests/listbug.sh` and `tests/listbug_forms.tcl`.
+* `integration/mkstudio.patch` also fixes MK Studio's own row readers on the Tcl 8.5 / 8.6.3 list bug.
 * `MKQL ERROR DATA` error class for arithmetic that goes out of range; `MKQL ERROR RUNTIME` marks a Tcl error from
   inside the engine (always a bug).
 * Limit on statement expansion (`::mkitsql::maxBinds`, 4,000 subqueries).

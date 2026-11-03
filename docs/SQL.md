@@ -406,9 +406,11 @@ healthy Tcl would. `tests/listbug_forms.tcl` checks that string, for 111,110 sho
 `tests/listbug.sh` runs ~55 query shapes (joins, grouping, windows, set operations, CTEs, recursion, `INSERT ... SELECT`,
 `UPDATE`, `DELETE`, `MERGE`, `CREATE TABLE AS`) over data of this kind on both old runtimes and on a healthy Tcl at eight
 memory budgets and both storage layers, and requires identical results (switching the workaround off makes it fail).
-**Limits:** the workaround protects the engine's own lists; a list *your* code builds from query results has the same bug
-on those runtimes, and MK Studio's own `::store::rows` (used if you force `MKIT_BACKEND=studio` and read rows through it
-yourself) is not changed. The bug does not exist on Tcl 8.6.4 and later.
+MK Studio's own row readers (`::store::rows`, `fetch`, `fetchAt`) had the same exposure; `integration/mkstudio.patch` gives
+them the same treatment (`tests/studio_listbug.tcl` fails without it and passes with it, on both runtimes).
+**Limits:** the workaround protects the engine's lists and MK Studio's row readers; a list *your own* code builds from
+query results has the same bug on those runtimes, and an *unpatched* MK Studio still has it in its grid. The bug does not
+exist on Tcl 8.6.4 and later.
 
 ## Running statements
 
