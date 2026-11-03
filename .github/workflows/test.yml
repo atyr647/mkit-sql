@@ -251,7 +251,9 @@ jobs:
       - name: Tcl (Windows)
         if: runner.os == 'Windows'
         run: |
-          choco install magicsplat-tcl-tk --no-progress -y || true
+          # the engine targets Tcl 8.5/8.6 (it refuses 9.x): ask for an 8.6 build first, whatever the newest version is
+          for v in 8.6.16 8.6.15 8.6.14 8.6.13 8.6.12; do choco install magicsplat-tcl-tk --version $v --no-progress -y && break; done || true
+          [ -n "$(find /c/Tcl /c/Program\ Files/Tcl* -iname 'tclsh*.exe' 2>/dev/null | head -1)" ] || choco install magicsplat-tcl-tk --no-progress -y || true
           # find the interpreter wherever the installer put it, and show what was found (so a failure can be diagnosed from the log)
           FOUND=$(find /c/Tcl /c/Program\ Files/Tcl* /c/Program\ Files/Magicsplat* /c/ProgramData/chocolatey/lib /c/tools -iname 'tclsh*.exe' 2>/dev/null || true)
           echo "found: $FOUND"

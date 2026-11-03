@@ -110,7 +110,9 @@ proc ::mkitsql::pidAlive {pid} {
         }
         return 1
     }
-    return [expr {![catch {exec kill -0 $pid}]}]
+    # kill -0 says "not permitted" for a live process of another user: that process exists
+    if {[catch {exec kill -0 $pid} msg]} { return [expr {[string match -nocase "*not permitted*" $msg] || [string match -nocase "*EPERM*" $msg]}] }
+    return 1
 }
 # The folder for this process's spill files, created on first use.  Any trouble is reported, not ignored:
 # a spill file in a folder somebody else could write to would be a security hole.
