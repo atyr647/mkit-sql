@@ -122,6 +122,14 @@ holds right after loading, mostly Metakit's view of the file):
 | 500,000 | 25 MB | 71 MB | 27 s | 0 to +13 MB | +49 MB, 5.6 s |
 | 1,000,000 | 43 MB | 105 MB | 65 s | 0 to +17 MB | +89 MB, 11 s |
 
+**5,000,000 rows** (`tests/bench/bench.tcl 5000000`, real Metakit, default 32 MB operator budget; one run, shared machine, best of 3 per query): loading
+32 s; `WHERE id = x` 0.5 s and `WHERE name = x` 0.6 s (decided inside Metakit); a 10-row `BETWEEN` 5.5 s; `COUNT(*)` 0.3 ms;
+`COUNT(*) ... WHERE grp = 7` 0.7 s; `SUM/AVG/MIN/MAX` 52 s; `GROUP BY` 1,000 groups 44 s; `DISTINCT` 21 s; `ORDER BY ... LIMIT 10` 41 s;
+a full external sort of the whole table 74 s; a hash join with a 1.25M-row table 243 s; `LIKE 'name12%'` 26 s; a window function over everything 322 s.
+Everything finishes in bounded memory, but Tcl is not a fast engine: expect minutes, not seconds, for whole-table work at this size.
+**A correlated subquery over a 1,250,000-row table (re-evaluated per group) did not finish in an hour** - it is the one shape whose cost grows with
+rows x distinct groups; rewrite it as a join or `GROUP BY`. Tables of tens of millions of rows are untested.
+
 The old in-memory engine peaked at 185-229 MB *per query* at 200,000 rows and ran out of room at about 1M. Now the
 extra memory of an operator does not depend on the table size (external sort, grouping by a unique key, a join of the
 table with itself, `UNION/INTERSECT/EXCEPT`, windows, `COUNT(DISTINCT id)`, `INSERT ... SELECT`, `CREATE TABLE AS` all
