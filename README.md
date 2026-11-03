@@ -38,7 +38,7 @@ These are gaps, not bugs; each is rejected with a clear message rather than sile
 
 | Missing | Why / what happens instead |
 | --- | --- |
-| **Persistent constraints**: `PRIMARY KEY`, `UNIQUE`, `FOREIGN KEY`, `CHECK`, `NOT NULL`, `DEFAULT` | Metakit stores none. The statement is refused. Nothing enforces integrity, so applications that expect the database to reject bad rows must check themselves. |
+| **Persistent constraints**: `PRIMARY KEY`, `UNIQUE`, `FOREIGN KEY`, `CHECK`, `NOT NULL`, `DEFAULT` | Metakit stores none. The statement is refused (opt in to `::mkitsql::ignoreConstraints 1` to have them parsed and silently dropped, e.g. to run a schema written for another database). Nothing enforces integrity, so applications that expect the database to reject bad rows must check themselves. |
 | **Indexes** | Metakit has no secondary indexes. Equality joins and correlated lookups use hash tables built per query; a point lookup is still a scan. |
 | **Exact decimal arithmetic** | `DECIMAL`/`NUMERIC` are 64-bit floats. Do not use them for money. |
 | **Persistent NULL** | Metakit has no NULL. NULLs exist while a query runs (`LEFT JOIN`, `SELECT NULL`, empty aggregates...) and obey three-valued logic; storing one writes `0` / empty text, so `WHERE col IS NULL` never matches stored rows. |
@@ -95,16 +95,17 @@ windows over big inputs, recursion, and the row sets built by `INSERT ... SELECT
 AS`) is limited by `::mkitsql::memBytes` (default 32 MB per operator) and spills to temporary files beyond that (an
 external merge sort, hash tables that dump partial results, a sort-merge join when the build side does not fit).
 `::mkitsql::stream` hands a result to a callback chunk by chunk without ever holding it. Measured on real Metakit
-(`tests/scale_memory.tcl`, 200,000 rows, 4 MB budget): the whole 24-statement run peaks at **72 MB** (it used to be
-185-229 MB for the in-memory engine), with external sort, grouping by a unique key, joins of the table with itself,
-`UNION/INTERSECT/EXCEPT`, windows, `COUNT(DISTINCT id)` and 200,000-row `UPDATE`/`INSERT ... SELECT`/`CREATE TABLE
-AS` each adding a few MB. Honest limits: one *partition* of a window function must fit in memory; the value set of an
+(`tests/scale_memory.tcl`, 200,000 rows, 4 MB budget): the whole 24-statement run peaks at **89 MB** (a single
+query used to peak at 185-229 MB in the in-memory engine), with external sort, grouping by a unique key, joins of the
+table with itself, `UNION/INTERSECT/EXCEPT`, windows, `COUNT(DISTINCT id)` and 200,000-row `UPDATE`/`INSERT ...
+SELECT`/`CREATE TABLE AS` each adding a few MB (the largest step, +15 MB, is Metakit holding the rebuilt table of a
+big `DELETE`: uncommitted changes live in Metakit's memory). Honest limits: one *partition* of a window function must fit in memory; the value set of an
 `IN (SELECT ...)` is capped at 5,000,000 values (clear error beyond that); `DELETE` keeps one integer per deleted
 row; `query`/`run` return the whole (capped) result. Metakit is quadratic for scattered deletes and for changing
 the length of many strings in place (every later row or string is shifted each time), so a `DELETE` or a string
 `UPDATE` that touches 20,000 or more rows rebuilds the table through a scratch view instead (linear; `tests/bulkwrite.tcl`
 checks that both strategies give identical files): on 200,000 rows a scattered `DELETE` of half went from 65 s to
-2.3 s and a string `UPDATE` of every row from 56 s to 7 s.
+4.5 s and a string `UPDATE` of every row from 56 s to 8 s.
 
 ## Safety: NULL, intervals and generated code
 

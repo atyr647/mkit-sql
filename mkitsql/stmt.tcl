@@ -420,6 +420,12 @@ proc ::mkitsql::rewriteSortSink {sr chunk} {
     return 0
 }
 
+proc ::mkitsql::ridSink {c chunk} {
+    variable S
+    foreach r $chunk { lappend S($c,ids) [lindex $r 0] }
+    return 0
+}
+
 # tiny map helper (Tcl 8.5 has no lmap)
 proc ::mkitsql::lmap2 {list spec} {
     lassign $spec var body
@@ -477,9 +483,13 @@ proc ::mkitsql::execDelete {st} {
     set items [list [list {col {} _rowid} {} _rowid]]
     set bq [bindQuery [syntheticSelect $st $items]]
     set id [compileQuery $bq {}]
-    set rows [runPlan $id {}]
-    set idx {}
-    foreach r $rows { lappend idx [lindex $r 0] }
+    # only the row ids are kept (not the rows)
+    variable S
+    set rc [newId]
+    set S($rc,ids) {}
+    streamPlan $id {} [list ::mkitsql::ridSink $rc]
+    set idx $S($rc,ids)
+    array unset S $rc,*
     assertClean
     deleteRowsSmart $path $layout $idx
     set n [llength $idx]
