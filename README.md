@@ -89,7 +89,7 @@ mkstudio patch fix it: `mk::view delete` leaves the rows behind, so a table re-c
 ## Tests
 
 ```sh
-tclsh tests/run.tcl                       # 492 engine checks on the pure-Tcl stand-in   (glob to filter: 'join_*')
+tclsh tests/run.tcl                       # 509 engine checks on the pure-Tcl stand-in   (glob to filter: 'join_*')
 tclsh tests/lint.tcl                      # static checks
 tclsh tests/doc_examples.tcl              # the examples in docs/SQL.md
 python3 tests/differential/diff.py [--n 3000] [--seed 1] [--kind window]      # compare with SQLite
