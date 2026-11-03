@@ -193,10 +193,12 @@ against **both storage layers**, and also on a Mk4tcl built from source and on t
 | MK Studio row readers on the same bug (`tests/studio_listbug.tcl`, 5) | fails on an unpatched checkout, passes with `integration/mkstudio.patch`, on both runtimes; MK Studio's own lint, 38-check contract, 16 UI checks and 75 locking checks pass on the patched checkout |
 | Oracle for features (`tests/differential/features.py`) | MERGE, LATERAL, ALTER, subviews, `information_schema`, recursive CTEs agree with SQLite; it found the column-retype corruption |
 | Memory (`tests/scale_memory.tcl`) | flat; see above |
+| Performance guard (`tests/perf_guard.tcl`) and soak (`tests/soak.tcl`) | 12 representative statements over 50,000 rows stay within ceilings (a lost pushdown or an accidental quadratic step fails CI); tens of thousands of mixed statements in one process leave no state, temp file or memory growth |
 | Lint: ASCII, no shadowed commands, nothing newer than the target runtimes, code-boundary inventory | clean |
 | CI (GitHub Actions) | the Linux job (both kits, every suite above), the build-from-source job, the MK Studio job (its engine contract, real UI and locking interoperability on a fresh checkout) and a macOS job (engine, spill, robustness, injection, NULL, review regressions, temp files and locking on Tcl 8.6) pass |
 | Tcl 9.0 (`tests`, CI job `tcl9`) | the whole suite that does not need real Metakit passes on Tcl 9.0.1 built from source: 585 engine checks on both storage layers, injection, NULL forgery, spill, robustness, review regressions, temp files, locking, lock crashes, soak, fuzzing, and the SQLite / numeric / strings / dates / DML differentials; found and fixed octal file modes |
-| **Not tested** | Windows beyond the stand-in suite; macOS only partly; tables of tens of millions of rows; Metakit's behaviour on network file systems |
+| **Full local verification, final state** | 116 checks (every suite above on both runtimes and both storage layers, Tcl 9, the SQLite differentials, MK Studio's contract and UI), 0 failures |
+| **Not tested** | Windows beyond the stand-in suite (CI job added, pending); macOS only partly; tables of tens of millions of rows; Metakit's behaviour on network file systems |
 
 Deliberate differences from SQLite (found by the differential test): `ROUND` rounds the decimal value (so
 `ROUND(2.675, 2)` is `2.68`, as in PostgreSQL), `%` is for integers, typing is static (`COALESCE(int, real)` is

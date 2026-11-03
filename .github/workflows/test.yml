@@ -120,6 +120,8 @@ jobs:
       - name: Lock under crashes - kill at every step, a deterministic vanished-lock race, 60 races for a stale lock, chaos (both kits)
         run: |
           for k in $T86 $T85; do LOCK_ROUNDS=60 MKIT_MK4TCL=builtin $k tests/lock_crash.tcl; done
+      - name: Performance guard - a lost pushdown or an accidental quadratic step fails (generous ceilings), both kits
+        run: for k in $T86 $T85; do PERF_SCALE=2 MKIT_MK4TCL=builtin $k tests/perf_guard.tcl; done
       - name: Big deletes/updates rebuild the table - same result as row by row, tclkit 8.6.3 and 8.5.17
         run: |
           MKIT_MK4TCL=builtin $T86 tests/bulkwrite.tcl 150 4

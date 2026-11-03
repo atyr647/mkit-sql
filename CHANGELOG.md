@@ -22,6 +22,7 @@ All notable changes to mkit-sql. The versioning and compatibility rules are in
   `1e999`, infinities and values beyond 64 bits; a numeric literal that is not finite (`1e999`) is a syntax error.
 
 ### Added
+* `tests/perf_guard.tcl` (coarse performance ceilings in CI) and `tests/soak.tcl`.
 * **Interrupted commits and power loss** (found by MK Studio's power-loss tests, which showed that a kill inside a commit leaves a database Metakit opens as EMPTY): commit record `<file>.commit` + `sync`, repair on open for writing, same mechanism and file formats as MK Studio, guarded so a damaged header cannot cut data away; `tests/power_loss.tcl` (406 synthesised states, 18 real kills with strace) and `tests/studio_repair.tcl`. **The earlier claim that a kill mid-commit always leaves a whole committed batch was wrong** (random kills rarely hit that window). `integration/mkstudio.patch` adds the same guard to MK Studio's own `repairFile`, whose truncation trusted the header blindly.
 * `::mkitsql::db::layout` of a subview path (`d.t!0.kids`) returns the subview's own layout (Mk4tcl answers with the parent's).
 * **Tcl 9.0 support** (`package require Tcl 8.5-10`), tested on a source build in CI. Found and fixed a latent bug on the way: file modes
