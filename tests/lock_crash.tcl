@@ -62,7 +62,7 @@ foreach {name step preseed expectFiles} {
         ok "$name: the new owner is recorded" [string match "[pid] *" [rawread]]
         mkitsql::db::releaseLock $db $mine
         set left [lsort [glob -nocomplain $db.lock*]]
-        if {$left eq "$db.lock.guard"} {
+        if {[llength $left] == 1 && [file tail [lindex $left 0]] eq "[file tail $db].lock.guard"} {       ;# (compare names: a TMPDIR with a trailing slash gives a different spelling)
             after 3600                       ;# an abandoned guard is harmless: it ages out (the age is in whole seconds)
             set m2 [lindex [acquireWithin 8] 0]
             ok "$name: a leftover guard does not block the next owner" [expr {$m2 ne ""}]
