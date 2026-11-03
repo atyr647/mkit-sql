@@ -1233,6 +1233,7 @@ proc ::mkitsql::stKeyOut {idxs next chunk} {
 # ============================================================================
 #  Sorting (in memory; spilled sorts call this on each run)
 # ============================================================================
+proc ::mkitsql::wideCmp {a b} { expr {$a < $b ? -1 : ($a > $b ? 1 : 0)} }
 # recs: each {key1 .. keyN payload ...}.  spec: list of {kind idx dir nulls type}.
 # Multi-key sort = successive stable sorts from the last key to the first.
 proc ::mkitsql::sortRecs {recs spec} {
@@ -1253,7 +1254,13 @@ proc ::mkitsql::sortRecs {recs spec} {
         set mode [expr {$type in {int} ? "-integer" : ($type in {real bool} ? "-real" : "-ascii")}]
         set dirflag [expr {$dir eq "desc" ? "-decreasing" : "-increasing"}]
         if {[catch {lsort $mode $dirflag -index $k $valRecs} sorted]} {
-            set sorted [lsort -real $dirflag -index $k $valRecs]
+            # (whole numbers beyond a machine word: Tcl 8.5 on 64-bit Windows has a 32-bit long, so -integer refuses them; doubles would
+            # make 9223372036854775806 and ...807 equal, so compare them as the whole numbers they are)
+            if {$mode eq "-integer"} {
+                set sorted [lsort -command ::mkitsql::wideCmp $dirflag -index $k $valRecs]
+            } else {
+                set sorted [lsort -real $dirflag -index $k $valRecs]
+            }
         }
         # NULLs sort as the smallest value unless NULLS FIRST / LAST says otherwise
         if {$nulls eq ""} { set nullsFirst [expr {$dir ne "desc"}] } else { set nullsFirst [expr {$nulls eq "first"}] }

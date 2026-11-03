@@ -45,6 +45,8 @@ check "interval / n and * n" [rows "SELECT INTERVAL '1' MONTH / 3, INTERVAL '1' 
 check "interval where a number is expected" [string match "*interval cannot be used as a number*" [err "SELECT SUM(CASE WHEN v < 30 THEN INTERVAL '1' DAY ELSE 5 END) FROM t"]] 1
 # NATURAL JOIN on a duplicated name
 check "NATURAL JOIN on duplicated names is ambiguous" [string match "*NATURAL JOIN on 'k' is ambiguous*" [err "SELECT * FROM (SELECT a.k, b.k FROM u a JOIN u b ON a.w = b.w) q NATURAL JOIN u"]] 1
+# whole numbers beyond a double's precision sort exactly even where lsort -integer cannot be used (Tcl 8.5 on 64-bit Windows: 32-bit long)
+check "wideCmp orders 64-bit neighbours" [lsort -command ::mkitsql::wideCmp {9223372036854775807 9223372036854775806 -9223372036854775808 0 9223372036854775805}] {-9223372036854775808 0 9223372036854775805 9223372036854775806 9223372036854775807}
 # the parse cache must not outlive a setting that changes what a text means
 set ::mkitsql::ignoreConstraints 0
 check "constraints refused" [string match "*PRIMARY KEY is not supported*" [err "CREATE TABLE pk1 (id INT PRIMARY KEY)"]] 1
