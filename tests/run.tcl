@@ -369,6 +369,50 @@ check row_mixed [string match "A row value (a, b) can only be compared*" [errmsg
 check row_bare  [errmsg "SELECT (1, 2)"] {A row value (a, b) can only be used in a comparison or with IN}
 
 # ============================================================================
+#  Dates, times and intervals
+# ============================================================================
+check dt_lit     [rows "SELECT DATE '2026-03-05', TIMESTAMP '2026-3-5 14:30:00', TIME '9:05'"] [list [list 2026-03-05 {2026-03-05 14:30:00} 09:05:00]]
+check dt_addday  [one "SELECT DATE '2026-03-05' + INTERVAL '10' DAY"] 2026-03-15
+check dt_clamp   [rows "SELECT DATE '2026-01-31' + INTERVAL '1' MONTH, DATE '2024-02-29' + INTERVAL '1' YEAR, DATE '2026-03-31' - INTERVAL '1' MONTH"] {{2026-02-28 2025-02-28 2026-02-28}}
+check dt_leap    [rows "SELECT DATE '2024-02-28' + INTERVAL '1' DAY, DATE '2026-02-28' + INTERVAL '1' DAY, DATE '2026-12-31' + INTERVAL '1' DAY"] {{2024-02-29 2026-03-01 2027-01-01}}
+check dt_ts      [one "SELECT TIMESTAMP '2026-03-05 23:30:00' + INTERVAL '45' MINUTE"] {2026-03-06 00:15:00}
+check dt_ts_sub  [one "SELECT TIMESTAMP '2026-03-01 00:10:00' - INTERVAL '20' MINUTE"] {2026-02-28 23:50:00}
+check dt_time    [one "SELECT TIME '23:30:00' + INTERVAL '45' MINUTE"] 00:15:00
+check dt_commut  [one "SELECT INTERVAL '2' DAY + DATE '2026-03-05'"] 2026-03-07
+check dt_hours_on_date [one "SELECT DATE '2026-03-05' + INTERVAL '36' HOUR"] {2026-03-06 12:00:00}
+check dt_diff    [rows "SELECT DATE '2026-03-05' - DATE '2026-01-01', TIMESTAMP '2026-03-05 12:00:00' - TIMESTAMP '2026-03-05 10:30:15'"] {{{63 days} 01:29:45}}
+check dt_diff_neg [one "SELECT DATE '2026-01-01' - DATE '2026-03-05'"] {-63 days}
+check dt_extract_diff [one "SELECT EXTRACT(DAY FROM DATE '2026-03-05' - DATE '2026-01-01')"] 63
+check iv_lits    [rows "SELECT INTERVAL '1-2' YEAR TO MONTH, INTERVAL '3 04:05:06' DAY TO SECOND, INTERVAL '90' MINUTE, INTERVAL '1 year 2 mons 3 days', INTERVAL '5' SECOND"] [list [list {1 year 2 mons} {3 days 04:05:06} 01:30:00 {1 year 2 mons 3 days} 00:00:05]]
+check iv_more    [rows "SELECT INTERVAL '2 weeks', INTERVAL '1.5' HOUR, INTERVAL '1 02:30' DAY TO MINUTE, INTERVAL '2:30' HOUR TO MINUTE, INTERVAL '-3' DAY"] [list [list {14 days} 01:30:00 {1 day 02:30:00} 02:30:00 {-3 days}]]
+check iv_pg      [rows "SELECT INTERVAL '2 hours 30 minutes', INTERVAL '3 days', INTERVAL '-5 hours', INTERVAL '1 day 02:03:04'"] [list [list 02:30:00 {3 days} -05:00:00 {1 day 02:03:04}]]
+check iv_extract [rows "SELECT EXTRACT(YEAR FROM INTERVAL '14' MONTH), EXTRACT(MONTH FROM INTERVAL '14' MONTH), EXTRACT(DAY FROM INTERVAL '3 04:05:06' DAY TO SECOND), EXTRACT(HOUR FROM INTERVAL '3 04:05:06' DAY TO SECOND), EXTRACT(MINUTE FROM INTERVAL '3 04:05:06' DAY TO SECOND), EXTRACT(SECOND FROM INTERVAL '3 04:05:06' DAY TO SECOND)"] {{1 2 3 4 5 6}}
+check iv_arith  [rows "SELECT INTERVAL '1' DAY + INTERVAL '2' HOUR, INTERVAL '1' DAY - INTERVAL '2' HOUR, INTERVAL '1' DAY * 3, 2 * INTERVAL '1' HOUR, INTERVAL '1' DAY / 2, -INTERVAL '1' HOUR"] [list [list {1 day 02:00:00} 22:00:00 {3 days} 02:00:00 12:00:00 -01:00:00]]
+check iv_cmp    [rows "SELECT INTERVAL '1' DAY < INTERVAL '25' HOUR, INTERVAL '2' HOUR = INTERVAL '120' MINUTE, INTERVAL '1' MONTH > INTERVAL '29' DAY, INTERVAL '1' DAY <> INTERVAL '1' DAY"] {{1 1 1 0}}
+check iv_order  [col0 "SELECT x FROM (SELECT INTERVAL '3' DAY AS x UNION ALL SELECT INTERVAL '1' DAY UNION ALL SELECT INTERVAL '2' HOUR) t ORDER BY x"] {02:00:00 {1 day} {3 days}}
+check iv_text   [rows "SELECT 'x' || INTERVAL '1' DAY, CAST(INTERVAL '2' DAY AS VARCHAR)"] {{{x1 day} {2 days}}}
+check iv_cast   [one "SELECT CAST('3 days' AS INTERVAL) + DATE '2026-03-05'"] 2026-03-08
+check iv_null   [rows "SELECT NULL + INTERVAL '1' DAY, DATE '2026-03-05' + NULL"] {{NULL NULL}}
+check dt_col    [col0 "SELECT CAST(hired AS DATE) + INTERVAL '7' DAY FROM employees WHERE id = 3"] {2011-04-13}
+check dt_filter [llength [rows "SELECT id FROM employees WHERE CAST(hired AS DATE) >= CURRENT_DATE - INTERVAL '100' YEAR"]] 20
+check dt_now    [expr {[one "SELECT CURRENT_DATE - CURRENT_DATE"] eq "00:00:00"}] 1
+check dt_store  [ok "CREATE TABLE ev (id INT, at TIMESTAMP, note VARCHAR(40))"] ok
+q "INSERT INTO ev VALUES (1, TIMESTAMP '2026-03-05 10:00:00' + INTERVAL '1' DAY, INTERVAL '2' DAY), (2, '2026-12-31', 'x')"
+check dt_stored [rows "SELECT at, note FROM ev ORDER BY id"] [list [list {2026-03-06 10:00:00} {2 days}] [list 2026-12-31 x]]
+check dt_sort_stored [col0 "SELECT id FROM ev ORDER BY at DESC"] {2 1}
+check dt_stored_math [one "SELECT CAST(at AS TIMESTAMP) - TIMESTAMP '2026-03-01 00:00:00' FROM ev WHERE id = 1"] {5 days 10:00:00}
+q "DROP TABLE ev"
+check dt_e_col   [errmsg "CREATE TABLE ev (id INT, len INTERVAL)"] {INTERVAL columns are not supported; store the length as a number of seconds or as text}
+check dt_e_plus  [errmsg "SELECT INTERVAL '1' DAY + 5"] {The operator + cannot be used between interval and int}
+check dt_e_cmp   [errmsg "SELECT INTERVAL '1' DAY < 5"] {An interval can only be compared with another interval}
+check dt_e_bad   [errmsg "SELECT INTERVAL 'abc'"] {Invalid interval 'abc'}
+check dt_e_qual  [errmsg "SELECT INTERVAL '1-2' DAY"] {Invalid interval '1-2': expected a number of days}
+check dt_e_date  [errmsg "SELECT DATE '2026-02-30' + INTERVAL '1' DAY"] {Invalid date 2026-02-30}
+check dt_e_sum   [errmsg "SELECT SUM(x) FROM (SELECT INTERVAL '3' DAY AS x) t"] {SUM() over intervals is not supported}
+check dt_e_timemonth [errmsg "SELECT TIME '10:00:00' + INTERVAL '1' MONTH"] {A month interval cannot be added to a TIME}
+check dt_e_bareval [string match "'abc' is not a date or time*" [errmsg "SELECT CAST('abc' AS DATE) + INTERVAL '1' DAY"]] 0
+
+# ============================================================================
 #  Subviews (Metakit's nested tables)
 # ============================================================================
 set r [q "SELECT id, skills FROM employees WHERE id = 1"]

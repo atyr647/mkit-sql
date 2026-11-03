@@ -478,6 +478,17 @@ proc ::mkitsql::parsePrimary {} {
                         return [list row $items]
                     }
                 }
+                DATE - TIME - TIMESTAMP {
+                    set n [peek 1]
+                    if {$n ne "" && [lindex $n 0] eq "string"} {
+                        advance ; advance
+                        return [list cast [list lit text [lindex $n 1]] [string tolower $u]]
+                    }
+                }
+                INTERVAL {
+                    set n [peek 1]
+                    if {$n ne "" && [lindex $n 0] eq "string"} { advance ; return [parseIntervalLiteral] }
+                }
                 EXTRACT   { if {[isOp [peek 1] (]} { advance ; return [parseExtract] } }
                 TRIM      { if {[isOp [peek 1] (]} { advance ; return [parseTrim] } }
                 SUBSTRING { if {[isOp [peek 1] (]} { advance ; return [parseSubstring] } }
@@ -492,6 +503,24 @@ proc ::mkitsql::parsePrimary {} {
         }
     }
     err "Unexpected [describe $t]" $t
+}
+
+# INTERVAL 'text' [unit [TO unit]]     (the INTERVAL keyword is already consumed)
+proc ::mkitsql::parseIntervalLiteral {} {
+    set tok [advance]
+    set from "" ; set to ""
+    set units {YEAR MONTH DAY HOUR MINUTE SECOND}
+    set t [peek]
+    if {$t ne "" && [lindex $t 0] eq "ident" && [string toupper [lindex $t 1]] in $units} {
+        set from [string toupper [lindex [advance] 1]]
+        if {[acceptKw TO]} {
+            set t2 [peek]
+            if {$t2 eq "" || [string toupper [lindex $t2 1]] ni $units} { err "Expected YEAR, MONTH, DAY, HOUR, MINUTE or SECOND after TO" $t2 }
+            set to [string toupper [lindex [advance] 1]]
+        }
+    }
+    if {[catch {ivParse [lindex $tok 1] $from $to} r opts]} { err $r $tok }
+    return [list lit interval [ivMake {*}$r]]
 }
 
 # name  |  q.name  |  q.q2.name   (a column reference)

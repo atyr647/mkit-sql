@@ -123,6 +123,18 @@ proc ::mkitsql::execSelect {q} {
         if {$plain && $d ne "0"} { dict set drill $ci $d }
         incr ci
     }
+    # intervals are held in an internal form; show them readably
+    set ivCols {}
+    set ci 0
+    foreach t [dict get $p types] { if {$t eq "interval"} { lappend ivCols $ci } ; incr ci }
+    if {[llength $ivCols]} {
+        set rows2 {}
+        foreach r $rows {
+            foreach i $ivCols { set v [lindex $r $i] ; if {$v ne $N} { lset r $i [ivFormat $v] } }
+            lappend rows2 $r
+        }
+        set rows $rows2
+    }
     # display: NULL text, "\u25B8 N rows" for subview counts
     set outRows {}
     set width [llength $names]
@@ -205,6 +217,8 @@ proc ::mkitsql::coerceValue {col letter v} {
             return $x
         }
     }
+    # an interval stored into a text column keeps its readable form
+    if {[string match ivl:* $v]} { return [ivFormat $v] }
     return $v
 }
 
@@ -359,6 +373,8 @@ proc ::mkitsql::defsToLayout {defs} {
         lappend seen [string tolower $name]
         if {$ty eq "subview"} {
             lappend layout [list $name V [defsToLayout $sub]]
+        } elseif {$ty eq "interval"} {
+            fail "INTERVAL columns are not supported; store the length as a number of seconds or as text"
         } else {
             lappend layout [list $name [lindex [sqlType $ty] 0] {}]
         }

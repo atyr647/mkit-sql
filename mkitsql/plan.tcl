@@ -202,6 +202,9 @@ proc ::mkitsql::compileSelect {bs outerMaps} {
                 lappend argNodes [lindex $args 1]
             }
             set sortKind [expr {[isNumType [expr {$kind in {min max} ? [dryType [lindex $args 0]] : "int"}]] ? "n" : "s"}]
+            if {$kind in {sum avg min max} && [dryType [lindex $args 0]] eq "interval"} {
+                fail "[string toupper $kind]() over intervals is not supported"
+            }
             lappend specs [list $kind $distinct $ai $sepIdx $sortKind]
         }
         lassign [compileList $argNodes $preCtx] aargs _
@@ -747,6 +750,13 @@ proc ::mkitsql::sortRecs {recs spec} {
         set nullRecs {} ; set valRecs {}
         foreach r $recs {
             if {[lindex $r $k] eq $N} { lappend nullRecs $r } else { lappend valRecs $r }
+        }
+        if {$type eq "interval"} {
+            # sort by length of time, not by the internal text form
+            set tmp {}
+            foreach r $valRecs { lset r $k [ivTotal [lindex $r $k]] ; lappend tmp $r }
+            set valRecs $tmp
+            set type real
         }
         set mode [expr {$type in {int} ? "-integer" : ($type in {real bool} ? "-real" : "-ascii")}]
         set dirflag [expr {$dir eq "desc" ? "-decreasing" : "-increasing"}]

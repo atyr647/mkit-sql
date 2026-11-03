@@ -352,6 +352,7 @@ proc ::mkitsql::rt::fn_CURRENT_DATE {} { clock format [clock seconds] -format %Y
 proc ::mkitsql::rt::fn_CURRENT_TIME {} { clock format [clock seconds] -format %H:%M:%S }
 proc ::mkitsql::rt::fn_CURRENT_TIMESTAMP {} { clock format [clock seconds] -format "%Y-%m-%d %H:%M:%S" }
 ::mkitsql::defstrict fn_EXTRACT {field v} {
+    if {[string match ivl:* $v]} { return [::mkitsql::ivExtract $field $v] }
     if {![regexp {^\s*(\d{4})-(\d{1,2})-(\d{1,2})(?:[ T](\d{1,2}):(\d{2})(?::(\d{2}(?:\.\d+)?))?)?} $v -> y m d hh mi ss]} {
         if {[regexp {^\s*(\d{1,2}):(\d{2})(?::(\d{2}(?:\.\d+)?))?} $v -> hh mi ss]} {
             set y "" ; set m "" ; set d ""
@@ -407,6 +408,7 @@ proc ::mkitsql::unify {a b} {
     if {$a in {int bool} && $b in {int bool}} { return int }
     if {[isNumType $a] && [isNumType $b]} { return real }
     if {$a eq "blob" && $b eq "blob"} { return blob }
+    if {$a eq "datetime" && $b eq "text" || $a eq "text" && $b eq "datetime"} { return text }
     return text
 }
 
@@ -435,9 +437,10 @@ proc ::mkitsql::sqlType {name} {
         boolean - bool { return {I bool bool} }
         varchar - char - text - string - clob - nvarchar - nchar - character - bpchar { return {S text text} }
         blob - binary - varbinary - bytes - bytea - bit { return {B blob blob} }
-        date { return {S text date} }
-        time { return {S text time} }
-        timestamp - datetime { return {S text timestamp} }
+        date { return {S datetime date} }
+        time { return {S datetime time} }
+        timestamp - datetime { return {S datetime timestamp} }
+        interval { return {S interval interval} }
     }
     fail "Unknown type '$name'. Supported: INT, BIGINT, REAL, DOUBLE, DECIMAL/NUMERIC, BOOLEAN, VARCHAR/TEXT, BLOB, DATE, TIME, TIMESTAMP"
 }
@@ -496,6 +499,7 @@ proc ::mkitsql::cg {node ctx} {
             if {$op eq "not"} {
                 return [list "\[::mkitsql::rt::not [asBool $a NOT]\]" bool]
             }
+            if {[lindex $a 1] eq "interval"} { return [list "\[::mkitsql::rt::iv_neg [lindex $a 0]\]" interval] }
             lassign [asNum $a] w t
             return [list "\[::mkitsql::rt::neg $w\]" $t]
         }
@@ -585,6 +589,10 @@ proc ::mkitsql::subPlan {bq refs ctx} {
 }
 
 proc ::mkitsql::cmpKind {ta tb} {
+    if {$ta eq "interval" || $tb eq "interval"} {
+        if {($ta eq "interval" || $ta eq "null") && ($tb eq "interval" || $tb eq "null")} { return i }
+        fail "An interval can only be compared with another interval"
+    }
     set na [isNumType $ta] ; set nb [isNumType $tb]
     if {$na && $nb} { return n }
     if {($ta eq "null") || ($tb eq "null")} { return n }
@@ -606,7 +614,8 @@ proc ::mkitsql::cgBin {node ctx} {
             return [list "\[if {\[set $t $wa\] eq \"1\"} {set _ 1} else {::mkitsql::rt::or2 \$$t $wb}\]" bool]
         }
         || {
-            set wa [lindex [cg $a $ctx] 0] ; set wb [lindex [cg $b $ctx] 0]
+            set ca [cg $a $ctx] ; set cb [cg $b $ctx]
+            set wa [textWord $ca] ; set wb [textWord $cb]
             return [list "\[::mkitsql::rt::concat $wa $wb\]" text]
         }
         = - <> - < - <= - > - >= {
@@ -616,7 +625,10 @@ proc ::mkitsql::cgBin {node ctx} {
             return [list "\[::mkitsql::rt::${nm}_$kind [lindex $ca 0] [lindex $cb 0]\]" bool]
         }
         + - - - * - / - % {
-            set ca [asNum [cg $a $ctx]] ; set cb [asNum [cg $b $ctx]]
+            set ra [cg $a $ctx] ; set rb [cg $b $ctx]
+            set sp [cgDateArith $op $ra $rb]
+            if {$sp ne ""} { return $sp }
+            set ca [asNum $ra] ; set cb [asNum $rb]
             lassign $ca wa ta ; lassign $cb wb tb
             set isint [expr {$ta in {int bool} && $tb in {int bool}}]
             set res [expr {$isint ? "int" : "real"}]
@@ -632,6 +644,49 @@ proc ::mkitsql::cgBin {node ctx} {
         }
     }
     error "cgBin: $op"
+}
+
+# text form of an operand (intervals are shown, not shown as ivl:..)
+proc ::mkitsql::textWord {c} {
+    if {[lindex $c 1] eq "interval"} { return "\[::mkitsql::rt::iv_fmt [lindex $c 0]\]" }
+    return [lindex $c 0]
+}
+
+# date and interval arithmetic; returns {} when neither operand is date/interval typed
+proc ::mkitsql::cgDateArith {op ra rb} {
+    lassign $ra wa ta ; lassign $rb wb tb
+    set ia [expr {$ta eq "interval"}] ; set ib [expr {$tb eq "interval"}]
+    set da [expr {$ta in {datetime text null}}] ; set db [expr {$tb in {datetime text null}}]
+    set na [isNumType $ta] ; set nb [isNumType $tb]
+    if {!$ia && !$ib} {
+        # a date with NULL is NULL, not a number
+        if {$op in {+ -} && (($ta eq "datetime" && $tb eq "null") || ($ta eq "null" && $tb eq "datetime"))} {
+            return [list [list $::mkitsql::N] null]
+        }
+        if {$op eq "-" && $ta eq "datetime" && $tb eq "datetime"} {
+            return [list "\[::mkitsql::rt::dt_sub $wa $wb\]" interval]
+        }
+        return {}
+    }
+    switch -- $op {
+        + {
+            if {$ia && $ib} { return [list "\[::mkitsql::rt::iv_add $wa $wb\]" interval] }
+            if {$ia && $db} { return [list "\[::mkitsql::rt::dt_add_iv $wb $wa\]" datetime] }
+            if {$da && $ib} { return [list "\[::mkitsql::rt::dt_add_iv $wa $wb\]" datetime] }
+        }
+        - {
+            if {$ia && $ib} { return [list "\[::mkitsql::rt::iv_sub $wa $wb\]" interval] }
+            if {$da && $ib} { return [list "\[::mkitsql::rt::dt_sub_iv $wa $wb\]" datetime] }
+        }
+        * {
+            if {$ia && ($nb || $tb eq "null")} { return [list "\[::mkitsql::rt::iv_mul $wa $wb\]" interval] }
+            if {$ib && ($na || $ta eq "null")} { return [list "\[::mkitsql::rt::iv_mul $wb $wa\]" interval] }
+        }
+        / {
+            if {$ia && ($nb || $tb eq "null")} { return [list "\[::mkitsql::rt::iv_div $wa $wb\]" interval] }
+        }
+    }
+    fail "The operator $op cannot be used between $ta and $tb"
 }
 
 proc ::mkitsql::cgIn {node ctx} {
@@ -694,6 +749,11 @@ proc ::mkitsql::cgCast {node ctx} {
     lassign [sqlType $ty] letter st kind
     set ca [cg $e $ctx]
     set w [lindex $ca 0]
+    if {[lindex $ca 1] eq "interval"} {
+        if {$kind eq "text"} { return [list "\[::mkitsql::rt::iv_fmt $w\]" text] }
+        if {$kind eq "interval"} { return $ca }
+        fail "An interval can only be cast to text"
+    }
     return [list "\[::mkitsql::rt::cast_$kind $w\]" $st]
 }
 
@@ -719,8 +779,8 @@ proc ::mkitsql::funcTable {} {
         CONCAT {1 -1 text}  CONCAT_WS {2 -1 text}
         COALESCE {1 -1 unify} IFNULL {2 2 unify} NVL {2 2 unify} NULLIF {2 2 arg0}
         GREATEST {1 -1 unify} LEAST {1 -1 unify}
-        CURRENT_DATE {0 0 text} CURRENT_TIME {0 0 text} CURRENT_TIMESTAMP {0 0 text}
-        LOCALTIME {0 0 text} LOCALTIMESTAMP {0 0 text} NOW {0 0 text}
+        CURRENT_DATE {0 0 datetime} CURRENT_TIME {0 0 datetime} CURRENT_TIMESTAMP {0 0 datetime}
+        LOCALTIME {0 0 datetime} LOCALTIMESTAMP {0 0 datetime} NOW {0 0 datetime}
         EXTRACT {2 2 num0}  ROWID_ {1 1 int}
     }
     return $FT
@@ -831,7 +891,7 @@ proc ::mkitsql::compileExpr {node ctx} {
 proc ::mkitsql::compileCond {node ctx} {
     variable cxCount
     set wt [cg $node $ctx]
-    if {[lindex $wt 1] eq "text" || [lindex $wt 1] eq "blob"} {
+    if {[lindex $wt 1] in {text blob datetime interval}} {
         fail "A condition (WHERE, HAVING, ON) must be true/false or a number, not [lindex $wt 1]"
     }
     set w [asBool $wt condition]
