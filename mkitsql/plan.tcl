@@ -122,13 +122,16 @@ proc ::mkitsql::compileQuery {bq outerMaps} {
 proc ::mkitsql::sourceLayout {s} {
     variable needed ; variable curCol
     set id [dict get $s id]
-    set names {} ; set props {} ; set subs {}
+    set names {} ; set props {} ; set subs {} ; set dcols {}
     switch -- [dict get $s kind] {
         table - lateral {
             foreach c [dict get $s cols] {
                 lassign $c n t l isSub
                 if {![info exists needed($id,[string tolower $n])]} continue
-                if {$isSub} { lappend subs $n } else { lappend props $n }
+                if {$isSub} { lappend subs $n } else {
+                    if {$l in {F D}} { lappend dcols [llength $props] }     ;# floating-point columns: -0.0 is read as 0.0
+                    lappend props $n
+                }
             }
             foreach n $props { lappend names [string tolower $n] }
             foreach n $subs { lappend names [string tolower $n] }
@@ -138,7 +141,7 @@ proc ::mkitsql::sourceLayout {s} {
             foreach c [dict get $s cols] { lappend names [string tolower [lindex $c 0]] }
         }
     }
-    return [dict create names $names props $props subs $subs]
+    return [dict create names $names props $props subs $subs dcols $dcols]
 }
 
 # ---- SELECT ----------------------------------------------------------------
@@ -476,7 +479,7 @@ proc ::mkitsql::cfLeaf {s pushable stVar {latmap {}}} {
     switch -- [dict get $s kind] {
         table {
             variable scanSeq
-            set plan [dict create kind scan path [dict get $s path] props [dict get $lay props] \
+            set plan [dict create kind scan path [dict get $s path] props [dict get $lay props] dcols [dict get $lay dcols] \
                 subs [dict get $lay subs] filter $filter sfilter $sfilter dfilter $dfilter lookup $lookup sid [incr scanSeq]]
         }
         lateral {
@@ -487,10 +490,10 @@ proc ::mkitsql::cfLeaf {s pushable stVar {latmap {}}} {
                 set key [dict get $s parent],[string tolower $curCol]
                 if {![dict exists $om $key]} { fail "Cannot read the subview '[dict get $s sub]' of the enclosing query here" }
                 set plan [dict create kind lateralouter level $pl pos [dict get $om $key] sub [dict get $s sub] \
-                    props [dict get $lay props] subs [dict get $lay subs] filter $filter]
+                    props [dict get $lay props] dcols [dict get $lay dcols] subs [dict get $lay subs] filter $filter]
             } else {
                 set plan [dict create kind lateral parent [dict get $s parent] sub [dict get $s sub] \
-                    props [dict get $lay props] subs [dict get $lay subs] filter $filter]
+                    props [dict get $lay props] dcols [dict get $lay dcols] subs [dict get $lay subs] filter $filter]
             }
         }
         derived {

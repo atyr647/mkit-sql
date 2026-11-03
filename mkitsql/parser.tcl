@@ -390,7 +390,9 @@ proc ::mkitsql::parseUnary {} {
     if {[acceptOp -]} {
         set e [parseUnary]
         if {[lindex $e 0] eq "lit" && [lindex $e 1] in {int real}} {
-            return [list lit [lindex $e 1] [expr {-[lindex $e 2]}]]
+            set v [expr {-[lindex $e 2]}]
+            if {$v eq "-0.0"} { set v 0.0 }              ;# SQL has no negative zero
+            return [list lit [lindex $e 1] $v]
         }
         return [list un neg $e]
     }
@@ -694,7 +696,7 @@ proc ::mkitsql::parseExtract {} {
     expectOp )
     return [list func EXTRACT 0 [list [list lit text $f] $e]]
 }
-# TRIM([LEADING|TRAILING|BOTH] [chars] [FROM] expr)
+# TRIM([LEADING|TRAILING|BOTH] [chars] [FROM] expr)   or   TRIM(expr, chars)
 proc ::mkitsql::parseTrim {} {
     expectOp (
     set mode both
@@ -704,7 +706,9 @@ proc ::mkitsql::parseTrim {} {
         set e [parseExpr]
     } else {
         set first [parseExpr]
-        if {[acceptKw FROM]} { set chars $first ; set e [parseExpr] } else { set e $first }
+        if {[acceptKw FROM]} { set chars $first ; set e [parseExpr] } \
+        elseif {[acceptOp ,]} { set chars [parseExpr] ; set e $first } \
+        else { set e $first }
     }
     expectOp )
     return [list func TRIM_ 0 [list [list lit text $mode] $chars $e]]

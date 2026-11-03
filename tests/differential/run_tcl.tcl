@@ -29,7 +29,11 @@ while {[gets $in line] >= 0} {
         continue
     }
     if {$kind ne "Q"} continue
-    if {[dict get $r kind] ne "rowset"} { puts $o "\{\"ok\":true,\"rows\":[]\}" ; continue }
+    if {[dict get $r kind] ne "rowset"} {
+        set aff [expr {[dict exists $r affected] ? [dict get $r affected] : -1}]
+        puts $o "\{\"ok\":true,\"rows\":\[\],\"affected\":$aff\}"
+        continue
+    }
     set rows {}
     foreach row [dict get $r rows] {
         set cells {}

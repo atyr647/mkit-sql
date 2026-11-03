@@ -43,7 +43,7 @@ set boundaries [list \
     [list exec.tcl    {(^|\[)eval }          1 "runs a command prefix that the executor itself assembled (no SQL text)"] \
     [list bind.tcl    {(^|[\[ \{])uplevel }  2 "withScopes / lmap2 run a script literal written in this file"] \
     [list expr.tcl    {^\s*proc [^ \{]*\$}   4 "defstrict (names from this file) and the three cx::pN procs, verified by verify.tcl"] \
-    [list spill.tcl   {(^|\[)open }          2 "the spill file path is built by spillNewPath from the temp dir + a counter"] \
+    [list spill.tcl   {catch \{open }          2 "the spill file path is built by spillNewPath from the temp dir + a counter"] \
     [list mkitsql.tcl {(^|[\[ \{])source -}  3 "loads this package's own files (core, and one of the two storage layers)"] \
     [list stmt.tcl    {(^|\[)rename }        1 "deletes the generated cx::pN procs"] \
     [list pkgIndex.tcl {(^|[\[ \{])source -}  1 "package index: loads mkitsql.tcl"]]

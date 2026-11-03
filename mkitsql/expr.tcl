@@ -93,10 +93,12 @@ proc ::mkitsql::rt::num {v} {
     if {[regexp {^[-+]?\d+$} $s]} { return [expr {$s + 0}] }
     return [expr {double($s)}]
 }
-::mkitsql::defstrict neg {a} { expr {-$a} }
-::mkitsql::defstrict add {a b} { expr {$a + $b} }
-::mkitsql::defstrict sub {a b} { expr {$a - $b} }
-::mkitsql::defstrict mul {a b} { expr {$a * $b} }
+# SQL has no negative zero: -0.0 = 0.0, so they must group, sort, join and de-duplicate as one value.  The
+# floating-point operators that can produce -0.0 turn it into 0.0 (the check is one string comparison).
+::mkitsql::defstrict neg {a} { set r [expr {-$a}] ; if {$r eq "-0.0"} { return 0.0 } ; return $r }
+::mkitsql::defstrict add {a b} { set r [expr {$a + $b}] ; if {$r eq "-0.0"} { return 0.0 } ; return $r }
+::mkitsql::defstrict sub {a b} { set r [expr {$a - $b}] ; if {$r eq "-0.0"} { return 0.0 } ; return $r }
+::mkitsql::defstrict mul {a b} { set r [expr {$a * $b}] ; if {$r eq "-0.0"} { return 0.0 } ; return $r }
 ::mkitsql::defstrict idiv {a b} {
     if {$b == 0} { ::mkitsql::fail "Division by zero" }
     set q [expr {abs($a) / abs($b)}]
@@ -105,7 +107,7 @@ proc ::mkitsql::rt::num {v} {
 }
 ::mkitsql::defstrict rdiv {a b} {
     if {$b == 0} { ::mkitsql::fail "Division by zero" }
-    expr {double($a) / $b}
+    set r [expr {double($a) / $b}] ; if {$r eq "-0.0"} { return 0.0 } ; return $r
 }
 ::mkitsql::defstrict imod {a b} {
     if {$b == 0} { ::mkitsql::fail "Division by zero" }
@@ -115,7 +117,7 @@ proc ::mkitsql::rt::num {v} {
 }
 ::mkitsql::defstrict rmod {a b} {
     if {$b == 0} { ::mkitsql::fail "Division by zero" }
-    expr {fmod($a, $b)}
+    set r [expr {fmod($a, $b)}] ; if {$r eq "-0.0"} { return 0.0 } ; return $r
 }
 ::mkitsql::defstrict cat {a b} { return $a$b }
 
@@ -180,7 +182,7 @@ proc ::mkitsql::rt::inlist {v list kind hasNull} {
     if {[string is integer -strict $v] || [string is wideinteger -strict $v]} { return $v }
     expr {round($v)}
 }
-::mkitsql::defstrict cast_real {v} { expr {double([::mkitsql::rt::num $v])} }
+::mkitsql::defstrict cast_real {v} { set r [expr {double([::mkitsql::rt::num $v])}] ; if {$r eq "-0.0"} { return 0.0 } ; return $r }
 ::mkitsql::defstrict cast_text {v} { return $v }
 ::mkitsql::defstrict cast_blob {v} { return $v }
 ::mkitsql::defstrict cast_bool {v} {
@@ -192,35 +194,39 @@ proc ::mkitsql::rt::inlist {v list kind hasNull} {
     ::mkitsql::fail "Invalid boolean: '[string range $v 0 40]'"
 }
 ::mkitsql::defstrict cast_date {v} {
-    if {![regexp {^\s*(\d{4})-(\d{1,2})-(\d{1,2})} $v -> y m d]} {
+    if {![regexp {^\s*(\d{4})-(\d{1,2})-(\d{1,2})(?:[ T](\d{1,2}):(\d{2})(?::(\d{2}(?:\.\d+)?))?)?\s*$} $v -> y m d hh mi ss]} {
         ::mkitsql::fail "Invalid date: '[string range $v 0 40]' (expected YYYY-MM-DD)"
     }
-    return [format %04d-%02d-%02d [scan $y %d] [scan $m %d] [scan $d %d]]
+    set y [scan $y %d] ; set m [scan $m %d] ; set d [scan $d %d]
+    ::mkitsql::dtCheck date $v $y $m $d 0 0 0
+    return [format %04d-%02d-%02d $y $m $d]
 }
 ::mkitsql::defstrict cast_timestamp {v} {
-    if {![regexp {^\s*(\d{4})-(\d{1,2})-(\d{1,2})(?:[ T](\d{1,2}):(\d{2})(?::(\d{2}(?:\.\d+)?))?)?} $v -> y m d hh mi ss]} {
+    if {![regexp {^\s*(\d{4})-(\d{1,2})-(\d{1,2})(?:[ T](\d{1,2}):(\d{2})(?::(\d{2}(?:\.\d+)?))?)?\s*$} $v -> y m d hh mi ss]} {
         ::mkitsql::fail "Invalid timestamp: '[string range $v 0 40]' (expected YYYY-MM-DD HH:MM:SS)"
     }
     if {$hh eq ""} { set hh 0 ; set mi 0 ; set ss 0 }
     if {$ss eq ""} { set ss 0 }
+    ::mkitsql::dtCheck timestamp $v [scan $y %d] [scan $m %d] [scan $d %d] [scan $hh %d] [scan $mi %d] $ss
     if {[string first . $ss] >= 0} {
         return [format "%04d-%02d-%02d %02d:%02d:%s" [scan $y %d] [scan $m %d] [scan $d %d] [scan $hh %d] [scan $mi %d] $ss]
     }
     return [format "%04d-%02d-%02d %02d:%02d:%02d" [scan $y %d] [scan $m %d] [scan $d %d] [scan $hh %d] [scan $mi %d] [scan $ss %d]]
 }
 ::mkitsql::defstrict cast_time {v} {
-    if {![regexp {^\s*(\d{1,2}):(\d{2})(?::(\d{2}))?} $v -> hh mi ss]} {
+    if {![regexp {^\s*(\d{1,2}):(\d{2})(?::(\d{2}))?\s*$} $v -> hh mi ss]} {
         ::mkitsql::fail "Invalid time: '[string range $v 0 40]' (expected HH:MM:SS)"
     }
     if {$ss eq ""} { set ss 0 }
+    ::mkitsql::dtCheck time $v 1970 1 1 [scan $hh %d] [scan $mi %d] [scan $ss %d]
     return [format %02d:%02d:%02d [scan $hh %d] [scan $mi %d] [scan $ss %d]]
 }
 
 # ---- scalar functions ------------------------------------------------------
 ::mkitsql::defstrict fn_ABS {a} { expr {abs($a)} }
 ::mkitsql::defstrict fn_SIGN {a} { expr {$a > 0 ? 1 : ($a < 0 ? -1 : 0)} }
-::mkitsql::defstrict fn_CEIL {a} { expr {double(ceil($a))} }
-::mkitsql::defstrict fn_FLOOR {a} { expr {double(floor($a))} }
+::mkitsql::defstrict fn_CEIL {a} { set r [expr {double(ceil($a))}] ; if {$r eq "-0.0"} { return 0.0 } ; return $r }
+::mkitsql::defstrict fn_FLOOR {a} { set r [expr {double(floor($a))}] ; if {$r eq "-0.0"} { return 0.0 } ; return $r }
 # ROUND / TRUNC work on the number's shortest decimal form, so ROUND(2.675, 2) is 2.68
 # and ties round away from zero (the SQL rule) instead of following binary noise.
 ::mkitsql::defstrict fn_ROUND {a {n 0}} { ::mkitsql::decRound $a $n 1 }
@@ -294,12 +300,21 @@ proc ::mkitsql::rt::fn_RANDOM {} { expr {rand()} }
     if {$to < $from} { return "" }
     string range $s [expr {$from - 1}] [expr {$to - 1}]
 }
-::mkitsql::defstrict fn_LEFT {s n} { string range $s 0 [expr {$n - 1}] }
+# a negative count means "all but that many from the other end" (PostgreSQL)
+::mkitsql::defstrict fn_LEFT {s n} {
+    if {$n < 0} { set n [expr {[string length $s] + $n}] }
+    if {$n <= 0} { return "" }
+    string range $s 0 [expr {$n - 1}]
+}
 ::mkitsql::defstrict fn_RIGHT {s n} {
+    if {$n < 0} { set n [expr {[string length $s] + $n}] }
     if {$n <= 0} { return "" }
     string range $s [expr {[string length $s] - $n}] end
 }
-::mkitsql::defstrict fn_POSITION {needle hay} { expr {[string first $needle $hay] + 1} }
+::mkitsql::defstrict fn_POSITION {needle hay} {
+    if {$needle eq ""} { return 1 }
+    expr {[string first $needle $hay] + 1}
+}
 ::mkitsql::defstrict fn_REPEAT {s n} { string repeat $s [expr {$n < 0 ? 0 : $n}] }
 ::mkitsql::defstrict fn_REVERSE {s} {
     set out ""
@@ -391,6 +406,7 @@ proc ::mkitsql::rt::fn_CURRENT_TIMESTAMP {} { clock format [clock seconds] -form
 proc ::mkitsql::decRound {a n up} {
     set v [expr {double($a)}]
     if {$v != $v || $v == Inf || $v == -Inf} { return $v }
+    if {$v == 0} { return 0.0 }
     if {![regexp {^(-?)(\d+)(?:\.(\d+))?(?:[eE]([-+]?\d+))?$} $v -> sign ip fp ex]} { return $v }
     if {$ex eq ""} { set ex 0 }
     set m [string trimleft $ip$fp 0]
@@ -401,7 +417,7 @@ proc ::mkitsql::decRound {a n up} {
     set q [expr {$m / $p}]
     if {$up && 2 * ($m % $p) >= $p} { incr q }
     if {$n >= 0} { set r [expr {double($q) / (10.0 ** $n)}] } else { set r [expr {double($q) * (10.0 ** (-$n))}] }
-    if {$sign eq "-"} { set r [expr {-$r}] }
+    if {$sign eq "-" && $r != 0} { set r [expr {-$r}] }
     return $r
 }
 

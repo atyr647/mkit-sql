@@ -50,7 +50,12 @@ proc ::mkitsql::emitAll {sink rows} {
 # ---- temporary files -------------------------------------------------------
 proc ::mkitsql::tmpDir {} {
     variable tempDir
-    if {$tempDir ne ""} { return $tempDir }
+    if {$tempDir ne ""} {
+        if {![file isdirectory $tempDir] || ![file writable $tempDir]} {
+            fail "The folder for temporary files, '$tempDir', does not exist or is not writable.  Set ::mkitsql::tempDir to a writable folder (or to \"\" to choose one automatically)"
+        }
+        return $tempDir
+    }
     set cands {}
     foreach v {TMPDIR TEMP TMP} { if {[info exists ::env($v)]} { lappend cands $::env($v) } }
     lappend cands /tmp /var/tmp .
@@ -67,14 +72,14 @@ proc ::mkitsql::spillNewPath {} {
 }
 proc ::mkitsql::spillOpenW {path} {
     variable spillChans
-    set ch [open $path w]
+    if {[catch {open $path w} ch]} { fail "Cannot create a temporary file ($ch).  Set ::mkitsql::tempDir to a writable folder" }
     fconfigure $ch -translation lf -encoding utf-8 -buffering full -buffersize 131072
     lappend spillChans $ch
     return $ch
 }
 proc ::mkitsql::spillOpenR {path} {
     variable spillChans
-    set ch [open $path r]
+    if {[catch {open $path r} ch]} { fail "Cannot read back a temporary file ($ch)" }
     fconfigure $ch -translation lf -encoding utf-8 -buffersize 131072
     lappend spillChans $ch
     return $ch
@@ -85,16 +90,22 @@ proc ::mkitsql::spillClose {ch} {
     set i [lsearch -exact $spillChans $ch]
     if {$i >= 0} { set spillChans [lreplace $spillChans $i $i] }
 }
-# remove every temporary file and close every channel (called after each statement)
+# End of every statement (also after an error or a cancel): close and delete the spill files and drop
+# all operator state, so a failed statement leaves nothing behind.
 proc ::mkitsql::spillCleanup {} {
-    variable spillFiles ; variable spillChans
+    variable spillFiles ; variable spillChans ; variable S
     foreach ch $spillChans { catch {close $ch} }
     foreach f $spillFiles { catch {file delete $f} }
     set spillFiles {} ; set spillChans {}
+    array unset S
+    array set S {}
+    catch {namespace delete ::mkitsql::agg}
 }
 # one tuple per line; backslash, newline and carriage return are escaped
 proc ::mkitsql::spillWrite {ch rows} {
-    foreach t $rows { puts $ch [string map {\\ \\\\ \n \\n \r \\r} $t] }
+    if {[catch {
+        foreach t $rows { puts $ch [string map {\\ \\\\ \n \\n \r \\r} $t] }
+    } msg]} { fail "Writing a temporary file failed ($msg).  The disk may be full; set ::mkitsql::tempDir to a folder with more room" }
 }
 proc ::mkitsql::spillUnesc {line} { return [string map {\\\\ \\ \\n \n \\r \r} $line] }
 # read up to n tuples from an open channel

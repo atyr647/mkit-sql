@@ -202,7 +202,8 @@ proc ::mkmock::cmd_row {cmd path args} {
                 set t [_type $layout $k]
                 if {$t eq ""} { error "unknown property: $k" }
                 if {$t eq "V"} { error "cannot set subview property directly" }
-                if {($t eq "I" || $t eq "L") && ![string is integer -strict $v]} { error "expected integer but got \"$v\"" }
+                if {$t eq "I" && ![string is integer -strict $v]} { error "expected integer but got \"$v\"" }
+                if {$t eq "L" && ![string is wideinteger -strict $v]} { error "expected integer but got \"$v\"" }
                 if {($t eq "F" || $t eq "D") && ![string is double -strict $v]} { error "expected floating-point number but got \"$v\"" }
                 dict set r $k $v
             }

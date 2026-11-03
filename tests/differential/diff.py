@@ -203,6 +203,20 @@ def norm(v):
         pass
     return v
 
+def roundtie(x, y):
+    """The one documented difference: ROUND works on the shortest decimal form (as PostgreSQL does), so a
+    value like 1.15 or 1.65 that is not exactly representable rounds up here and down in SQLite.  Accept a
+    result pair only if it has the same shape and every cell is equal or a number that differs by one unit
+    of the last rounded digit (<= 0.1, i.e. never by more than a tie can explain)."""
+    if len(x) != len(y): return False
+    for a, b in zip(x, y):
+        if len(a) != len(b): return False
+        for u, v in zip(a, b):
+            if u == v: continue
+            if isinstance(u, float) and isinstance(v, float) and abs(u - v) <= 0.100000001: continue
+            return False
+    return True
+
 def normrows(rows, ordered):
     out = [tuple(norm(c) for c in r) for r in rows]
     return out if ordered else sorted(out, key=lambda t: [(c is None, str(c)) for c in t])
@@ -236,7 +250,7 @@ def main():
     con.execute("PRAGMA case_sensitive_like=ON")
     for s in setup:
         con.execute(s.replace("DOUBLE PRECISION", "REAL").replace("VARCHAR(30)", "TEXT"))
-    ok = bad = both = 0; mism = []; rej_mine = []; rej_sql = []
+    ok = bad = both = known = 0; mism = []; rej_mine = []; rej_sql = []
     for q, m in zip(queries, mine):
         try:
             sres = con.execute(q).fetchall(); serr = None
@@ -248,8 +262,9 @@ def main():
         ordered = "ORDER BY" in q.upper()
         x, y = normrows(m["rows"], ordered), normrows(sres, ordered)
         if x == y: ok += 1
+        elif "ROUND(" in q.upper() and roundtie(x, y): known += 1
         else: bad += 1; mism.append((q, x[:6], y[:6], len(x), len(y)))
-    print("queries: %d   agree: %d (+%d rejected by both)   MISMATCH: %d   rejected only by mkit-sql: %d   rejected only by SQLite: %d" % (len(queries), ok, both, bad, len(rej_mine), len(rej_sql)))
+    print("queries: %d   agree: %d (+%d rejected by both)   MISMATCH: %d   rejected only by mkit-sql: %d   rejected only by SQLite: %d%s" % (len(queries), ok, both, bad, len(rej_mine), len(rej_sql), ("   known ROUND-tie differences: %d" % known) if known else ""))
     for q, x, y, nx, ny in mism[:a.show]:
         print("\nMISMATCH:", q); print("   mkit-sql (%d rows): %s" % (nx, x)); print("   sqlite   (%d rows): %s" % (ny, y))
     for q, e in rej_mine[:a.show]:

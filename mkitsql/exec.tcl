@@ -316,13 +316,14 @@ proc ::mkitsql::srcStream {node outer sink} {
 # Plain scan: read the view in chunks, filter, push.
 proc ::mkitsql::scanPlain {path node outer filter sink} {
     variable chunk ; variable progressHook ; variable cancel ; variable M
-    set props [dict get $node props] ; set subs [dict get $node subs]
+    set props [dict get $node props] ; set subs [dict get $node subs] ; set dcols [dict get $node dcols]
     set n [::mkitsql::db::size $path]
     for {set first 0} {$first < $n} {incr first $chunk} {
         if {$cancel} { fail "Cancelled" }
         if {$progressHook ne ""} { {*}$progressHook }
         set data [::mkitsql::db::rows $path $props $first $chunk]
         if {[string first $M $data] >= 0} { set data [cleanRows $data] }
+        if {[llength $dcols] && [string first -0 $data] >= 0} { set data [fixNegZero $data $dcols] }
         set i $first
         set out {}
         if {$filter eq ""} {
@@ -343,6 +344,16 @@ proc ::mkitsql::scanPlain {path node outer filter sink} {
         if {[llength $out] && [emit $sink $out]} { return 1 }
     }
     return 0
+}
+
+# floating-point cells that are -0.0 (written by another program) read as 0.0
+proc ::mkitsql::fixNegZero {rows dcols} {
+    set out {}
+    foreach r $rows {
+        foreach p $dcols { if {[lindex $r $p] eq "-0.0"} { lset r $p 0.0 } }
+        lappend out $r
+    }
+    return $out
 }
 
 # Sinks that build an in-memory copy of a scan; they give up (return 1, set over) past the budget.

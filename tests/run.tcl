@@ -402,7 +402,7 @@ check dt_e_plus  [errmsg "SELECT INTERVAL '1' DAY + 5"] {The operator + cannot b
 check dt_e_cmp   [errmsg "SELECT INTERVAL '1' DAY < 5"] {An interval can only be compared with another interval}
 check dt_e_bad   [errmsg "SELECT INTERVAL 'abc'"] {Invalid interval 'abc'}
 check dt_e_qual  [errmsg "SELECT INTERVAL '1-2' DAY"] {Invalid interval '1-2': expected a number of days}
-check dt_e_date  [errmsg "SELECT DATE '2026-02-30' + INTERVAL '1' DAY"] {Invalid date 2026-02-30}
+check dt_e_date  [errmsg "SELECT DATE '2026-02-30' + INTERVAL '1' DAY"] {Invalid date '2026-02-30': 2026-02 has no day 30}
 check dt_e_sum   [errmsg "SELECT SUM(x) FROM (SELECT INTERVAL '3' DAY AS x) t"] {SUM() over intervals is not supported}
 check dt_e_timemonth [errmsg "SELECT TIME '10:00:00' + INTERVAL '1' MONTH"] {A month interval cannot be added to a TIME}
 check dt_e_bareval [string match "'abc' is not a date or time*" [errmsg "SELECT CAST('abc' AS DATE) + INTERVAL '1' DAY"]] 0
@@ -664,6 +664,38 @@ check drop_clear_fails_kept [mkitsql::db::hasView $db keep] 1
 check drop_clear_fails_rows [one "SELECT COUNT(*) FROM keep"] 3
 q "DROP TABLE keep"
 check drop_clear_ok [mkitsql::db::hasView $db keep] 0
+# calendar and clock values must exist
+foreach {name sql} {feb30 "SELECT DATE '2026-02-30'" feb29 "SELECT DATE '2026-02-29'" m13 "SELECT DATE '2026-13-01'" m0 "SELECT DATE '2026-00-10'" d0 "SELECT DATE '2026-03-00'" y0 "SELECT DATE '0000-01-01'"
+    h25 "SELECT TIMESTAMP '2026-03-05 25:00:00'" mi61 "SELECT TIMESTAMP '2026-03-05 23:61:00'" s60 "SELECT TIMESTAMP '2026-03-05 23:59:60'" t24 "SELECT TIME '24:00:00'" tm "SELECT TIME '10:75'"
+    castfeb "SELECT CAST('2026-04-31' AS DATE)" casttrail "SELECT CAST('2026-03-05xyz' AS DATE)" casttrail2 "SELECT CAST('10:00:00zz' AS TIME)" extractbad "SELECT EXTRACT(DAY FROM '2026-02-30')"
+    below "SELECT DATE '0001-01-01' - INTERVAL '1' DAY" above "SELECT DATE '9999-12-31' + INTERVAL '1' DAY"} {
+    check "dt_invalid_$name" [expr {[catch {q $sql} m] ? "error" : "accepted"}] error
+}
+check dt_leap_ok [rows "SELECT DATE '2024-02-29', DATE '2000-02-29', DATE '2026-12-31', TIMESTAMP '2026-03-05 23:59:59', TIME '00:00:00'"] {{2024-02-29 2000-02-29 2026-12-31 {2026-03-05 23:59:59} 00:00:00}}
+check dt_century_not_leap [expr {[catch {q "SELECT DATE '1900-02-29'"}] ? "error" : "accepted"}] error
+check dt_cast_from_timestamp_text [rows "SELECT CAST('2026-03-05 10:11:12' AS DATE), CAST('2026-3-5' AS DATE)"] {{2026-03-05 2026-03-05}}
+check dt_extremes [rows "SELECT DATE '0001-01-01' + INTERVAL '1' DAY, DATE '9999-12-31' - INTERVAL '1' DAY"] {{0001-01-02 9999-12-30}}
+# string function corners found by tests/differential/strings.py
+check trim_two_args [rows "SELECT TRIM('xxhixx', 'x'), LTRIM('xxhixx', 'x'), RTRIM('xxhixx', 'x'), TRIM('  a  '), TRIM(BOTH 'x' FROM 'xxaxx')"] {{hi hixx xxhi a a}}
+check trim_two_args_col [rows "SELECT TRIM(name, 'e') FROM departments WHERE id = 2"] {Design}
+check position_empty [rows "SELECT POSITION('' IN 'abc'), INSTR('abc', ''), POSITION('c' IN 'abc'), POSITION('z' IN 'abc')"] {{1 1 3 0}}
+check left_right_negative [rows "SELECT LEFT('abcde', -2), RIGHT('abcde', -2), LEFT('abcde', -9), RIGHT('abcde', -9), LEFT('abcde', 2), RIGHT('abcde', 2), LEFT('abcde', 0), RIGHT('abcde', 9)"] {{abc cde {} {} ab de {} abcde}}
+# negative zero: SQL has none.  -0.0 and 0.0 are one value (stored by another program, or computed)
+mkitsql::db::createView $db negz {{id I {}} {d D {}} {f F {}} {s S {}}}
+foreach {i d s} {1 0.0 0.0  2 -0.0 -0.0  3 0.0 x  4 -0.0 x  5 1.5 y  6 -1.5 y} { mkitsql::db::appendRow $db.negz {id d f s} [list $i $d $d $s] }
+check negzero_distinct [one "SELECT COUNT(DISTINCT d) FROM negz"] 3
+check negzero_distinct_f [one "SELECT COUNT(DISTINCT f) FROM negz"] 3
+check negzero_group [rows "SELECT d, COUNT(*) FROM negz GROUP BY d ORDER BY d"] {{-1.5 1} {0.0 4} {1.5 1}}
+check negzero_equal [rows "SELECT id FROM negz WHERE d = 0 ORDER BY id"] {1 2 3 4}
+check negzero_union [rows "SELECT d FROM negz WHERE id = 1 UNION SELECT d FROM negz WHERE id = 2"] {0.0}
+check negzero_join [rows "SELECT COUNT(*) FROM negz a JOIN negz b ON a.d = b.d"] {18}
+check negzero_window [rows "SELECT id, DENSE_RANK() OVER (ORDER BY d) FROM negz ORDER BY id"] {{1 2} {2 2} {3 2} {4 2} {5 3} {6 1}}
+check negzero_text_untouched [rows "SELECT s FROM negz WHERE id = 2"] {-0.0}
+check negzero_arith [rows "SELECT -(0.0), 0.0 * -1, 0.0 / -5.0, CEIL(-0.5), ROUND(-0.4), TRUNC(-0.4), CAST(-0.0 AS REAL), 0.0 - 0.0, -1.5 + 1.5, MOD(-4.0, 2.0)"] {{0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0}}
+check negzero_nonzero_kept [rows "SELECT -(1.5), 2.0 * -1, 0.0 / 5.0, ROUND(-0.6), CEIL(-1.5)"] {{-1.5 -2.0 0.0 -1.0 -1.0}}
+q "INSERT INTO negz (id, d) VALUES (7, -0.0), (8, ?)" {-0.0}
+check negzero_stored_normalised [rows "SELECT COUNT(DISTINCT d) FROM negz WHERE id >= 7"] 1
+q "DROP TABLE negz"
 check drop_missing [string match "Unknown table 'zz'*" [errmsg "DROP TABLE zz"]] 1
 check drop_ie [ok "DROP TABLE IF EXISTS zz"] ok
 q "INSERT INTO notes (id, body) VALUES (1, 'hello'), (2, 'it''s quoted')"

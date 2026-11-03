@@ -126,13 +126,33 @@ proc ::mkitsql::dtParse {v} {
         set kind [expr {$hh eq "" ? "date" : "timestamp"}]
         if {$hh eq ""} { set hh 0 ; set mi 0 } 
         if {$ss eq ""} { set ss 0 }
-        return [dict create kind $kind y [scan $y %d] m [scan $m %d] d [scan $d %d] hh [scan $hh %d] mi [scan $mi %d] ss [normNum $ss]]
+        set y [scan $y %d] ; set m [scan $m %d] ; set d [scan $d %d] ; set hh [scan $hh %d] ; set mi [scan $mi %d]
+        dtCheck $kind $v $y $m $d $hh $mi $ss
+        return [dict create kind $kind y $y m $m d $d hh $hh mi $mi ss [normNum $ss]]
     }
     if {[regexp {^\s*(\d{1,2}):(\d{2})(?::(\d{2}(?:\.\d+)?))?\s*$} $v -> hh mi ss]} {
         if {$ss eq ""} { set ss 0 }
-        return [dict create kind time y 1970 m 1 d 1 hh [scan $hh %d] mi [scan $mi %d] ss [normNum $ss]]
+        set hh [scan $hh %d] ; set mi [scan $mi %d]
+        dtCheck time $v 1970 1 1 $hh $mi $ss
+        return [dict create kind time y 1970 m 1 d 1 hh $hh mi $mi ss [normNum $ss]]
     }
     fail "'[string range $v 0 40]' is not a date or time (expected YYYY-MM-DD, YYYY-MM-DD HH:MM:SS or HH:MM:SS)"
+}
+# A calendar date / clock time must exist: month 1-12, a day the month has, hour 0-23, minute and second
+# 0-59, year 1-9999.  `what` is date, timestamp or time.
+proc ::mkitsql::dtCheck {what v y m d hh mi ss} {
+    set bad ""
+    if {$what ne "time"} {
+        if {$y < 1 || $y > 9999} { set bad "the year must be 0001 to 9999" } \
+        elseif {$m < 1 || $m > 12} { set bad "there is no month $m" } \
+        elseif {$d < 1 || $d > [daysInMonth $y $m]} { set bad "[format %04d-%02d $y $m] has no day $d" }
+    }
+    if {$bad eq "" && $what ne "date"} {
+        if {$hh < 0 || $hh > 23} { set bad "the hour must be 0 to 23" } \
+        elseif {$mi < 0 || $mi > 59} { set bad "the minute must be 0 to 59" } \
+        elseif {$ss < 0 || $ss >= 60} { set bad "the second must be 0 to 59" }
+    }
+    if {$bad ne ""} { fail "Invalid $what '[string range $v 0 40]': $bad" }
 }
 proc ::mkitsql::daysInMonth {y m} {
     switch -- $m { 4 - 6 - 9 - 11 { return 30 } 2 { return [expr {($y % 4 == 0 && ($y % 100 != 0 || $y % 400 == 0)) ? 29 : 28}] } }
@@ -190,6 +210,7 @@ proc ::mkitsql::dtAdd {v months secs} {
     set ef [expr {int(floor($e))}]
     set days [expr {$ef / 86400}] ; set rem [expr {$ef - $days * 86400}]
     lassign [civilFromDays $days] y m d
+    if {$y < 1 || $y > 9999} { fail "The date is out of range (years 0001 to 9999)" }
     set out [format %04d-%02d-%02d $y $m $d]
     if {!$whole} {
         append out [format " %02d:%02d:%02d" [expr {$rem / 3600}] [expr {$rem % 3600 / 60}] [expr {$rem % 60}]]

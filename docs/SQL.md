@@ -138,7 +138,7 @@ the last peer row with `ORDER BY`, the whole partition without). Windows may be 
 ## Expressions and functions
 
 Operators: `+ - * / %`, `||`, `= <> < <= > >=`, `AND OR NOT`, `IS [NOT] NULL | TRUE | FALSE | DISTINCT FROM`,
-`[NOT] BETWEEN`, `[NOT] IN`, `[NOT] LIKE | ILIKE [ESCAPE c]`, `CASE` (both forms), `CAST(x AS type)`.
+`[NOT] BETWEEN`, `[NOT] IN`, `[NOT] LIKE | ILIKE [ESCAPE c]`, `CASE` (both forms), `CAST(x AS type)` (a real cast to an integer type *rounds* to the nearest whole number, halves away from zero, as in PostgreSQL and MySQL; SQLite truncates). There is no negative zero: `-0.0` is `0.0` everywhere (grouping, sorting, joins, storage).
 Integer `/` truncates toward zero; `%` takes the sign of the left side; division by zero is an error.
 `AND`/`OR`/`CASE` evaluate lazily, so `WHERE b <> 0 AND a / b > 1` is safe.
 
@@ -279,13 +279,25 @@ scattered deletes and string updates are quadratic there. A `DELETE` or a string
 
 The engine reaches Metakit only through `::mkitsql::db` (`mkitsql/db.tcl`, directly on Mk4tcl, no MK Studio
 needed). Inside MK Studio, `mkitsql/db_studio.tcl` forwards the same interface to MK Studio's `::store` so both
-share the open files. `mk::view delete` leaves a view's rows behind, so `dropView` empties the view first and
-abandons the drop with the original error if that fails.
+share the open files. `mk::view delete` leaves a view's rows behind, so `dropView` empties the view first, checks
+that it is empty, and only then deletes it; **any failure while emptying aborts the drop with the original error and
+the table keeps all its rows** (nothing is caught). If the final delete itself fails the error is reported and the
+table is left empty (never with its old rows); `ROLLBACK` restores everything either way. `tests/dropview.tcl` injects
+each of these failures on real Metakit.
 
 ```tcl
 package require mkitsql                                   ;# standalone: loads Mk4tcl itself
 set db [::mkitsql::db::openFile game.mk -create]
 ```
+
+## Running statements
+
+A statement keeps its plans and working state in the engine, so **one statement cannot be started while another is
+running** (for example from a `stream` callback or a progress hook): it fails with a clear error and the outer
+statement is unaffected. Run it after the first has returned. Every statement, whether it succeeds, fails or is
+cancelled, leaves behind no temporary file, no scratch table and no working state (`tests/robustness.tcl`). A
+statement that changes data is all-or-nothing, including when it spills or rebuilds the table; if the *copy back*
+of a rebuild fails half way, the error says so and `ROLLBACK` restores the table.
 
 ## Errors
 

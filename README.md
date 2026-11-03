@@ -143,11 +143,16 @@ against **both storage layers**, and also on a Mk4tcl built from source and on t
 
 | | result |
 | --- | --- |
-| Engine suite (`tests/run.tcl`), 530 checks | pass on both kits, both storage layers, real Metakit; also on the stand-in; also with `MKIT_BULKMIN=1` (every big delete/update rebuilds the table) |
+| Engine suite (`tests/run.tcl`), 566 checks | pass on both kits, both storage layers, real Metakit; also on the stand-in; also with `MKIT_BULKMIN=1` (every big delete/update rebuilds the table) |
 | Same suite with tiny memory budgets (`MKIT_MEMBYTES=1..2000 MKIT_CHUNK=1..11`) | pass: every sort, group, join, distinct and DML spills, thousands of spill files, none left behind |
 | Metakit-only checks (`tests/real_metakit.tcl`, 22) | pass: persistence across close/reopen, 64-bit values, binary, Unicode, nested subviews, every `ALTER`, drop/recreate |
 | **Differential test against SQLite** (`tests/differential`) | more than 60,000 generated queries (about 10,000 window queries), 0 mismatches; repeated with a 50-byte memory budget |
 | Code injection (`tests/injection.tcl`, 1,218 checks) and code-generation audit (`tests/codegen_audit.tcl`, 44 checks + mutation test) | hostile strings never run as code and round-trip exactly |
+| `DROP TABLE` failure modes (`tests/dropview.tcl`, 34) | every way the row-clearing can fail (raises, silently does nothing, size unreadable, final delete fails) is injected on real Metakit: the drop is abandoned, the table keeps its rows, nothing is swallowed, and a re-created table is always empty (also after commit and reopen, with subviews) |
+| Spilling exactness (`tests/spillroundtrip.tcl`, 265) | newlines, carriage returns, backslashes, braces, quotes, NUL-bearing blobs, emoji, 5,000-character values: 34 query shapes and 5 data-changing statements give identical results in memory and with 6 different tiny budgets |
+| Robustness (`tests/robustness.tcl`, 569) | an error or a cancel in the middle of a sort, group, join, window, update, delete, insert, CTAS or merge leaves no temp file, no state and no scratch table, and changes nothing; a rebuild that fails half way is cleaned up; statements cannot nest; bad temp folder; read-only files; several databases; empty and one-row tables through 19 operator shapes; persistence after a rebuild |
+| Stateful DML differential (`tests/differential/dml.py`) | thousands of random INSERT / INSERT..SELECT / UPDATE / DELETE / CREATE TABLE AS / DROP / COMMIT / ROLLBACK statements, affected-row count and full table contents compared with SQLite after every statement; also with every big write forced through the rebuild path and with everything spilling |
+| Numeric edges, strings and `LIKE`, dates (`tests/differential/{numeric,strings,dates}.py`) | 32/64-bit boundaries, 1e300, negative zero; ~9,000 string-function and `LIKE ... ESCAPE` cases with regex metacharacters; ~11,000 date and interval calculations over years 0001-9999 checked against Python's calendar |
 | NULL/interval forgery (`tests/nullforge.tcl`, 57) | no SQL text, parameter, stored value or function can produce NULL or an interval |
 | Fuzzer (`tests/fuzz.tcl`) | more than 300,000 mutated statements: every failure is a clean engine error |
 | A Metakit file we did not create (`tests/realworld.tcl`) | a tclkit's own boot database: nested tables, binary columns, joins, windows, subqueries |
@@ -158,7 +163,7 @@ against **both storage layers**, and also on a Mk4tcl built from source and on t
 
 Deliberate differences from SQLite (found by the differential test): `ROUND` rounds the decimal value (so
 `ROUND(2.675, 2)` is `2.68`, as in PostgreSQL), `%` is for integers, typing is static (`COALESCE(int, real)` is
-real), and `LIKE` is case-sensitive.
+real), `LIKE` is case-sensitive, and `UPPER`/`LOWER` handle all of Unicode (SQLite only changes ASCII letters), casting a real to an integer rounds (SQLite truncates), and there is no negative zero (`-0.0` is `0.0`).
 
 Two bugs in MK Studio's `store.tcl` showed up only on real Metakit: a dropped view stays listed until commit, and
 `mk::view delete` leaves the rows behind (a table re-created under the same name came back **with its old rows**).
@@ -167,7 +172,7 @@ Both are handled in the storage layer and in [`integration/mkstudio.patch`](inte
 ## Tests
 
 ```sh
-tclsh tests/run.tcl                       # 530 engine checks on the pure-Tcl stand-in   (glob to filter: 'join_*')
+tclsh tests/run.tcl                       # 566 engine checks on the pure-Tcl stand-in   (glob to filter: 'join_*')
 MKIT_BACKEND=standalone tclsh tests/run.tcl   # ... on the standalone storage layer (default: MK Studio's ::store)
 MKIT_MEMBYTES=50 MKIT_CHUNK=3 tclsh tests/run.tcl   # tiny memory budget: everything spills
 tclsh tests/lint.tcl                      # static checks + inventory of code boundaries
@@ -178,6 +183,13 @@ tclsh tests/injection.tcl                 # hostile strings must stay inert
 tclsh tests/nullforge.tcl                 # NULL / interval cannot be forged
 tclsh tests/codegen_audit.tcl             # generated code verifier + mutation test
 tclsh tests/bulkwrite.tcl                 # big deletes/updates: rebuild strategy == row-by-row
+tclsh tests/dropview.tcl                  # DROP TABLE failure injection
+tclsh tests/spillroundtrip.tcl            # spilled results are exact
+tclsh tests/robustness.tcl                # errors, cancels, atomicity, odd corners
+python3 tests/differential/dml.py         # random DML sequences vs SQLite
+python3 tests/differential/numeric.py     # numeric edge cases vs SQLite
+python3 tests/differential/strings.py     # string functions / LIKE
+python3 tests/differential/dates.py       # dates and intervals vs Python's calendar
 tclsh tests/fuzz.tcl 40000 1              # mutated SQL must fail cleanly
 MKIT_MK4TCL=builtin tclkit/tclkit-8.6.3 tests/realworld.tcl tclkit/tclkit-8.5.17    # a Metakit file we did not create
 

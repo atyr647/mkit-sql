@@ -13,6 +13,7 @@ namespace eval ::mkitsql {
     variable nullText "NULL"     ;# how NULL is shown in result grids
     variable streamCb ""         ;# set while ::mkitsql::stream runs
     variable autocommit 0        ;# 1 = commit after every successful write statement
+    variable busy 0              ;# 1 while a statement runs (statements cannot be nested)
     variable intMin -2147483648
     variable intMax 2147483647
 }
@@ -31,7 +32,13 @@ proc ::mkitsql::resetStatement {} {
 }
 
 proc ::mkitsql::execStatement {ast {db ""} {plist {}} {nulls {}}} {
+    variable busy
+    # A statement keeps its compiled plans and operator state in this namespace, so a second statement
+    # started from inside the first (a stream callback, a progress hook) would corrupt it: refuse.
+    if {$busy} { fail "A statement cannot be run while another one is running (for example from a stream callback or progress hook); run it after the first has finished" }
+    set busy 1
     set rc [catch {execStatement1 $ast $db $plist $nulls} res opts]
+    set busy 0
     spillCleanup
     if {$rc} {
         if {[string match "too many nested evaluations*" $res]} {
@@ -256,6 +263,7 @@ proc ::mkitsql::coerceValue {col letter v} {
                 fail "Column '$col' holds numbers, but '[string range $v 0 40]' is not one"
             }
             regsub {^([-+]?)0+(?=\d)} $x {\1} x
+            if {[string index $x 0] eq "-" && $x == 0} { set x 0.0 }       ;# no negative zero
             return $x
         }
     }
@@ -385,12 +393,29 @@ proc ::mkitsql::rewriteView {path layout deletes updates targets} {
     set tag [lindex [split $path .] 0]
     set tmpName __mkitsql_tmp_[newId]
     set tmp $tag.$tmpName
+    ::mkitsql::db::createView $tag $tmpName $layout
+    # Phase 1 builds the new contents in the scratch view; the table itself is untouched.  If it fails the
+    # scratch view is dropped and the error is passed on - nothing has changed.
+    if {[catch {rewriteBuild $path $layout $tmp $deletes $updates $targets} msg opts]} {
+        catch {::mkitsql::db::dropView $tag $tmpName}
+        return -options $opts $msg
+    }
+    # Phase 2 swaps it in.  A failure here leaves the new contents in the scratch view, so it is kept
+    # (ROLLBACK restores the table) and named in the message.
+    if {[catch {
+        ::mkitsql::db::clearView $path
+        copyRows $tmp $path $layout
+        ::mkitsql::db::dropView $tag $tmpName
+    } msg opts]} {
+        return -options $opts "$msg  (the table was being rebuilt: ROLLBACK restores it; the new contents are in the scratch table '$tmpName')"
+    }
+}
+proc ::mkitsql::rewriteBuild {path layout tmp deletes updates targets} {
     set props {} ; set subs {}
     foreach c $layout { if {[lindex $c 1] eq "V"} { lappend subs $c } else { lappend props [lindex $c 0] } }
     set tpos {}
     foreach t $targets { lappend tpos [lsearch -exact $props [lindex $t 0]] }
     set n [::mkitsql::db::size $path]
-    ::mkitsql::db::createView $tag $tmpName $layout
     set sr "" ; set rd "" ; set g {}
     if {$updates ne ""} {
         set sr [sorterNew {{key 0 asc "" int}}]
@@ -415,9 +440,6 @@ proc ::mkitsql::rewriteView {path layout deletes updates targets} {
     }
     if {$rd ne ""} { readerFree $rd }
     if {$sr ne ""} { sorterFree $sr }
-    ::mkitsql::db::clearView $path
-    copyRows $tmp $path $layout
-    ::mkitsql::db::dropView $tag $tmpName
 }
 proc ::mkitsql::rewriteSortSink {sr chunk} {
     set recs {}
