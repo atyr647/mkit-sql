@@ -25,9 +25,10 @@ proc ::mkitsql::db::openFile {path args} {
     # check must then come AFTER the open, or it would refuse the very file that is about to be repaired.  An older one does not,
     # so its files are checked first.
     set repairs [llength [info commands ::store::repairFile]]
+    set vlevel ""
     if {!$repairs} {
         if {!$unchecked && [file exists $real]} { ::mkitsql::dbRequireIntact $real }
-        if {$verify && [file exists $real] && [file size $real] > 0} { ::mkitsql::dbVerify $real }
+        if {$verify && [file exists $real] && [file size $real] > 0} { set vlevel [::mkitsql::db::verifyWithSum $real] }
     }
     if {$repairs && !$unchecked && "-readonly" ni $args && [file exists $real]} {
         # the store repairs an interrupted commit when it opens for writing; make sure that repair cannot throw data away
@@ -37,9 +38,14 @@ proc ::mkitsql::db::openFile {path args} {
         }
     }
     set tag [::store::openFile $path {*}$fargs]
+    # a store that keeps a checksum compares it when it opens a file for writing and REPORTS the verdict instead of refusing
+    if {!$unchecked && [llength [info commands ::store::integrityState]] && [::store::integrityState $tag] eq "damaged"} {
+        catch {::store::closeFile $tag}
+        return -code error -errorcode [list MKIT DAMAGED checksum] "This file does not look like what was last saved (its checksum no longer matches although its size and time are unchanged): part of it was damaged since.\n$real\nOpen a backup. (Pass -unchecked to open it anyway.)"
+    }
     if {$repairs && [file exists $real] && [catch {
         if {!$unchecked} { ::mkitsql::dbRequireIntact $real }
-        if {$verify && [file size $real] > 0} { ::mkitsql::dbVerify $real }
+        if {$verify && [file size $real] > 0} { set vlevel [::mkitsql::db::verifyWithSum $real] }
     } err opts]} {
         catch {::store::closeFile $tag}
         return -options $opts $err
@@ -50,11 +56,33 @@ proc ::mkitsql::db::openFile {path args} {
         catch {::store::closeFile $tag}
         return -code error -errorcode [list MKIT DAMAGED "not a Metakit database"] "This file isn't a Metakit database, so it was not opened:\n$real"
     }
+    variable level ; set level($tag) $vlevel
     return $tag
+}
+# -verify on MK Studio's store: its own checksum (<file>.sum, written after every commit) is the proof when it is there and intact,
+# otherwise the file is read in a helper process (evidence, not proof).  Returns "proven" or "evidence"; raises MKIT DAMAGED.
+proc ::mkitsql::db::verifyWithSum {real} {
+    if {[llength [info commands ::store::sumCheck]]} {
+        set v [::store::sumCheck $real]
+        if {$v eq "damaged"} {
+            return -code error -errorcode [list MKIT DAMAGED checksum] "This file does not look like what was last saved (its checksum no longer matches although its size and time are unchanged):\n$real\nOpen a backup."
+        }
+        if {$v eq "ok"} { return proven }
+    }
+    ::mkitsql::dbVerify $real
+    return evidence
+}
+namespace eval ::mkitsql::db { variable level ; array set level {} }
+# {state level} of an open file: level is "proven" (the checksum matched), "evidence" (read in a helper process without trouble: not a proof) or "" (-verify not asked)
+proc ::mkitsql::db::integrityOf {tag} {
+    variable level
+    set st ""
+    if {[llength [info commands ::store::integrityState]]} { set st [::store::integrityState $tag] }
+    list $st [expr {[info exists level($tag)] ? $level($tag) : ""}]
 }
 # what was put right when the file was opened (an interrupted commit), "" if nothing
 proc ::mkitsql::db::repairedNote {tag} { if {[llength [info commands ::store::repairedNote]]} { return [::store::repairedNote $tag] } ; return "" }
-proc ::mkitsql::db::closeFile {tag} { ::store::closeFile $tag ; ::mkitsql::typeForget $tag }
+proc ::mkitsql::db::closeFile {tag} { variable level ; unset -nocomplain level($tag) ; ::store::closeFile $tag ; ::mkitsql::typeForget $tag }
 proc ::mkitsql::db::commit {tag} {
     if {[catch {::store::commit $tag} err opts]} {
         # a failed commit (a full disk, Metakit's 2 GiB limit): put the file right if this store can, discard the pending changes, and

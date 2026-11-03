@@ -126,12 +126,15 @@ jobs:
       - name: SQL added in 0.5 - correlated subqueries remembered per key, EXCLUDE / DISTINCT / IGNORE NULLS, interval aggregates, SIMILAR TO, duplicate column names, ROLLUP / CUBE / GROUPING SETS, COLLATE; both kits, tiny budget too
         run: |
           for k in $T86 $T85; do
-            for t in decorrelate window_ext ivagg similar dupcols groupsets collate review2 insertrows; do echo "== $k / $t"; MKIT_MK4TCL=builtin $k tests/$t.tcl; done
+            for t in decorrelate window_ext ivagg similar dupcols groupsets collate review2 insertrows aggfast; do echo "== $k / $t"; MKIT_MK4TCL=builtin $k tests/$t.tcl; done
             for t in ivagg groupsets decorrelate; do MKIT_MEMBYTES=2000 MKIT_CHUNK=11 MKIT_MK4TCL=builtin $k tests/$t.tcl; done
           done
           for b in standalone studio; do for t in decorrelate window_ext collate groupsets; do MKIT_BACKEND=$b MKIT_MK4TCL=builtin $T86 tests/$t.tcl; done; done
       - name: A failing commit (file-size limit via prlimit) leaves the database as at the last commit, both storage layers; commit-record leftovers
         run: for k in $T86 $T85; do MKIT_MK4TCL=builtin $k tests/commitfail.tcl; done
+      - name: -verify as a proof - the .sum checksum (MK Studio's format), proven / evidence levels, tampering detected, MK Studio's own check agrees
+        run: |
+          for k in $T86 $T85; do MKIT_BACKEND=standalone MKIT_MK4TCL=builtin $k tests/attest.tcl; done
       - name: The 2 GiB ceiling of a Metakit file - a commit that would cross it is undone and the file stays usable (real Metakit, needs 2.5 GB of disk)
         run: MKIT_MK4TCL=builtin $T86 tests/bigfile.tcl
       - name: Big deletes/updates rebuild the table - same result as row by row, tclkit 8.6.3 and 8.5.17
@@ -281,7 +284,7 @@ jobs:
           "$T9" tests/lint.tcl
           for b in standalone studio; do MKIT_BACKEND=$b "$T9" tests/run.tcl; done
       - name: Injection, NULL forgery, code generation, spill, robustness, review regressions, drop view, pushdown, bulk writes
-        run: for t in doc_examples injection nullforge codegen_audit dropview spillroundtrip robustness review_regress pushdown bulkwrite decorrelate window_ext ivagg similar dupcols groupsets collate review2 insertrows; do echo "== $t"; "$T9" tests/$t.tcl; done
+        run: for t in doc_examples injection nullforge codegen_audit dropview spillroundtrip robustness review_regress pushdown bulkwrite decorrelate window_ext ivagg similar dupcols groupsets collate review2 insertrows aggfast; do echo "== $t"; "$T9" tests/$t.tcl; done
       - name: Temp files and locking (file modes are decimal on purpose - Tcl 9 reads 0600 as decimal), lock crash, soak, fuzzer
         run: |
           "$T9" tests/tempsec.tcl
@@ -384,7 +387,7 @@ jobs:
       - name: Engine and Metakit-specific tests, REAL Metakit, both kits
         run: |
           for k in "$T86" "$T85"; do
-            for t in run real_metakit doc_examples injection nullforge review_regress decorrelate window_ext ivagg similar dupcols groupsets collate review2 insertrows; do echo "== $k / $t"; MKIT_MK4TCL=builtin "$k" tests/$t.tcl; done
+            for t in run real_metakit doc_examples injection nullforge review_regress decorrelate window_ext ivagg similar dupcols groupsets collate review2 insertrows aggfast; do echo "== $k / $t"; MKIT_MK4TCL=builtin "$k" tests/$t.tcl; done
           done
       - name: Forcing a file to disk (FlushFileBuffers through PowerShell on Windows, sync on macOS)
         run: MKIT_MK4TCL=builtin "$T86" tests/syncdisk.tcl

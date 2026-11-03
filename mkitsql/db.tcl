@@ -234,9 +234,18 @@ proc ::mkitsql::db::openFile {path args} {
     }
     # a damaged file would open as an empty database (and a later COMMIT would replace the real data); an untrusted one is read
     # completely in a throw-away process first.  Both happen AFTER the repair, so a file that only needed one is not refused.
+    set verdict none ; set vlevel ""
     if {[catch {
         if {!$unchecked} { ::mkitsql::dbRequireIntact $path }
-        if {$verify && [::file exists $path] && [::file size $path] > 0} { ::mkitsql::dbVerify $path }
+        if {!$unchecked && [::file exists $path]} {
+            set verdict [sumCheck $path]
+            if {$verdict eq "damaged"} {
+                return -code error -errorcode [list MKIT DAMAGED checksum] "This file does not look like what was last saved ([sumPath $path] records its checksum, and it no longer matches although the file's size and time are unchanged): part of it was damaged since.\n$path\nOpen a backup. (Pass -unchecked to open it anyway.)"
+            }
+        }
+        if {$verify && [::file exists $path] && [::file size $path] > 0} {
+            if {$verdict eq "ok"} { set vlevel proven } else { ::mkitsql::dbVerify $path ; set vlevel evidence }
+        }
     } err opts]} {
         if {$mine ne ""} { releaseLock $path $mine }
         return -options $opts $err
@@ -263,6 +272,8 @@ proc ::mkitsql::db::openFile {path args} {
         return -options $opts $holder
     }
     lappend tags $tag
+    variable integrity ; variable level
+    set integrity($tag) $verdict ; set level($tag) $vlevel
     if {$repairNote ne ""} { variable repaired ; set repaired($tag) $repairNote }
     set file($tag) $path ; set ro($tag) $readonly ; set dirty($tag) 0
     if {$readonly} {
@@ -279,7 +290,7 @@ proc ::mkitsql::db::closeFile {tag} {
     catch {mk::file close $tag}
     set i [lsearch -exact $tags $tag]
     if {$i >= 0} { set tags [lreplace $tags $i $i] }
-    unset -nocomplain file($tag) ro($tag) dirty($tag) ::mkitsql::db::repaired($tag)
+    unset -nocomplain file($tag) ro($tag) dirty($tag) ::mkitsql::db::repaired($tag) ::mkitsql::db::integrity($tag) ::mkitsql::db::level($tag)
     ::mkitsql::typeForget $tag                       ;# what Metakit remembers about column types dies with the open file
 }
 proc ::mkitsql::db::commit {tag} {
@@ -292,7 +303,7 @@ proc ::mkitsql::db::commit {tag} {
         return -code error -errorcode $code $msg
     }
     set dirty($tag) 0
-    if {$record} { endCommit $file($tag) }
+    if {$record} { endCommit $file($tag) ; catch {sumWrite $file($tag)} }
 }
 # Metakit stores a file's size in ONE 32-bit word and stops at 2 GiB: a commit that would cross it fails ("I/O error during
 # commit"), and - measured on real Metakit - may first have appended part of its data and even written the new header, leaving a
@@ -421,6 +432,49 @@ proc ::mkitsql::db::endCommit {path} {
         }
     }
 }
+# ---- integrity: a checksum of the whole file (the same <file>.sum MK Studio writes) ------------------------------------------------
+# Metakit stores no checksums, so a flipped bit or a lost sector inside the data is invisible to it - and reading such a file can crash
+# Metakit.  After every commit <file>.sum records "<crc32> <size> <mtime>" of the finished file.  Later the sum PROVES the file is still
+# byte for byte what that commit left (and, a file Metakit wrote being well formed, safe to read); it proves nothing about a file that
+# was already damaged when it was written, and a file another program changed has a sum that no longer applies ("changed": no proof).
+# Files over `sumLimit` MB are not covered; `set ::mkitsql::db::sumLimit 0` turns it off.  crc32 catches accidental damage, not tampering.
+namespace eval ::mkitsql::db { variable sumLimit 512 ; variable integrity ; array set integrity {} ; variable level ; array set level {} }
+proc ::mkitsql::db::sumPath {path} { return $path.sum }
+proc ::mkitsql::db::crcFile {path} {
+    set crc 0
+    set h [open $path rb]
+    set rc [catch { while {![eof $h]} { set crc [zlib crc32 [read $h 4194304] $crc] } } err opts]
+    close $h
+    if {$rc} { return -options $opts $err }
+    return [format %08x $crc]
+}
+proc ::mkitsql::db::sumCovered {path} {
+    variable sumLimit
+    expr {[llength [info commands zlib]] && [::file isfile $path] && [::file size $path] > 0 && [::file size $path] <= $sumLimit * 1048576}
+}
+proc ::mkitsql::db::sumWrite {path} {
+    if {![sumCovered $path]} { catch {::file delete [sumPath $path]} ; return 0 }
+    set line "[crcFile $path] [::file size $path] [::file mtime $path]"
+    set tmp [sumPath $path].tmp
+    if {[catch { set h [open $tmp w] ; puts -nonewline $h $line ; close $h ; ::file rename -force $tmp [sumPath $path] }]} { catch {::file delete $tmp} ; return 0 }
+    return 1
+}
+# ok | none (no sum, or not covered) | changed (size or time differ: something else wrote the file) | damaged
+proc ::mkitsql::db::sumCheck {path} {
+    if {![sumCovered $path] || ![::file exists [sumPath $path]]} { return none }
+    if {[catch {set h [open [sumPath $path] r] ; set d [string trim [read $h 200]] ; close $h}] || [llength $d] != 3} { return none }
+    lassign $d crc size mtime
+    if {$size != [::file size $path] || $mtime != [::file mtime $path]} { return changed }
+    return [expr {[crcFile $path] eq $crc ? "ok" : "damaged"}]
+}
+# what is known about this open file: {state level}.  state: the verdict of the sum at open (ok none changed); level: "proven" when
+# -verify found the sum intact, "evidence" when -verify read the whole file in a helper process without trouble (no proof: Metakit reads
+# damaged data differently from one run to the next), "" when -verify was not asked for.
+proc ::mkitsql::db::integrityOf {tag} {
+    variable integrity ; variable level
+    list [expr {[info exists integrity($tag)] ? $integrity($tag) : ""}] [expr {[info exists level($tag)] ? $level($tag) : ""}]
+}
+
 # Put right an interrupted commit.  Needs the write lock.  Returns "" (nothing to do) or what was done.
 proc ::mkitsql::db::repairFile {path} {
     set rec [commitRecord $path]

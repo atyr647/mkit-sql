@@ -17,6 +17,7 @@ if {[info exists ::env(MKIT_BACKEND)] && $::env(MKIT_BACKEND) eq "standalone"} {
     namespace eval ::store [string range $txt $i end]
     puts "(backend: standalone)"
 } else {
-    source $here/vendor/store.tcl
+    # MKIT_STORE=/path/to/store.tcl tests the adapter against another version of MK Studio's store (its checkout's, say)
+    source [expr {[info exists ::env(MKIT_STORE)] && $::env(MKIT_STORE) ne "" ? $::env(MKIT_STORE) : "$here/vendor/store.tcl"}]
     source $root/mkitsql/mkitsql.tcl
 }

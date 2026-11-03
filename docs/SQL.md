@@ -311,10 +311,26 @@ engine is 5-10 us (`SUM/AVG` over 20,000 rows 160 ms, a `LIKE` prefix scan 100 m
 * **Loading many rows: use `::mkitsql::insertRows $db table {columns} $rows`.** Parsing the SQL text of a big `INSERT ... VALUES (...),(...)`
   is 80 % of its cost (1,000 rows: 120 ms to parse, 24 ms to run); `insertRows` takes the rows as Tcl lists, does the same checks and conversions
   (range errors, text to number, NULL, all-or-nothing, transactions) and costs 13 us a row (5,000 rows in 65 ms).
+* **Aggregates fold a whole chunk at a time**: `COUNT`, `SUM`, `AVG`, `MIN`, `MAX` over numbers group the chunk's rows by key and add each group's
+  values with one C-speed command (`::tcl::mathop::+`) instead of one proc call per row and aggregate; `SUM/AVG` over 50,000 rows went from 615 ms to 195 ms, a
+  `GROUP BY` from 566 ms to 309 ms (`::mkitsql::fastAgg 0` returns to the row-by-row fold; `tests/aggfast.tcl` compares the two, and the SQLite
+  differentials agree). Reading rows is unrolled for one to four columns. What is left is Metakit's own `mk::get` (about 1 us a value).
+* **tcl-aot** (the ahead-of-time compiler for Tcl procs in `atyr647/tcl-aot`) was evaluated and is **not usable here yet**: it targets Tcl 8.6.14
+  built as a static library with the compiled C linked into the program, while mkit-sql runs on MK Studio's tclkits (8.6.3 and 8.5.17,
+  prebuilt) and its hot code is generated at run time from the SQL text, which an ahead-of-time compiler cannot see. Its own figures
+  (3-5x on integer and float loops, 1.0-1.5x on code that lives in Tcl's list, string and regexp commands) describe code that is a small
+  part of this engine: the per-row cost is `mk::get` calls and list operations. It would help the static runtime procs (`rt::*`, window and
+  sort loops) in a custom Tcl build; revisit if MK Studio moves to a Tcl it can compile against.
 * Not done, on purpose: a cache of compiled plans (parameters become part of the compiled code, and the plan also depends on table sizes and
   the schema, so entries would rarely be reused and invalidating them is where the bugs would be) and compiled (C) kernels (the engine stays pure Tcl).
 
 ## Large tables and memory
+
+**Can the 2 GiB limit be lifted? Not inside the Metakit format.** Metakit's source stores every file position as a signed 32-bit
+integer (`t4_i32` in `mk4.h`, `DataRead(t4_i32, ...)`), and its change log says "make commit fail on > 2 Gb" (2006). A build with 64-bit
+offsets would write files that MK Studio, every tclkit and every other Metakit tool cannot read, so it is not offered. What works: split the
+data over several files (any number can be open at once and their tables are addressed `dbtag.table`), and watch
+`::mkitsql::db::fileHeadroom $tag` / `::mkitsql::db::nearLimit $tag 0.9` to archive or split before a commit has to be undone.
 
 **A Metakit file cannot be larger than 2 GiB (2,147,483,647 bytes)** - it keeps its size in one 32-bit word (measured on real
 Metakit 2.4.9.7: a commit that would take the file past it fails with "I/O error during commit" and, if it was a large one, leaves
@@ -381,6 +397,13 @@ What the planner does:
 * **Equality joins** are hash joins (sort-merge when the build side exceeds the memory budget); a correlated
   subquery's `inner.col = outer expression` becomes a hash lookup built once per statement; conditions are pushed
   below joins (never across the nullable side of an outer join).
+
+**Should there be persistent indexes? Not yet, and here is what it would take.** Metakit's own `mk::select` already tests a column in C at
+about 0.1 us a row, which beats loading any index into Tcl, so equality and range lookups gain nothing; the real gain would be `ORDER BY ... LIMIT`
+and range scans over millions of rows (a 5-million-row sort is 74 s). A design that cannot go stale exists - a sidecar file holding a sorted
+row-id list per indexed column, valid only while the main file's `<crc32> <size> <mtime>` (the `.sum` above) is unchanged, rebuilt lazily
+otherwise - but it pays off only for read-mostly files above about a million rows, and every commit invalidates it. Build it when a real
+workload needs it; the checksum machinery it depends on is now in place.
 
 **There are no persistent secondary indexes** (`CREATE INDEX` is refused). Mk4tcl has no hash or ordered view
 that could serve as one, so an index would have to be an ordinary view that *every* program writing the file keeps in
@@ -476,7 +499,26 @@ not a complete Metakit file (`-errorcode {MKIT DAMAGED ...}`), and it checks aga
 matches the file. Metakit has no checksums, so damage *inside* the data can still crash the process that reads it:
 `openFile ... -verify` reads the whole file in a throw-away child process first (with a timeout) and refuses the file if
 that process crashes, hangs or reports an error. Use it for files you did not create. `-unchecked` skips both checks (only
-for tools that repair files). Metakit also remembers a column's type by name for as long as the file is open; the engine
+for tools that repair files).
+
+**`-verify` is a proof when the file has its checksum, and says so.** After every commit mkit-sql writes `<file>.sum`
+(`<crc32> <size> <mtime>` of the finished file - the format MK Studio's store writes too, and the two read each other's;
+files over `::mkitsql::db::sumLimit` MB, default 512, are not covered; `0` turns it off). Opening a file for writing compares it, and a file whose size and time
+still match but whose checksum does not is **proven damaged** and refused (`{MKIT DAMAGED checksum}`). `-verify` returns the
+level in `::mkitsql::db::integrityOf $tag` (`{state level}`):
+
+| level | meaning |
+| --- | --- |
+| `proven` | the checksum matched: the file is byte for byte what the last commit left, and a file Metakit wrote is well formed, so reading it is safe |
+| `evidence` | no usable checksum (a file made by another tool, or changed since its last commit by a program that does not write one): the whole file was read in a helper process without trouble. **Not a proof** - on damaged data Metakit behaves differently from one run to the next (seen on macOS CI) |
+| `""` | `-verify` was not asked for |
+
+What "proven" does not cover: a file that was already damaged when it was last committed (the sum vouches for what was written),
+tampering (crc32 catches accidents, not an attacker), and a program that changes the file without updating its sum - that makes the sum
+"changed", which gives `evidence` at best, never a false alarm. There is no way to prove more without a format validator for Metakit files,
+which does not exist; a checksum made by a cooperating writer is the strongest statement available for a format that has none.
+
+Metakit also remembers a column's type by name for as long as the file is open; the engine
 tracks that (see `ALTER COLUMN ... TYPE` under *Changing structure*) and forgets it when the file is closed.
 
 ## Known bug in Tcl 8.5 and 8.6.3 (MK Studio's runtimes), and how the engine copes

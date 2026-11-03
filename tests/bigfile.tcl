@@ -20,6 +20,9 @@ while {$n < 2000} { for {set j 0} {$j < 50} {incr j} { mkitsql::db::appendRow $d
 set mkitsql::db::durable 1
 set before [file size $f] ; set hdr0 [mkitsql::db::headerInfo $f]
 puts "file at 2000 MB: $before bytes"
+ok "headroom is the ceiling minus the size" [expr {[mkitsql::db::fileHeadroom $db] == 2147483647 - $before}]
+ok "near the limit at 90 %" [mkitsql::db::nearLimit $db 0.9]
+ok "not near at 99.9 %" [expr {![mkitsql::db::nearLimit $db 0.999]}]
 # a big commit that crosses the limit
 for {set j 0} {$j < 100} {incr j} { mkitsql::db::appendRow $db.t {k b} [list [expr {$n + $j}] $blob] }
 set rc [catch {mkitsql::db::commit $db} err opts]

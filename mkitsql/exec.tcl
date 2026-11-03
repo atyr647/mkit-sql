@@ -706,11 +706,72 @@ proc ::mkitsql::aggNew1 {a} {
     namespace eval ::mkitsql::agg::A$i {}
     set S($i,a) $a ; set S($i,groups) [dict create] ; set S($i,order) {} ; set S($i,n) 0
     set S($i,limit) [expr {max(2, $memBytes / 700)}]
+    set S($i,fast) [expr {$::mkitsql::fastAgg && [aggFastOk [dict get $a specs]]}]
     set S($i,spill) ""
     return $i
 }
+# Can the specs be folded a whole chunk at a time?  COUNT, SUM, AVG, MIN, MAX over numbers (not DISTINCT, not intervals, not text MIN/MAX).
+proc ::mkitsql::aggFastOk {specs} {
+    foreach spec $specs {
+        lassign $spec kind distinct ai sepIdx sortKind
+        if {$kind eq "cstar"} continue
+        if {$kind in {count sum avg} && $distinct} { return 0 }
+        if {$kind eq "count"} continue
+        if {$kind in {sum avg min max} && $sortKind eq "n"} continue
+        return 0
+    }
+    return 1
+}
+# The same folding as aggAdd1 + aggStepRow + aggFold, but per chunk: the rows are grouped by key first, and each group's values for a
+# spec are summed / counted / compared with one C-speed command instead of one proc call per row and spec.  (Sums are added chunk by
+# chunk, as partial sums already are when an aggregation spills.)
+namespace eval ::mkitsql { variable fastAgg 1 }          ;# 0 = fold row by row (the tests compare the two)
+proc ::mkitsql::aggAddFast {i outer chunk} {
+    variable S ; variable N
+    upvar #0 ::mkitsql::agg::A${i}::ST ST
+    set a $S($i,a)
+    set ng [dict get $a ng] ; set gkey [dict get $a gkey] ; set aargs [dict get $a aargs] ; set specs [dict get $a specs]
+    set limit $S($i,limit)
+    if {$ng} {
+        set byKey [dict create]
+        foreach r $chunk { dict lappend byKey [$gkey $r $outer] [$aargs $r $outer] }
+    } else {
+        set av {}
+        foreach r $chunk { lappend av [$aargs $r $outer] }
+        set byKey [dict create "" $av]
+    }
+    dict for {key avs} $byKey {
+        if {![dict exists $S($i,groups) $key]} {
+            if {$S($i,n) >= $limit} { aggDump $i }
+            set gi $S($i,n) ; incr S($i,n)
+            dict set S($i,groups) $key $gi ; lappend S($i,order) $key
+            aggInitGroup $i $gi
+        } else { set gi [dict get $S($i,groups) $key] }
+        set k 0
+        foreach spec $specs {
+            lassign $spec kind distinct ai
+            if {$kind eq "cstar"} { incr ST($gi,$k) [llength $avs] ; incr k ; continue }
+            set col {}
+            foreach av $avs { lappend col [lindex $av $ai] }
+            if {[lsearch -exact $col $N] >= 0} { set col [lsearch -all -inline -not -exact $col $N] }
+            set n [llength $col]
+            if {$n} {
+                switch -- $kind {
+                    count { incr ST($gi,$k) $n }
+                    sum   { aggFold $i $gi $k sum n [::tcl::mathop::+ {*}$col] }
+                    avg   { set ST($gi,$k) [expr {$ST($gi,$k) + [::tcl::mathop::+ {*}$col]}] ; incr ST(c,$gi,$k) $n }
+                    min   { aggFold $i $gi $k min n [::tcl::mathfunc::min {*}$col] }
+                    max   { aggFold $i $gi $k max n [::tcl::mathfunc::max {*}$col] }
+                }
+            }
+            incr k
+        }
+    }
+    return 0
+}
 proc ::mkitsql::aggAdd1 {i outer chunk} {
     variable S ; variable N ; variable cancel
+    if {$S($i,fast)} { return [aggAddFast $i $outer $chunk] }
     set a $S($i,a)
     set ng [dict get $a ng] ; set gkey [dict get $a gkey] ; set aargs [dict get $a aargs] ; set specs [dict get $a specs]
     set limit $S($i,limit)

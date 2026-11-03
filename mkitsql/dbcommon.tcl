@@ -59,10 +59,39 @@ proc ::mkitsql::db::rows {path props first count} {
     if {$::mkitsql::listBug} {
         # Tcl 8.5 / 8.6.3 damage the string form of a list whose first element is '#...' text with two or more ] or ", and
         # that is the list a multi-property mk::get returns: read one property at a time (see ::mkitsql::rt::sk)
-        for {set i $first} {$i <= $last} {incr i} {
-            set row {}
-            foreach p $props { lappend row [mk::get $path!$i $p] }
-            lappend out [::mkitsql::rt::sk $row]
+        # (the check on the first cell is inlined, and one to four properties are unrolled: reading is the bulk of a scan)
+        switch -- $np {
+            1 { lassign $props p1
+                for {set i $first} {$i <= $last} {incr i} {
+                    set row [list [mk::get $path!$i $p1]]
+                    if {[string index [lindex $row 0] 0] eq "#"} { set row [::mkitsql::rt::sk $row] }
+                    lappend out $row } }
+            2 { lassign $props p1 p2
+                for {set i $first} {$i <= $last} {incr i} {
+                    set r $path!$i
+                    set row [list [mk::get $r $p1] [mk::get $r $p2]]
+                    if {[string index [lindex $row 0] 0] eq "#"} { set row [::mkitsql::rt::sk $row] }
+                    lappend out $row } }
+            3 { lassign $props p1 p2 p3
+                for {set i $first} {$i <= $last} {incr i} {
+                    set r $path!$i
+                    set row [list [mk::get $r $p1] [mk::get $r $p2] [mk::get $r $p3]]
+                    if {[string index [lindex $row 0] 0] eq "#"} { set row [::mkitsql::rt::sk $row] }
+                    lappend out $row } }
+            4 { lassign $props p1 p2 p3 p4
+                for {set i $first} {$i <= $last} {incr i} {
+                    set r $path!$i
+                    set row [list [mk::get $r $p1] [mk::get $r $p2] [mk::get $r $p3] [mk::get $r $p4]]
+                    if {[string index [lindex $row 0] 0] eq "#"} { set row [::mkitsql::rt::sk $row] }
+                    lappend out $row } }
+            default {
+                for {set i $first} {$i <= $last} {incr i} {
+                    set r $path!$i ; set row {}
+                    foreach p $props { lappend row [mk::get $r $p] }
+                    if {[string index [lindex $row 0] 0] eq "#"} { set row [::mkitsql::rt::sk $row] }
+                    lappend out $row
+                }
+            }
         }
         return $out
     }
@@ -86,9 +115,10 @@ proc ::mkitsql::db::rowsAt {path props indices} {
     if {$np == 0} { foreach i $indices { lappend out {} } ; return $out }
     if {$::mkitsql::listBug} {
         foreach i $indices {
-            set row {}
-            foreach p $props { lappend row [mk::get $path!$i $p] }
-            lappend out [::mkitsql::rt::sk $row]
+            set r $path!$i ; set row {}
+            foreach p $props { lappend row [mk::get $r $p] }
+            if {[string index [lindex $row 0] 0] eq "#"} { set row [::mkitsql::rt::sk $row] }
+            lappend out $row
         }
         return $out
     }
@@ -142,4 +172,18 @@ proc ::mkitsql::db::repairUnsafe {path} {
         return "the file is longer than its header says, and no valid end of a committed file is where the header points"
     }
     return ""
+}
+
+# ---- Metakit's 2 GiB ceiling (the size of a file is a signed 32-bit offset throughout Metakit: its source refuses a commit past it) ---------------
+# Bytes the file of this handle may still grow by before a commit fails (as of its last commit), and whether it is within `fraction` of the
+# ceiling - for an application to warn, archive or split before a commit has to be undone.
+namespace eval ::mkitsql::db { variable maxFileBytes 2147483647 }
+proc ::mkitsql::db::fileHeadroom {tag} {
+    variable maxFileBytes
+    set p [path $tag]
+    expr {$maxFileBytes - ([::file exists $p] ? [::file size $p] : 0)}
+}
+proc ::mkitsql::db::nearLimit {tag {fraction 0.9}} {
+    variable maxFileBytes
+    expr {[fileHeadroom $tag] < $maxFileBytes * (1.0 - $fraction)}
 }
