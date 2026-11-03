@@ -28,6 +28,8 @@ proc oldTokenize {text} {
     return $out
 }
 set pass 0 ; set fail 0
+# ::mkitsql::tokenRe is part of the interface to MK Studio (its editor colours text with the eight groups, in this order): it must stay as it was
+if {$::mkitsql::tokenRe eq $oldRe && [llength [regexp -inline -indices $::mkitsql::tokenRe "x"]] == 9} { incr pass } else { incr fail ; puts "FAIL tokenRe changed" }
 proc same {text} {
     global pass fail
     if {[oldTokenize $text] eq [mkitsql::tokenize $text]} { incr pass } else { incr fail ; if {$fail < 6} { puts "FAIL on <[string range $text 0 120]>" } }

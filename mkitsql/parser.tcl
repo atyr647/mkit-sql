@@ -55,7 +55,9 @@ namespace eval ::mkitsql {
     # comment | block comment | 'string' | "ident" | number | word | operator | stray char
     variable parseCache
     array set parseCache {}
-    variable tokenRe {--[^\n]*|/\*(?:[^*]|\*(?!/))*\*/|'(?:[^']|'')*'|"(?:[^"]|"")*"|(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?|[A-Za-z_][A-Za-z0-9_$]*|<>|!=|<=|>=|==|\|\||[-+*/%=<>(),;.\[\]!@?:]|\S}
+    variable tokenRe {(--[^\n]*)|(/\*(?:[^*]|\*(?!/))*\*/)|('(?:[^']|'')*')|("(?:[^"]|"")*")|((?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?)|([A-Za-z_][A-Za-z0-9_$]*)|(<>|!=|<=|>=|==|\|\||[-+*/%=<>(),;.\[\]!@?:])|(\S)}
+    # the same tokens without capture groups (three times faster); ::mkitsql::tokenRe above keeps its eight groups, which MK Studio reads for highlighting
+    variable tokenFastRe {--[^\n]*|/\*(?:[^*]|\*(?!/))*\*/|'(?:[^']|'')*'|"(?:[^"]|"")*"|(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?|[A-Za-z_][A-Za-z0-9_$]*|<>|!=|<=|>=|==|\|\||[-+*/%=<>(),;.\[\]!@?:]|\S}
 }
 
 # ============================================================================
@@ -64,10 +66,10 @@ namespace eval ::mkitsql {
 # Returns a list of tokens {kind value pos len}; comments are dropped.
 # kind: string qident number ident op bad
 proc ::mkitsql::tokenize {text} {
-    variable tokenRe
+    variable tokenFastRe
     set out {}
     # one match per token (no capture groups: they made the regular expression three times slower); the kind follows from the first character
-    foreach m [regexp -all -inline -indices -- $tokenRe $text] {
+    foreach m [regexp -all -inline -indices -- $tokenFastRe $text] {
         lassign $m s e
         set raw [string range $text $s $e]
         set c [string index $raw 0]

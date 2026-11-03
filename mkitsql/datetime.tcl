@@ -25,7 +25,10 @@ proc ::mkitsql::ivMake {m s} {
 proc ::mkitsql::ivSortKey {v} {
     if {![isIv $v]} { return $v }                          ;# already converted (a spilled run is sorted again)
     lassign [ivSplit $v] m s
-    format %031d%019d [expr {$m * 2592000000000 + round($s * 1000000) + 1000000000000000000000000000000}] [expr {$m + 1000000000000000000}]
+    # (padded by hand: `format %d` of a number beyond a machine word is not exact on every Tcl - Tcl 9, 64-bit Windows Tcl 8)
+    set a [expr {$m * 2592000000000 + round($s * 1000000) + 1000000000000000000000000000000}]
+    set b [expr {$m + 1000000000000000000}]
+    return [string repeat 0 [expr {31 - [string length $a]}]]$a[string repeat 0 [expr {19 - [string length $b]}]]$b
 }
 proc ::mkitsql::ivSplit {v} {
     if {![::mkitsql::isIv $v] || ![regexp {^.....(-?\d+):(-?[0-9.eE+-]+)$} $v -> m s]} {

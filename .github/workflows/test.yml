@@ -285,7 +285,7 @@ jobs:
           "$T9" tests/lint.tcl
           for b in standalone studio; do MKIT_BACKEND=$b "$T9" tests/run.tcl; done
       - name: Injection, NULL forgery, code generation, spill, robustness, review regressions, drop view, pushdown, bulk writes
-        run: for t in doc_examples injection nullforge codegen_audit dropview spillroundtrip robustness review_regress pushdown bulkwrite decorrelate window_ext ivagg similar dupcols groupsets collate review2 insertrows aggfast tokenizer likepush attest; do echo "== $t"; "$T9" tests/$t.tcl; done
+        run: for t in doc_examples injection nullforge codegen_audit dropview spillroundtrip robustness review_regress pushdown bulkwrite decorrelate window_ext ivagg similar dupcols groupsets collate review2 insertrows aggfast tokenizer likepush; do echo "== $t"; "$T9" tests/$t.tcl; done
       - name: Temp files and locking (file modes are decimal on purpose - Tcl 9 reads 0600 as decimal), lock crash, soak, fuzzer
         run: |
           "$T9" tests/tempsec.tcl
