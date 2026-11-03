@@ -109,7 +109,8 @@ proc ::mkitsql::db::lockInfo {path} {
     set state held
     if {![string is integer -strict $pid] || $host eq ""} {
         # empty or garbled: its creator is probably between creating and writing it; stale only once it has stayed so for a while
-        if {[clock seconds] - $st(mtime) > 5} { set state stale }
+        variable emptyStale
+        if {[clock seconds] - $st(mtime) > $emptyStale} { set state stale }
     } elseif {$pid == [pid] && $host eq [thisHost]} {
         set state ours
     } elseif {$host eq [thisHost]} {
@@ -138,33 +139,55 @@ proc ::mkitsql::db::lockedError {holder path} {
 }
 # Create our lock file; returns its text, "" when no lock could be made (read-only folder or disk: carry on unlocked),
 # or raises MKIT LOCKED when somebody else owns it.
+# Try to create our lock file.  Returns {created text}, {exists} (something is already there - or was a moment ago), or
+# {blocked} (the folder will not hold a file: read-only, no permission, disk full - run unlocked).  Only a refusal of the
+# folder itself means "blocked": a file that has vanished again by the time we look is a competitor that just released or
+# replaced the lock, never "no lock needed" (treating it so let two processes both believe they owned the database).
 proc ::mkitsql::db::createLock {lf mine} {
-    if {[catch {open $lf {WRONLY CREAT EXCL} 0644} h]} { return -1 }
+    if {[catch {open $lf {WRONLY CREAT EXCL} 0644} h opts]} {
+        set code [dict get $opts -errorcode]
+        if {[lindex $code 0] eq "POSIX" && [lindex $code 1] eq "EEXIST"} { return [list exists] }
+        return [list blocked]
+    }
+    lockStep created
     if {[catch {puts -nonewline $h $mine ; close $h} err]} {
         # the write failed (a full disk): an empty lock would keep everybody out until it is old - remove it and go on unlocked
         catch {close $h} ; catch {::file delete $lf}
-        return ""
+        return [list blocked]
     }
-    return $mine
+    lockStep written
+    # tidy up a takeover guard abandoned by a crashed process (it is harmless but would otherwise stay for ever)
+    variable mutexStale
+    if {![catch {::file mtime $lf.guard} mt] && [clock seconds] - $mt > $mutexStale} { catch {::file delete $lf.guard} }
+    return [list created $mine]
 }
+# test hook: a script prefix called with the name of each step of taking a lock (tests kill the process or race it there)
+namespace eval ::mkitsql::db { variable lockHook "" ; variable emptyStale 5 ; variable mutexStale 10 }
+proc ::mkitsql::db::lockStep {name} { variable lockHook ; if {$lockHook ne ""} { {*}$lockHook $name } }
 proc ::mkitsql::db::takeLock {path} {
+    variable mutexStale
     set lf [lockPath $path] ; set mine [lockText]
-    for {set attempt 0} {$attempt < 4} {incr attempt} {
+    for {set attempt 0} {$attempt < 60} {incr attempt} {
         set r [createLock $lf $mine]
-        if {$r ne "-1"} { return $r }
-        if {[catch {::file lstat $lf st}]} { return "" }                      ;# could not create it here (read-only folder)
+        switch -- [lindex $r 0] {
+            created { return [lindex $r 1] }
+            blocked { return "" }
+        }
+        lockStep create-failed
+        if {[catch {::file lstat $lf st}]} { continue }                       ;# it vanished: a competitor released or replaced it - try again
         set holder [lockHolder $path]
         if {$holder ne ""} { return [lockedError $holder $path] }
-        # stale (or ours from an earlier run): replace it, one process at a time
-        set guard $lf.guard ; set got 0
-        for {set w 0} {$w < 50 && !$got} {incr w} {
-            if {![catch {set gh [open $guard {WRONLY CREAT EXCL} 0644] ; close $gh}]} { set got 1 ; break }
-            if {![catch {::file mtime $guard} mt] && [clock seconds] - $mt > 10} { catch {::file delete $guard} ; continue }   ;# abandoned by a crash
-            after 40
+        # stale (or ours from an earlier run): replace it, one process at a time, under the guard
+        set guard $lf.guard
+        if {[catch {set gh [open $guard {WRONLY CREAT EXCL} 0644] ; close $gh}]} {
+            # somebody else is replacing the lock: a guard older than mutexStale was abandoned by a crash, otherwise give them a
+            # moment (about 2.4 s over all attempts, as the protocol says) and look again
+            if {![catch {::file mtime $guard} mt] && [clock seconds] - $mt > $mutexStale} { catch {::file delete $guard} } else { after 40 }
+            continue
         }
-        if {!$got} continue
+        lockStep mutex
         set again [lockHolder $path]                                           ;# look again now that nobody else is replacing it
-        if {$again eq "" && [dict get [lockInfo $path] state] in {stale ours}} { catch {::file delete $lf} }
+        if {$again eq "" && [dict get [lockInfo $path] state] in {stale ours}} { catch {::file delete $lf} ; lockStep deleted }
         catch {::file delete $guard}
         if {$again ne ""} { return [lockedError $again $path] }
     }
@@ -174,7 +197,7 @@ proc ::mkitsql::db::takeLock {path} {
 proc ::mkitsql::db::releaseLock {path mine} {
     set lf [lockPath $path]
     if {[catch {::file lstat $lf st}] || $st(type) ne "file"} return
-    if {![catch {set h [open $lf r] ; set d [read $h 512] ; close $h}] && $d eq $mine} { catch {::file delete $lf} }
+    if {![catch {set h [open $lf r] ; set d [read $h 512] ; close $h}] && $d eq $mine} { catch {::file delete $lf} ; lockStep released }
 }
 # Who blocks writing to this file?  "pid host role endpoint" of the live writer a read-only handle noticed, else "".
 proc ::mkitsql::db::lockedBy {tag} { variable lockedBy ; if {[info exists lockedBy($tag)]} { return $lockedBy($tag) } ; return "" }

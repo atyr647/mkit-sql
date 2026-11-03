@@ -113,6 +113,9 @@ jobs:
           MKIT_PUSHMIN=0 MKIT_MK4TCL=builtin $T86 tests/run.tcl
           MKIT_PUSHDOWN=0 MKIT_MK4TCL=builtin $T86 tests/run.tcl
           MKIT_TCLSH=$T86 MKIT_MK4TCL=builtin MKIT_PUSHMIN=0 python3 tests/differential/diff.py --n 3000 --seed 81
+      - name: Lock under crashes - kill at every step, a deterministic vanished-lock race, 60 races for a stale lock, chaos (both kits)
+        run: |
+          for k in $T86 $T85; do LOCK_ROUNDS=60 MKIT_MK4TCL=builtin $k tests/lock_crash.tcl; done
       - name: Big deletes/updates rebuild the table - same result as row by row, tclkit 8.6.3 and 8.5.17
         run: |
           MKIT_MK4TCL=builtin $T86 tests/bulkwrite.tcl 150 4
@@ -225,6 +228,10 @@ jobs:
       - name: Locking interoperates with MK Studio's own store.tcl (separate processes, both directions)
         if: steps.ms.outcome == 'success'
         run: MKIT_MK4TCL=builtin MKSTUDIO_DIR=$PWD/mkstudio $T86 tests/locking.tcl
+      - name: MK Studio's own lock-protocol test (mixed races, crash points) against this checkout's mkit-sql
+        if: steps.ms.outcome == 'success'
+        working-directory: mkstudio
+        run: MKITSQL_DIR="$GITHUB_WORKSPACE" REAL_MK=1 MKS_RACE_ROUNDS=10 MKIT_MK4TCL=builtin "$GITHUB_WORKSPACE/tclkit/tclkit-8.6.3" tests/run.tcl tests/test_lock_protocol.tcl
       - name: The installer and patch apply to a fresh mkstudio checkout
         if: steps.ms.outcome == 'success'
         run: |

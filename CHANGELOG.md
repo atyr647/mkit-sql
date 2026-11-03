@@ -43,6 +43,8 @@ All notable changes to mkit-sql. The versioning and compatibility rules are in
   information_schema, recursive CTEs), stateful DML; damage, review-regression, list-bug and benchmark suites.
 
 ### Fixed
+* **Lock race (found by MK Studio's tests):** when a competitor deleted a stale lock between our failed create and our look at it, we concluded "this folder cannot hold a lock" and opened the file unlocked next to the competitor (2-3 winners in ~3 of 60 races). Only a folder that refuses files means "unlocked" now; a vanished lock is retried. Regression: `tests/lock_crash.tcl` (deterministic hook plus kill-at-every-step, 60 stale-lock races, chaos).
+* The wait for another process's takeover guard is bounded (about 2.4 s) as the protocol says; an abandoned takeover guard is tidied when the lock is created.
 * Nested derived tables took time doubling with every level (a bound query was stored twice per level): now linear.
 * `CHR`, `SUBSTR`, `LEFT`, `RIGHT`, `REPEAT`, `LPAD`, `RPAD`, `ROUND`, `TRUNC`, `POWER`, `ASIN`, `ACOS`, `ABS`, `SQRT`,
   `SIN`, interval multiplication and comparisons with huge numbers raised raw Tcl errors or could build the reserved NULL
