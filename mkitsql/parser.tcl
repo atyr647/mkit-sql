@@ -55,7 +55,7 @@ namespace eval ::mkitsql {
     # comment | block comment | 'string' | "ident" | number | word | operator | stray char
     variable parseCache
     array set parseCache {}
-    variable tokenRe {(--[^\n]*)|(/\*(?:[^*]|\*(?!/))*\*/)|('(?:[^']|'')*')|("(?:[^"]|"")*")|((?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?)|([A-Za-z_][A-Za-z0-9_$]*)|(<>|!=|<=|>=|==|\|\||[-+*/%=<>(),;.\[\]!@?:])|(\S)}
+    variable tokenRe {--[^\n]*|/\*(?:[^*]|\*(?!/))*\*/|'(?:[^']|'')*'|"(?:[^"]|"")*"|(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?|[A-Za-z_][A-Za-z0-9_$]*|<>|!=|<=|>=|==|\|\||[-+*/%=<>(),;.\[\]!@?:]|\S}
 }
 
 # ============================================================================
@@ -66,21 +66,22 @@ namespace eval ::mkitsql {
 proc ::mkitsql::tokenize {text} {
     variable tokenRe
     set out {}
-    foreach {all g1 g2 g3 g4 g5 g6 g7 g8} [regexp -all -inline -indices $tokenRe $text] {
-        lassign $all s e
-        # exactly one group took part; the common kinds first
-        if {[lindex $g6 0] >= 0} { set kind ident
-        } elseif {[lindex $g7 0] >= 0} { set kind op
-        } elseif {[lindex $g5 0] >= 0} { set kind number
-        } elseif {[lindex $g3 0] >= 0} { set kind string
-        } elseif {[lindex $g4 0] >= 0} { set kind qident
-        } elseif {[lindex $g1 0] >= 0 || [lindex $g2 0] >= 0} { continue
-        } else { set kind bad }
+    # one match per token (no capture groups: they made the regular expression three times slower); the kind follows from the first character
+    foreach m [regexp -all -inline -indices -- $tokenRe $text] {
+        lassign $m s e
         set raw [string range $text $s $e]
-        switch -- $kind {
-            string { set val [string map {'' '} [string range $raw 1 end-1]] }
-            qident { set val [string map {\"\" \"} [string range $raw 1 end-1]] }
-            default { set val $raw }
+        set c [string index $raw 0]
+        if {$c eq "'" && [string length $raw] > 1} {
+            set kind string ; set val [string map {'' '} [string range $raw 1 end-1]]
+        } elseif {$c eq "\"" && [string length $raw] > 1} {
+            set kind qident ; set val [string map {\"\" \"} [string range $raw 1 end-1]]
+        } else {
+            set val $raw
+            if {[string match {[A-Za-z_]} $c]} { set kind ident
+            } elseif {[string match {[0-9]} $c] || ($c eq "." && [string length $raw] > 1)} { set kind number
+            } elseif {[string length $raw] > 1 && (($c eq "-" && [string index $raw 1] eq "-") || ($c eq "/" && [string index $raw 1] eq "*"))} { continue      ;# a comment
+            } elseif {[string length $raw] == 1 ? [string first $raw "-+*/%=<>(),;.\[\]!@?:"] >= 0 : $raw in {<> != <= >= == ||}} { set kind op
+            } else { set kind bad }
         }
         lappend out [list $kind $val $s [expr {$e - $s + 1}]]
     }
@@ -194,7 +195,19 @@ proc ::mkitsql::srcText {a b} {
 #  Expressions   (precedence low -> high:  OR, AND, NOT, predicates,
 #                 ||, + -, * / %, unary, primary)
 # ============================================================================
-proc ::mkitsql::parseExpr {} { parseOr }
+# (a literal on its own - the commonest thing in a VALUES list - skips the twelve levels of operator precedence: nothing can follow it but , ) or ;)
+namespace eval ::mkitsql { variable fastParse 1 }
+proc ::mkitsql::parseExpr {} {
+    variable toks ; variable ti ; variable fastParse
+    if {$fastParse} {
+        set k [lindex $toks $ti 0]
+        if {$k eq "number" || $k eq "string"} {
+            set nx [lindex $toks [expr {$ti + 1}]]
+            if {$nx eq "" || ([lindex $nx 0] eq "op" && [lindex $nx 1] in {, ) ;})} { return [parsePrimary] }
+        }
+    }
+    parseOr
+}
 
 proc ::mkitsql::parseOr {} {
     set l [parseAnd]

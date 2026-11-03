@@ -309,7 +309,9 @@ engine is 5-10 us (`SUM/AVG` over 20,000 rows 160 ms, a `LIKE` prefix scan 100 m
   repeats with **parameters** (`INSERT INTO t VALUES (?, ?, ?, ?)` with a list each time) costs 105 us instead of 265 us, and `SELECT 1` 43 us instead of 108 us.
   A statement whose text is different every time (values pasted into the SQL) gets no help.
 * **Loading many rows: use `::mkitsql::insertRows $db table {columns} $rows`.** Parsing the SQL text of a big `INSERT ... VALUES (...),(...)`
-  is 80 % of its cost (1,000 rows: 120 ms to parse, 24 ms to run); `insertRows` takes the rows as Tcl lists, does the same checks and conversions
+  is most of its cost. The tokenizer is one capture-free regular expression with the kind decided from the first character (3.3x faster, identical
+  on 41,000 test texts) and a lone literal skips the operator-precedence climb: a 1,000-row `INSERT ... VALUES` text went from 190 us a row to 85 us
+  (22 ms to tokenize, 38 ms to parse, 25 ms to run). `insertRows` takes the rows as Tcl lists, does the same checks and conversions
   (range errors, text to number, NULL, all-or-nothing, transactions) and costs 13 us a row (5,000 rows in 65 ms).
 * **Aggregates fold a whole chunk at a time**: `COUNT`, `SUM`, `AVG`, `MIN`, `MAX` over numbers group the chunk's rows by key and add each group's
   values with one C-speed command (`::tcl::mathop::+`) instead of one proc call per row and aggregate; `SUM/AVG` over 50,000 rows went from 615 ms to 195 ms, a
