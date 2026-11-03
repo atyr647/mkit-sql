@@ -69,6 +69,7 @@ foreach {name step preseed expectFiles} {
             if {$m2 ne ""} { mkitsql::db::releaseLock $db $m2 }
             set left [lsort [glob -nocomplain $db.lock*]]
         }
+        if {$left ne ""} { foreach lf $left { catch { puts "  (diagnostic: $lf mtime [file mtime $lf], now [clock seconds], mutexStale $::mkitsql::db::mutexStale, lock path [mkitsql::db::lockPath $db])" } } }
         check "$name: nothing left after a release" $left {}
     }
 }

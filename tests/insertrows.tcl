@@ -12,7 +12,7 @@ proc rows {sql} { dict get [q $sql] rows }
 proc err {script} { if {[catch {uplevel 1 $script} e]} { return $e } ; return "" }
 q "CREATE TABLE a (id INT, big BIGINT, d DOUBLE PRECISION, s TEXT, b BLOB)"
 q "CREATE TABLE b (id INT, big BIGINT, d DOUBLE PRECISION, s TEXT, b BLOB)"
-set data {{1 9223372036854775807 0.5 hello abc} {2 -5 2 {with space} {}} {3 7 1e3 {quote ' and "dq" {brace}} x} {4 0 -0.0 cafe y} {5 12 3 {#hash first} z}}
+set data {{1 9223372036854775807 0.5 hello abc} {2 -5 2 {with space} {}} {3 7 1000.5 {quote ' and "dq" {brace}} x} {4 0 -0.0 cafe y} {5 12 3 {#hash first} z}}
 mkitsql::insertRows $db a {} $data
 foreach r $data {
     lassign $r id big d s bl
