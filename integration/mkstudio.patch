@@ -1,8 +1,8 @@
 diff --git a/mkstudio.vfs/lib/app-mkstudio/app.tcl b/mkstudio.vfs/lib/app-mkstudio/app.tcl
-index b04fc7f..c3938ab 100644
+index e4be25b..4620e76 100644
 --- a/mkstudio.vfs/lib/app-mkstudio/app.tcl
 +++ b/mkstudio.vfs/lib/app-mkstudio/app.tcl
-@@ -644,7 +644,7 @@ proc ::app::newSample {} {
+@@ -686,7 +686,7 @@ proc ::app::newSample {} {
      afterDbChange
      ::explorer::expandDb $tag
      setStatus "Sample database '$tag' created: employees (with a skills subview), departments, products, orders (with a lines subview)." ok
@@ -11,7 +11,7 @@ index b04fc7f..c3938ab 100644
      set id [newQuery $text $tag 1]
  }
  
-@@ -907,10 +907,10 @@ proc ::app::saveScript {{as 0} {id ""}} {
+@@ -953,10 +953,10 @@ proc ::app::saveScript {{as 0} {id ""}} {
      set f [docFrame $id]
      set file $A(file,$id)
      if {$as || $file eq ""} {
@@ -25,7 +25,7 @@ index b04fc7f..c3938ab 100644
          if {$file eq ""} { return 0 }
      }
      if {[catch {
-@@ -929,7 +929,7 @@ proc ::app::openScript {} {
+@@ -975,7 +975,7 @@ proc ::app::openScript {} {
      variable A ; variable cfg
      set file [tk_getOpenFile -title "Open script" \
          -initialdir [expr {$cfg(lastDir) ne "" && [file isdirectory $cfg(lastDir)] ? $cfg(lastDir) : [pwd]}] \
@@ -48,32 +48,32 @@ index b6adc07..b33bc81 100644
          }
      }
 diff --git a/mkstudio.vfs/lib/app-mkstudio/loader.tcl b/mkstudio.vfs/lib/app-mkstudio/loader.tcl
-index 5db1a59..0153a20 100644
+index 59a4a5a..c139857 100644
 --- a/mkstudio.vfs/lib/app-mkstudio/loader.tcl
 +++ b/mkstudio.vfs/lib/app-mkstudio/loader.tcl
 @@ -1,7 +1,14 @@
  # loader.tcl -- loads every MK Studio source file, in dependency order.
  package require Tk 8.5
  set ::mkstudio_lib [file dirname [info script]]
--foreach f {theme icons menus widgets store engine mkql grid editor explorer docs app} {
-+foreach f {theme icons menus widgets store engine} {
+-foreach f {version theme icons menus widgets store engine mkql grid editor explorer docs update crash app} {
++foreach f {version theme icons menus widgets store engine} {
 +    source -encoding utf-8 [file join $::mkstudio_lib $f.tcl]
 +}
 +# the query language: mkit-sql (standard SQL).  To use the old built-in dialect instead, source
 +# mkql.tcl here and drop the next two lines.
 +source -encoding utf-8 [file join $::mkstudio_lib .. mkitsql mkitsql.tcl]
 +source -encoding utf-8 [file join $::mkstudio_lib .. mkitsql engine_studio.tcl]
-+foreach f {grid editor explorer docs app} {
++foreach f {grid editor explorer docs update crash app} {
      source -encoding utf-8 [file join $::mkstudio_lib $f.tcl]
  }
  package provide app-mkstudio 1.0
 diff --git a/mkstudio.vfs/lib/app-mkstudio/store.tcl b/mkstudio.vfs/lib/app-mkstudio/store.tcl
-index e5b9540..36eed0a 100644
+index fa7f9e6..068295f 100644
 --- a/mkstudio.vfs/lib/app-mkstudio/store.tcl
 +++ b/mkstudio.vfs/lib/app-mkstudio/store.tcl
-@@ -465,6 +465,16 @@ proc ::store::endCommit {path} {
-     syncDisk $path
+@@ -505,6 +505,16 @@ proc ::store::endCommit {path} {
      catch {file delete [commitRecord $path]}
+     catch {sumWrite $path}
  }
 +# Does a valid 16-byte Metakit footer end exactly at `end` (the state a committed file of that size has)?  The repairs below only
 +# cut or restore a file when this holds for the state they restore: a damaged header (an offset that is too small, a record that
@@ -88,7 +88,7 @@ index e5b9540..36eed0a 100644
  # Put right an interrupted commit.  Needs the write lock.  Returns "" (nothing to do) or what was done.
  proc ::store::repairFile {path} {
      set rec [commitRecord $path]
-@@ -477,6 +487,9 @@ proc ::store::repairFile {path} {
+@@ -527,6 +537,9 @@ proc ::store::repairFile {path} {
                  file delete $rec                                      ;# the commit never wrote anything
                  return ""
              }
@@ -98,7 +98,7 @@ index e5b9540..36eed0a 100644
              if {[file size $path] >= $size} {
                  set h [open $path r+b]
                  seek $h 0 start ; puts -nonewline $h [binary format H* $hex] ; flush $h
-@@ -491,7 +504,7 @@ proc ::store::repairFile {path} {
+@@ -541,7 +554,7 @@ proc ::store::repairFile {path} {
          }
          file delete $rec
      }
@@ -107,7 +107,7 @@ index e5b9540..36eed0a 100644
          set h [open $path r+b] ; chan truncate $h [dict get $info offset] ; close $h
          return "The unfinished end of an interrupted commit was discarded."
      }
-@@ -593,6 +606,48 @@ proc ::store::layout {path} {
+@@ -713,6 +726,48 @@ proc ::store::layout {path} {
  proc ::store::size   {path} { mk::view size $path }
  
  # -- reading rows ------------------------------------------------------------
@@ -156,7 +156,7 @@ index e5b9540..36eed0a 100644
  # Fetch `count` rows starting at `first`, returning a list of value-lists in
  # the order of `props` (which must all be scalar properties).
  proc ::store::rows {path props first count} {
-@@ -605,7 +660,13 @@ proc ::store::rows {path props first count} {
+@@ -725,7 +780,13 @@ proc ::store::rows {path props first count} {
              lappend out {}
          } elseif {$one} {
              # a single property comes back unwrapped, so wrap it ourselves
@@ -171,7 +171,7 @@ index e5b9540..36eed0a 100644
          } else {
              lappend out [mk::get $path!$i {*}$props]
          }
-@@ -623,10 +684,18 @@ proc ::store::fetch {path props first count} {
+@@ -743,10 +804,18 @@ proc ::store::fetch {path props first count} {
          0 { for {set i $first} {$i <= $last} {incr i} { lappend out {} } }
          1 {
              set p [lindex $props 0]
@@ -192,7 +192,7 @@ index e5b9540..36eed0a 100644
          }
      }
      return $out
-@@ -639,10 +708,18 @@ proc ::store::fetchAt {path props indices} {
+@@ -759,10 +828,18 @@ proc ::store::fetchAt {path props indices} {
          0 { foreach i $indices { lappend out {} } }
          1 {
              set p [lindex $props 0]
@@ -213,7 +213,7 @@ index e5b9540..36eed0a 100644
          }
      }
      return $out
-@@ -867,6 +944,11 @@ proc ::store::createView {tag name layout} {
+@@ -987,6 +1064,11 @@ proc ::store::createView {tag name layout} {
  
  proc ::store::dropView {tag name} {
      if {![hasView $tag $name]} { error "View '$name' does not exist in '$tag'." }

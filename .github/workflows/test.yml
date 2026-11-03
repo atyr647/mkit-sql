@@ -116,6 +116,7 @@ jobs:
       - name: Power loss - 406 synthesised crash states and 18 real commits killed after every Nth write (strace), both kits
         run: |
           for k in $T86 $T85; do MKIT_MK4TCL=builtin $k tests/power_loss.tcl; done
+          for k in $T86 $T85; do MKIT_MK4TCL=builtin $k tests/first_commit.tcl; done
           MKIT_BACKEND=studio MKIT_MK4TCL=builtin $T86 tests/studio_repair.tcl
       - name: Lock under crashes - kill at every step, a deterministic vanished-lock race, 60 races for a stale lock, chaos (both kits)
         run: |

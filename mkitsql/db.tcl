@@ -293,22 +293,58 @@ proc ::mkitsql::db::commit {tag} {
 # Not covered: a disk that loses data it said was written, or a system with no way to force data out (Windows has no `sync`
 # command: there, kills are covered and power loss is as safe as the operating system's own write ordering).
 namespace eval ::mkitsql::db { variable durable 1 ; variable repaired ; array set repaired {} }   ;# durable 0 turns the sync calls off
-# force the files (and the folder entry) to disk where the system can: coreutils `sync FILE...` (Linux), else a plain `sync`
+# force the files (and the folder entry) to disk where the system can:
+#   Linux/BSD  coreutils `sync FILE...`, else a plain `sync`
+#   macOS      `sync` (flushes the OS cache; the drive's own cache is out of reach from Tcl)
+#   Windows    FlushFileBuffers through PowerShell (.NET FileStream.Flush($true)), if PowerShell can be started
+# Returns 1 when something was asked to force the data out, 0 when nothing could be.  (Same as MK Studio's store.tcl.)
 proc ::mkitsql::db::syncDisk {args} {
     variable durable
-    if {!$durable || $::tcl_platform(platform) eq "windows"} return
+    if {!$durable} { return 0 }
+    if {$::tcl_platform(platform) eq "windows"} { return [syncWindows {*}$args] }
     set paths {}
     foreach p $args { lappend paths $p ; lappend paths [::file dirname $p] }
-    if {[catch {exec sync {*}[lsort -unique $paths]}]} { catch {exec sync} }
+    if {[catch {exec sync {*}[lsort -unique $paths]}] && [catch {exec sync}]} { return 0 }
+    return 1
+}
+namespace eval ::mkitsql::db { variable psOk -1 }
+proc ::mkitsql::db::syncWindows {args} {
+    variable psOk
+    if {$psOk == 0} { return 0 }
+    set files {}
+    foreach p $args { if {[::file isfile $p]} { lappend files [::file nativename $p] } }
+    if {![llength $files]} { return 1 }
+    # file names go in through the environment, not the command line: no quoting problems
+    set ::env(MKS_FLUSH) [join $files "|"]
+    set script {foreach($f in $env:MKS_FLUSH.Split('|')){ $s=[IO.File]::Open($f,'Open','ReadWrite','ReadWrite'); try{ $s.Flush($true) } finally{ $s.Dispose() } }}
+    set ok 0 ; set started 0
+    foreach exe {powershell pwsh} {
+        if {[catch {exec $exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command $script 2>@1} out opts]} {
+            # "couldn't execute": no such program (try the next, and remember if neither exists); a program that ran and
+            # failed (a file another program keeps locked) only fails THIS flush
+            if {[lindex [dict get $opts -errorcode] 0] eq "CHILDSTATUS"} { set started 1 }
+            continue
+        }
+        set ok 1 ; set started 1 ; break
+    }
+    unset -nocomplain ::env(MKS_FLUSH)
+    if {!$started} { set psOk 0 } else { set psOk 1 }
+    return $ok
 }
 # Called before mk::file commit: remember the state we can fall back to.
+# What a commit can fall back to: the file as it is now.  A Metakit file -> "<header-hex16> <size>"; no file / 0 bytes -> "empty 0"
+# (the first commit of a new database); anything else (a starkit, a foreign file) is not protected.
 proc ::mkitsql::db::beginCommit {path} {
     set info [headerInfo $path]
-    if {$info eq ""} { return 0 }
+    if {$info ne ""} {
+        set line "[dict get $info header] [dict get $info size]"
+    } elseif {![::file exists $path] || [::file size $path] == 0} {
+        set line "empty 0"
+    } else {
+        return 0
+    }
     set rec [commitRecord $path]
-    if {[catch {
-        set h [open $rec w] ; puts -nonewline $h "[dict get $info header] [dict get $info size]" ; close $h
-    }]} { return 0 }
+    if {[catch { set h [open $rec w] ; puts -nonewline $h $line ; close $h }]} { return 0 }
     syncDisk $rec $path
     return 1
 }
@@ -323,6 +359,16 @@ proc ::mkitsql::db::repairFile {path} {
     if {[::file exists $rec]} {
         if {[catch {set h [open $rec r] ; set d [string trim [read $h 200]] ; close $h}]} { return "" }
         lassign [split $d " "] hex size
+        if {$hex eq "empty" && $size == 0} {
+            # the first commit of a new database was interrupted: it is a new, empty database again
+            ::file delete $rec
+            if {[::file exists $path] && [::file size $path] > 0} {
+                set h [open $path r+b] ; chan truncate $h 0 ; close $h
+                syncDisk $path
+                return "The first save of this new database was interrupted and has been undone: the database is empty again."
+            }
+            return ""
+        }
         if {[string length $hex] == 16 && [string is integer -strict $size] && $info ne ""} {
             if {[::file size $path] == $size && [dict get $info header] eq $hex} {
                 ::file delete $rec                                       ;# the commit never wrote anything

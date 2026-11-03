@@ -393,7 +393,9 @@ write lock is held, so nobody else is mid-commit) puts an unfinished commit back
 that commit (`::mkitsql::db::repairedNote $tag` says what was done). Without a record, a file longer than its header says is cut
 back to the header's offset. Both repairs happen only if a valid Metakit footer ends exactly where the restored state would
 end, so a damaged header can never make them throw data away; read-only opens cannot repair and refuse such a file. The file
-names and formats are MK Studio's (`store.tcl` does the same), so either program can repair what the other left behind.
+names and formats are MK Studio's (`store.tcl` does the same), so either program can repair what the other left behind. The record of the very first commit of a brand-new file reads `empty 0`: an interrupted first commit is put back to an
+empty file (tested by killing a first commit after each of 14 different writes). On Windows the file is flushed through
+PowerShell (not testable on the CI runner's stand-in, so best effort). MK Studio's `.sum` / `.bak` sidecar files are left alone.
 `::mkitsql::db::durable 0` turns the `sync` calls off. **Limits:** a disk that loses data it said was written; Windows, which has
 no `sync` command (kills are covered, power loss is as safe as the operating system's own write ordering); a commit that was
 confirmed to the caller only counts as durable after the file has been forced out, so a crash after `mk::file commit` but before

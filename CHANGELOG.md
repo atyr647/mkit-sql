@@ -5,6 +5,8 @@ All notable changes to mkit-sql. The versioning and compatibility rules are in
 
 ## 0.4.0 - production-readiness pass (not yet released)
 
+* First-commit record (`empty 0`) and Windows flush follow MK Studio's newest `store.tcl`; `integration/mkstudio.patch` rebased onto its current HEAD (list-bug-safe row reads, footer guard in its `repairFile`).
+
 ### Breaking
 * **`ALTER TABLE ... ALTER COLUMN ... TYPE` is refused.** Metakit identifies a column by name *and* type; retyping under
   the same name corrupted data on real Metakit (found by `tests/differential/features.py`). The error shows the safe
