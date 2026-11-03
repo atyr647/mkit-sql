@@ -22,6 +22,9 @@ All notable changes to mkit-sql. The versioning and compatibility rules are in
   `1e999`, infinities and values beyond 64 bits; a numeric literal that is not finite (`1e999`) is a syntax error.
 
 ### Added
+* **Tcl 9.0 support** (`package require Tcl 8.5-10`), tested on a source build in CI. Found and fixed a latent bug on the way: file modes
+  were written as `0600` / `0644`, which Tcl 9 reads as decimal, giving spill and lock files odd permissions; they are decimal numbers now, and
+  lint refuses a leading-zero file mode.
 * **Damaged-file protection**: frame check before and after opening (a truncated or damaged file is refused instead of
   being opened as an empty database that a `COMMIT` would then overwrite), and `openFile -verify` to read an untrusted
   file in a throw-away child process first. Test: `tests/damage.tcl` (kills mid-commit, truncations, fuzzed bytes).

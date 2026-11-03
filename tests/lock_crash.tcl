@@ -85,11 +85,11 @@ ok "vanished lock: we retried and own the lock (not 'unlocked')" [expr {$r ne ""
 ok "vanished lock: the lock file names us" [expr {[file exists $db.lock] && [string match "[pid] *" [rawread]]}]
 if {$r ne ""} { mkitsql::db::releaseLock $db $r }
 # a folder that refuses files really does mean "run unlocked"
-set ro $area/ro ; file mkdir $ro ; set rodb $ro/x.mk ; set h [open $rodb w] ; close $h ; file attributes $ro -permissions 00500
+set ro $area/ro ; file mkdir $ro ; set rodb $ro/x.mk ; set h [open $rodb w] ; close $h ; file attributes $ro -permissions u=rx,go=
 if {[file writable $ro]} { puts "  (running as root: read-only folder check skipped)" } else {
     check "read-only folder: runs unlocked" [mkitsql::db::takeLock $rodb] ""
 }
-file attributes $ro -permissions 00700
+file attributes $ro -permissions u=rwx,go=
 
 # ---- D. races for a stale lock --------------------------------------------------------------------------------------------------------
 set rounds [expr {[info exists ::env(LOCK_ROUNDS)] ? $::env(LOCK_ROUNDS) : 40}]

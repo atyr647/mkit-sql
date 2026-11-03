@@ -126,10 +126,10 @@ proc ::mkitsql::spillDir {} {
         if {![catch {file lstat $d x}]} continue            ;# exists (even as a link): pick another name
         if {[catch {file mkdir $d} msg]} { fail "Cannot create a folder for temporary files in '$base' ($msg).  Set ::mkitsql::tempDir to a writable folder" }
         if {$::tcl_platform(platform) ne "windows"} {
-            if {[catch {file attributes $d -permissions 00700} msg]} { catch {file delete $d} ; fail "Cannot restrict the temporary folder '$d' ($msg)" }
+            if {[catch {file attributes $d -permissions u=rwx,go=} msg]} { catch {file delete $d} ; fail "Cannot restrict the temporary folder '$d' ($msg)" }
             if {[file type $d] ne "directory" || ![file owned $d]} { fail "The temporary folder '$d' is not ours; refusing to use it" }
-            file attributes $d -permissions 00700
-            if {([file attributes $d -permissions] & 0077) != 0} { fail "The temporary folder '$d' is not private; refusing to use it" }
+            file attributes $d -permissions u=rwx,go=
+            if {([file attributes $d -permissions] & 63) != 0} { fail "The temporary folder '$d' is not private; refusing to use it" }
         }
         set spillDir $d
         return $d
@@ -189,8 +189,8 @@ proc ::mkitsql::spillNewPath {} {
 }
 proc ::mkitsql::spillOpenW {path} {
     variable spillChans ; variable spillN
-    # exclusive: fails if anything (a file, a link) is already there; private: 0600
-    if {[catch {open $path {WRONLY CREAT EXCL} 0600} ch]} { fail "Cannot create a temporary file ($ch).  Set ::mkitsql::tempDir to a writable folder" }
+    # exclusive: fails if anything (a file, a link) is already there; private: 0600 = 384 decimal (Tcl 9 does not read 0600 as octal)
+    if {[catch {open $path {WRONLY CREAT EXCL} 384} ch]} { fail "Cannot create a temporary file ($ch).  Set ::mkitsql::tempDir to a writable folder" }
     fconfigure $ch -translation lf -encoding utf-8 -buffering full -buffersize 131072 -eofchar {}
     lappend spillChans $ch
     set spillN($ch) 0

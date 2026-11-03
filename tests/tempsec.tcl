@@ -30,8 +30,8 @@ set mkitsql::progressHook {apply {{} {
     foreach d [glob -nocomplain -directory $::area mkitsql-*] {
         set files [glob -nocomplain -directory $d *]
         if {[llength $files] && ![dict exists $::seen $d]} {
-            dict set ::seen $d [list [file type $d] [file owned $d] [format %o [expr {[file attributes $d -permissions] & 0777}]] \
-                [lsort -unique [lmap_ $files {f {format %o [expr {[file attributes $f -permissions] & 0777}]}}]] \
+            dict set ::seen $d [list [file type $d] [file owned $d] [format %o [expr {[file attributes $d -permissions] & 511}]] \
+                [lsort -unique [lmap_ $files {f {format %o [expr {[file attributes $f -permissions] & 511}]}}]] \
                 [lsort -unique [lmap_ $files {f {file owned $f}}]] [llength $files]]
         }
     }
@@ -144,11 +144,11 @@ check auto_sweep_second_time_skipped [mkitsql::cleanTemp] 0
 set mkitsql::tempDir $area/no/such
 check bad_temp_msg [string match "*does not exist or is not writable*" [expr {[catch {q "SELECT s FROM t ORDER BY s"} m] ? $m : ""}]] 1
 set mkitsql::tempDir $area
-file attributes $area -permissions 00500
+file attributes $area -permissions u=rx,go=
 if {[file writable $area]} { puts "(running as root: read-only folder check skipped)" } else {
     check readonly_temp_msg [string match "*writable*" [expr {[catch {q "SELECT s FROM t ORDER BY s"} m] ? $m : ""}]] 1
 }
-file attributes $area -permissions 00700
+file attributes $area -permissions u=rwx,go=
 check works_again [llength [dict get [q "SELECT s FROM t ORDER BY s"] rows]] 300
 
 mkitsql::db::closeFile $db

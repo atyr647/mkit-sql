@@ -143,8 +143,9 @@ proc ::mkitsql::db::lockedError {holder path} {
 # {blocked} (the folder will not hold a file: read-only, no permission, disk full - run unlocked).  Only a refusal of the
 # folder itself means "blocked": a file that has vanished again by the time we look is a competitor that just released or
 # replaced the lock, never "no lock needed" (treating it so let two processes both believe they owned the database).
+# (file modes below are DECIMAL on purpose: 420 = 0644.  Tcl 9 no longer reads a leading zero as octal, so a written 0644 would be 644 decimal.)
 proc ::mkitsql::db::createLock {lf mine} {
-    if {[catch {open $lf {WRONLY CREAT EXCL} 0644} h opts]} {
+    if {[catch {open $lf {WRONLY CREAT EXCL} 420} h opts]} {
         set code [dict get $opts -errorcode]
         if {[lindex $code 0] eq "POSIX" && [lindex $code 1] eq "EEXIST"} { return [list exists] }
         return [list blocked]
@@ -179,7 +180,7 @@ proc ::mkitsql::db::takeLock {path} {
         if {$holder ne ""} { return [lockedError $holder $path] }
         # stale (or ours from an earlier run): replace it, one process at a time, under the guard
         set guard $lf.guard
-        if {[catch {set gh [open $guard {WRONLY CREAT EXCL} 0644] ; close $gh}]} {
+        if {[catch {set gh [open $guard {WRONLY CREAT EXCL} 420] ; close $gh}]} {
             # somebody else is replacing the lock: a guard older than mutexStale was abandoned by a crash, otherwise give them a
             # moment (about 2.4 s over all attempts, as the protocol says) and look again
             if {![catch {::file mtime $guard} mt] && [clock seconds] - $mt > $mutexStale} { catch {::file delete $guard} ; continue }

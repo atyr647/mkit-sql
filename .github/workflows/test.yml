@@ -246,13 +246,49 @@ jobs:
           done
           (cd mkstudio-fresh && MKIT_MK4TCL=builtin ../tclkit/tclkit-8.6.3 tests/lint.tcl)
 
+  # Tcl 9: Mk4tcl has no Tcl 9 build, so the engine runs on the pure-Tcl stand-in; the point is that nothing in the engine
+  # depends on Tcl 8 behaviour (octal file modes, list and string details) - the whole suite that does not need real Metakit.
+  tcl9:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build Tcl 9.0 from source
+        run: |
+          sudo apt-get update && sudo apt-get install -y python3 zlib1g-dev
+          git clone --depth 1 --branch core-9-0-1 https://github.com/tcltk/tcl "$RUNNER_TEMP/tcl9src"
+          cd "$RUNNER_TEMP/tcl9src/unix" && ./configure --prefix="$RUNNER_TEMP/tcl9" --disable-shared >/dev/null && make -j4 >/dev/null && make install >/dev/null
+          echo "T9=$RUNNER_TEMP/tcl9/bin/tclsh9.0" >> "$GITHUB_ENV"
+      - name: Lint, engine suite on both storage layers
+        run: |
+          "$T9" tests/lint.tcl
+          for b in standalone studio; do MKIT_BACKEND=$b "$T9" tests/run.tcl; done
+      - name: Injection, NULL forgery, code generation, spill, robustness, review regressions, drop view, pushdown, bulk writes
+        run: for t in doc_examples injection nullforge codegen_audit dropview spillroundtrip robustness review_regress pushdown bulkwrite; do echo "== $t"; "$T9" tests/$t.tcl; done
+      - name: Temp files and locking (file modes are decimal on purpose - Tcl 9 reads 0600 as decimal), lock crash, soak, fuzzer
+        run: |
+          "$T9" tests/tempsec.tcl
+          "$T9" tests/locking.tcl
+          LOCK_ROUNDS=20 "$T9" tests/lock_crash.tcl
+          "$T9" tests/soak.tcl 30 1
+          "$T9" tests/fuzz.tcl 20000 1
+      - name: Differentials on Tcl 9 (SQLite, numeric, strings, dates, DML)
+        env:
+          MKIT_TCLSH: ${{ env.T9 }}
+        run: |
+          python3 tests/differential/diff.py --n 2000 --seed 1
+          python3 tests/differential/diff.py --kind window --n 1000 --seed 2
+          python3 tests/differential/numeric.py
+          python3 tests/differential/strings.py --n 2000 --seed 1
+          python3 tests/differential/dates.py --n 2500 --seed 1
+          python3 tests/differential/dml.py --seqs 20 --steps 30 --seed 1
+
   # Other platforms.  The pure-Tcl stand-in needs only a Tcl 8.5+ shell; the real-Metakit run builds Mk4tcl from
   # source where it can.  Informational until each one is green, then it becomes required.
   portable:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest]      # Windows: the available Tcl there is 9.x, which this engine does not target (Tcl 8.5/8.6) - not tested
+        os: [macos-latest, windows-latest]      # macOS runs Tcl 8.6, Windows Tcl 9 (the engine supports 8.5 to 9; Mk4tcl exists only for 8.x, so these run on the pure-Tcl stand-in)
     runs-on: ${{ matrix.os }}
     continue-on-error: true
     defaults:
@@ -266,9 +302,7 @@ jobs:
       - name: Tcl (Windows)
         if: runner.os == 'Windows'
         run: |
-          # the engine targets Tcl 8.5/8.6 (it refuses 9.x): ask for an 8.6 build first, whatever the newest version is
-          for v in 8.6.16 8.6.15 8.6.14 8.6.13 8.6.12; do choco install magicsplat-tcl-tk --version $v --no-progress -y && break; done || true
-          [ -n "$(find /c/Tcl /c/Program\ Files/Tcl* -iname 'tclsh*.exe' 2>/dev/null | head -1)" ] || choco install magicsplat-tcl-tk --no-progress -y || true
+          choco install magicsplat-tcl-tk --no-progress -y || true
           # find the interpreter wherever the installer put it, and show what was found (so a failure can be diagnosed from the log)
           FOUND=$(find /c/Tcl /c/Program\ Files/Tcl* /c/Program\ Files/Magicsplat* /c/ProgramData/chocolatey/lib /c/tools -iname 'tclsh*.exe' 2>/dev/null || true)
           echo "found: $FOUND"

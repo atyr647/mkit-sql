@@ -60,7 +60,8 @@ set boundaries [list \
 # any other dynamic-code or process command anywhere in mkitsql/ is a lint failure
 set forbidden {{(^|\[)subst } {(^|\[)interp } {(^|\[)exec } {(^|\[)trace } {(^|\[)socket }
     {(^|\[)fileevent } {info body} {regsub [^#\n]*-command} {(^|\[)uplevel #0} {(^|\[)namespace inscope}
-    {(^|\[)interp alias} {(^|\[)load } {(^|\[)vwait }}
+    {(^|\[)interp alias} {(^|\[)load } {(^|\[)vwait }
+    {(EXCL\}|-permissions|&) 0[0-7]{2,}}}   ;# a leading-zero file mode / mask: octal in Tcl 8, decimal in Tcl 9 - write modes in decimal
 foreach f [glob -directory $root/mkitsql *.tcl] {
     set in [open $f r] ; set code [read $in] ; close $in
     set lines {}

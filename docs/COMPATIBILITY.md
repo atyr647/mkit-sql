@@ -34,14 +34,16 @@ reason), and anything that was a **security hole**.
 ## Runtimes and file format
 
 * Supported Tcl runtimes are the two MK Studio is built on: tclkit **8.6.3** (primary) and **8.5.17**. Support for a
-  runtime is not dropped within a minor version; `tests/lint.tcl` keeps the code free of anything newer. Newer Tcl
-  versions (8.6.14, 9.0 where Mk4tcl exists) are expected to work and are exercised through the pure-Tcl stand-in.
+  runtime is not dropped within a minor version; `tests/lint.tcl` keeps the code free of anything newer. **Tcl 9.0 is supported** too: the engine requires `Tcl 8.5-10`, and CI runs the whole suite that does not need real Metakit (engine,
+  injection, NULL forgery, spill, robustness, review regressions, temp files, locking, lock crashes, soak, fuzzing, and the SQLite / oracle
+  differentials) on Tcl 9.0.1 built from source, using the pure-Tcl stand-in - Mk4tcl itself has no Tcl 9 build, so real-Metakit tests
+  stay on the 8.x runtimes. Newer 8.6 versions (8.6.14) are exercised the same way.
 * The database file format is Metakit's. mkit-sql never changes the format: files it writes are ordinary Metakit files
   that MK Studio and every other Metakit tool can read, and the reverse.
-* Platforms: Linux is tested on every change. macOS runs the platform-neutral part of the suite plus the temp-file and locking tests in CI. **Windows is not tested**
-  (the Tcl readily available there is 9.x, which the engine does not target); the locking and temp-file hardening that
-  rely on Unix semantics (`/proc`, 0700 folders, `kill -0`) have lighter Windows fallbacks that are **not** equivalent in
-  strength. Treat Windows as unsupported for shared machines.
+* Platforms: Linux is tested on every change. macOS (Tcl 8.6) and Windows (Tcl 9) run the platform-neutral part of the suite on the stand-in in CI, and macOS also the
+  temp-file and locking tests. The locking and temp-file hardening that rely on Unix semantics (`/proc`, 0700 folders,
+  `kill -0`) have lighter Windows fallbacks that are **not** equivalent in strength: treat Windows as best-effort, and do
+  not rely on it for several users on one machine.
 
 ## Reporting a problem
 

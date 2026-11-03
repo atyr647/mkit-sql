@@ -54,6 +54,8 @@ case-sensitive (`ILIKE` is not), and a column rename moves the column to the end
 
 ## Runtimes
 
+**Tcl 9.0 is supported as well** (tested on the pure-Tcl stand-in; Mk4tcl has no Tcl 9 build yet). The two runtimes below are the primary targets.
+
 mkit-sql targets the **same Tcl runtimes as MK Studio**: **tclkit 8.6.3** (what MK Studio is built and tested on, with
 Mk4tcl 2.4.9.7 inside) as the primary, and **tclkit 8.5.17** for classic tclkits. The code is written in Tcl 8.5
 syntax and `package require Tcl 8.5` is enforced; `tests/lint.tcl` rejects anything newer than those runtimes
@@ -184,7 +186,8 @@ against **both storage layers**, and also on a Mk4tcl built from source and on t
 | Memory (`tests/scale_memory.tcl`) | flat; see above |
 | Lint: ASCII, no shadowed commands, nothing newer than the target runtimes, code-boundary inventory | clean |
 | CI (GitHub Actions) | the Linux job (both kits, every suite above), the build-from-source job, the MK Studio job (its engine contract, real UI and locking interoperability on a fresh checkout) and a macOS job (engine, spill, robustness, injection, NULL, review regressions, temp files and locking on Tcl 8.6) pass |
-| **Not tested** | Windows (and Tcl 9); macOS only partly; tables of tens of millions of rows; Metakit's behaviour on network file systems |
+| Tcl 9.0 (`tests`, CI job `tcl9`) | the whole suite that does not need real Metakit passes on Tcl 9.0.1 built from source: 585 engine checks on both storage layers, injection, NULL forgery, spill, robustness, review regressions, temp files, locking, lock crashes, soak, fuzzing, and the SQLite / numeric / strings / dates / DML differentials; found and fixed octal file modes |
+| **Not tested** | Windows beyond the stand-in suite; macOS only partly; tables of tens of millions of rows; Metakit's behaviour on network file systems |
 
 Deliberate differences from SQLite (found by the differential test): `ROUND` rounds the decimal value (so
 `ROUND(2.675, 2)` is `2.68`, as in PostgreSQL), `%` is for integers, typing is static (`COALESCE(int, real)` is

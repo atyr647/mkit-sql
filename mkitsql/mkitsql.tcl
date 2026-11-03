@@ -17,7 +17,7 @@
 # nulls:  the parameters that are NULL - positions (1, 2, ..) for `?`, names for `:name`.  A parameter value
 #         is never interpreted: no text, however it is spelled, can turn into NULL (and U+FDD0 is rejected).
 
-package require Tcl 8.5
+package require Tcl 8.5-10
 
 namespace eval ::mkitsql {
     variable version 0.4.0
