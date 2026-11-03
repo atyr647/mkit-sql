@@ -26,8 +26,8 @@ set r [::mkitsql::query {SELECT name, score FROM players WHERE score > ? ORDER B
 
 Queries with every join type (hash joins, filter pushdown, `LATERAL`), subqueries (scalar, `IN`, `EXISTS`,
 `ANY/ALL`, correlated, row values), `UNION/INTERSECT/EXCEPT`, `WITH` and **`WITH RECURSIVE`**, aggregates
-(`DISTINCT`, `FILTER`), **window functions** (ranking, `LAG/LEAD`, running totals, `ROWS/RANGE/GROUPS` frames,
-named windows), ~60 functions, **dates and intervals**, `INSERT/UPDATE/DELETE`, **`MERGE`**, `CREATE/DROP/ALTER
+(`DISTINCT`, `FILTER`), **`GROUP BY ROLLUP / CUBE / GROUPING SETS`**, **window functions** (ranking, `LAG/LEAD`, running totals,
+`ROWS/RANGE/GROUPS` frames with `EXCLUDE`, `IGNORE NULLS`, named windows), `SIMILAR TO`, `COLLATE NOCASE`, ~60 functions, **dates and intervals**, `INSERT/UPDATE/DELETE`, **`MERGE`**, `CREATE/DROP/ALTER
 TABLE` (also `AS SELECT`), transactions, `information_schema`, parameters, and Metakit's nested tables
 (*subviews*) as first-class citizens. Writes are all-or-nothing and range-checked. Syntax errors carry a character
 position for editor underlining; a UI can cancel any long query.
@@ -42,10 +42,11 @@ These are gaps, not bugs; each is rejected with a clear message rather than sile
 | **Persistent indexes** | Mk4tcl offers none and an index every writer must maintain cannot be guaranteed (MK Studio edits tables directly). Instead: simple conditions are decided inside Metakit by `mk::select` (`WHERE id = ...` on 1,000,000 rows: 3.8 s to 0.1 s), `COUNT(*)` is the row count, equality joins are hash joins, and `EXPLAIN` shows the plan. A lookup is still a scan, but a scan done in C. See [docs/SQL.md](docs/SQL.md#query-planning-explain-and-indexes). |
 | **Exact decimal arithmetic** | `DECIMAL`/`NUMERIC` are 64-bit floats. Do not use them for money. |
 | **Persistent NULL** | Metakit has no NULL. NULLs exist while a query runs (`LEFT JOIN`, `SELECT NULL`, empty aggregates...) and obey three-valued logic; storing one writes `0` / empty text, so `WHERE col IS NULL` never matches stored rows. |
-| SQL views, triggers, stored procedures, permissions, savepoints, upsert (`ON CONFLICT`; use `MERGE`) | no Metakit equivalent |
-| `ROLLUP/CUBE/GROUPING SETS`, `COLLATE`, `SIMILAR TO`, window `EXCLUDE`, `IGNORE NULLS` | not built yet |
+| SQL views, triggers, stored procedures, permissions, upsert (`ON CONFLICT`; use `MERGE`) | no Metakit equivalent |
+| Savepoints; locale collations (`COLLATE` other than `BINARY` / `NOCASE`) | text sorts by code point (use `NOCASE` or a lower-cased column); Metakit can only roll back to the last commit |
+| Files above 2 GiB | Metakit stores a file's size in one 32-bit word; a commit that would cross it is undone and reported (docs/SQL.md) |
 
-Other things that differ from what you may be used to: `ALTER COLUMN ... TYPE` is refused (Metakit corrupts data on it; use add column + `CAST` + drop), two columns of one name in a derived table are refused, integer `/` truncates (`7 / 2` is `3`), `LIKE` is
+Other things that differ from what you may be used to: `ALTER COLUMN ... TYPE` is refused (Metakit corrupts data on it; use add column + `CAST` + drop), a *reference* to a column name that two columns of a derived table share is ambiguous, integer `/` truncates (`7 / 2` is `3`), `LIKE` is
 case-sensitive (`ILIKE` is not), and a column rename moves the column to the end (a Metakit limitation).
 
 **Versioning, changes and the stable surface:** [CHANGELOG.md](CHANGELOG.md), [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md).

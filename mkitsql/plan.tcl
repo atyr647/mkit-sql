@@ -12,7 +12,7 @@ namespace eval ::mkitsql {
     variable planSeq 0
     variable plans
     variable subCache
-    variable memo ; variable memoCount 0 ; variable maxMemo 200000
+    variable memo ; variable memoCount 0 ; variable maxMemo 200000 ; variable memoUsed 0 ; variable memoBytes 16777216   ;# remembered answers of correlated subqueries (see rt::memoPut)
     variable ticks 0
     variable maxSetRows 5000000
     variable lookupSeq 0
@@ -756,8 +756,12 @@ proc ::mkitsql::rt::memoGet {id key var} {
     return 0
 }
 proc ::mkitsql::rt::memoPut {id key v} {
-    variable ::mkitsql::memo ; variable ::mkitsql::memoCount ; variable ::mkitsql::maxMemo
-    if {$memoCount < $maxMemo} { set memo($id,$key) $v ; incr memoCount }
+    variable ::mkitsql::memo ; variable ::mkitsql::memoCount ; variable ::mkitsql::maxMemo ; variable ::mkitsql::memoUsed ; variable ::mkitsql::memoBytes
+    # bounded by the number of keys AND by their size (an IN (...) answer is a whole set of values)
+    if {$memoCount >= $maxMemo} { return $v }
+    set size [expr {[string length $key] + [string length $v] + 100}]
+    if {$memoUsed + $size > $memoBytes} { return $v }
+    set memo($id,$key) $v ; incr memoCount ; incr memoUsed $size
     return $v
 }
 proc ::mkitsql::rt::scalar {id r0 outer {key ""}} {

@@ -71,6 +71,14 @@ set small [dict get [q [lindex $queries 0]] rows]
 set ::mkitsql::maxMemo 0
 check "tiny memo limit" $small [dict get [q [lindex $queries 0]] rows]
 set ::mkitsql::maxMemo 200000
+# a size budget too small for even one answer: nothing is remembered, answers still right
+set ::mkitsql::memoBytes 10
+set tiny [dict get [q [lindex $queries 8]] rows]
+check "byte budget exhausted: nothing remembered" $::mkitsql::memoCount 0
+set ::mkitsql::memoBytes 16777216
+set ::mkitsql::maxMemo 0
+check "byte budget exhausted: same answer" $tiny [dict get [q [lindex $queries 8]] rows]
+set ::mkitsql::maxMemo 200000
 # a statement that changes data: the memory of one statement is not used by the next
 set n1 [dict get [q {SELECT COUNT(*) FROM b WHERE g = 1}] rows]
 q "UPDATE b SET w = w + 100 WHERE g = 1"

@@ -22,8 +22,9 @@ case "${1:-linux}" in
         get tclkit-8.6.3 tclkit-8.6.3-rhel5-x86_64 36b5cb68899cfcb79417a29f9c6d8176ebae0d24
         get tclkit-8.5.17 tclkit-8.5.17-rhel5-x86_64 76a197fe41359daaf4f90a2001f46675b3667e26 ;;
     windows)
-        get tclkit-8.6.3.exe tclkit-8.6.3-win32-x86_64.exe 403c507437d0b10035c7839f22f5bb806ec1f491
-        get tclkit-8.5.17.exe tclkit-8.5.17-win32-x86_64.exe 6b30a5fa6330ab8c56dda7f4b44e7491fbcf0718 ;;
+        # the console variants (tclkitsh): the ones with Tk are GUI programs that open a window and wait instead of reading a script
+        get tclkit-8.6.3.exe tclkitsh-8.6.3-win32-x86_64.exe 3827d0c8fab8a88fad26b62bb1becae808ce6d5a
+        get tclkit-8.5.17.exe tclkitsh-8.5.17-win32-x86_64.exe b1475a675a4d467637fb32a0cfb3bc745e856c34 ;;
     macos)
         get tclkit-8.6.3 tclkit-8.6.3-macosx10.5-ix86+x86_64 1b4a7ae47ebab6ea9e0e16af4d8714c8b4aa0ce2
         get tclkit-8.5.17 tclkit-8.5.17-macosx10.5-ix86+x86_64 2a19c5c86561c1415ec4a4a70483de8608fb48d9 ;;

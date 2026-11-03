@@ -349,7 +349,7 @@ jobs:
           "$TCLSH" tests/tempsec.tcl
           "$TCLSH" tests/locking.tcl
 
-  # REAL Metakit on the other platforms: MK Studio's own tclkit 8.6.3 / 8.5.17 for Windows (x86_64) and macOS (universal), fetched by
+  # REAL Metakit on the other platforms: MK Studio's own tclkit 8.6.3 / 8.5.17 for Windows (x86_64, the console tclkitsh) and macOS (universal), fetched by
   # SHA1 like the Linux ones.  This is the run that exercises Mk4tcl, the commit record, the flush (PowerShell on Windows) and the lock
   # on those systems.  Informational until it is green, then it becomes required.
   real-metakit-portable:
@@ -359,6 +359,7 @@ jobs:
         os: [windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     continue-on-error: true
+    timeout-minutes: 45
     env:
       MKIT_DURABLE: "0"        # no flush after every commit (a PowerShell start each on Windows); the flush itself is tested by syncdisk.tcl below
     defaults:
