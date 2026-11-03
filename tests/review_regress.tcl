@@ -172,7 +172,7 @@ set d2 [mkitsql::db::openFile $f2 -create]
 mkitsql::run "CREATE TABLE w (x INT)" $d2 ; mkitsql::run "INSERT INTO w VALUES (1)" $d2 ; mkitsql::run COMMIT $d2
 mkitsql::run "DROP TABLE w" $d2 ; mkitsql::run COMMIT $d2
 mkitsql::db::closeFile $d2
-set d2 [mkitsql::db::openFile $f2]
+set d2 [mkitsql::db::openFile $f2 -unchecked]
 check R10_type_memory_cleared [expr {[catch {mkitsql::run "CREATE TABLE w (x TEXT)" $d2} m] ? $m : "ok"}] ok
 mkitsql::run "INSERT INTO w VALUES ('hello')" $d2 ; mkitsql::run COMMIT $d2
 check R10_text_stored [dict get [mkitsql::run "SELECT x FROM w" $d2] rows] hello
