@@ -3,11 +3,12 @@
 All notable changes to mkit-sql. The versioning and compatibility rules are in
 [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md). Dates are omitted on purpose: the version is the identity.
 
-## 0.4.0 - production-readiness pass (not yet released)
+## 0.4.0 - production-readiness pass
 
 * First-commit record (`empty 0`) and Windows flush follow MK Studio's newest `store.tcl`; `integration/mkstudio.patch` rebased onto its current HEAD (list-bug-safe row reads, footer guard in its `repairFile`).
 
-* Status: this is still one release (0.4.0, not tagged); the items below are the closing pass over the known limits.
+* Verified at release: 138 local suites (both tclkits, both backends, memory-pressure configs, differential vs SQLite, 20M-row run on real Metakit) and all 8 CI jobs, including real Metakit on Windows and macOS and MK Studio's own interop checks.
+* What this release does not claim: a real power-cut test (commits are tested by killing the process and by simulated torn writes, not by cutting power), Windows multi-user stress testing, and anything beyond Metakit's own limits (2 GiB file, no persistent indexes) - see docs/SQL.md.
 
 ### Closing the known limits
 * **Metakit's 2 GiB file limit** (measured: a commit that would cross it fails and, if big, leaves a file that crashes Metakit on open):
