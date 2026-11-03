@@ -258,7 +258,7 @@ proc ::mkitsql::ivScale {a f} {
 # equality is exact (months and seconds both equal), so it agrees with GROUP BY, DISTINCT, joins and IN, which see the same two parts;
 # ordering compares the length of time with 30-day months
 foreach {nm op} {eq eq ne ne} {
-    ::mkitsql::defstrict ${nm}_i {a b} "string $op \[::mkitsql::ivSplit \$a\] \[::mkitsql::ivSplit \$b\]"
+    ::mkitsql::defstrict ${nm}_i {a b} "expr {\[::mkitsql::ivSplit \$a\] $op \[::mkitsql::ivSplit \$b\]}"
 }
 foreach {nm op} {lt < le <= gt > ge >=} {
     ::mkitsql::defstrict ${nm}_i {a b} "expr {\[::mkitsql::ivTotal \$a\] $op \[::mkitsql::ivTotal \$b\]}"

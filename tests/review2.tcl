@@ -38,6 +38,7 @@ check "very long SIMILAR TO pattern refused" [string match "*longer than 2000*" 
 check "duplicate WINDOW name" [string match "*defined twice*" [err "SELECT SUM(v) OVER w FROM t WINDOW w AS (ORDER BY v), w AS (ORDER BY v)"]] 1
 # intervals
 check "1 mon is not 30 days, anywhere" [rows "SELECT INTERVAL '1' MONTH = INTERVAL '30' DAY, INTERVAL '1' MONTH IN (INTERVAL '30' DAY), INTERVAL '1' MONTH < INTERVAL '31' DAY"] {{0 0 1}}
+check "<> on intervals" [rows "SELECT INTERVAL '1' DAY <> INTERVAL '24' HOUR, INTERVAL '1' MONTH <> INTERVAL '30' DAY"] {{0 1}}
 check "join on intervals agrees" [rows "SELECT COUNT(*) FROM (SELECT INTERVAL '1' MONTH AS i) a JOIN (SELECT INTERVAL '30' DAY AS i) b ON a.i = b.i"] 0
 check "AVG of months keeps the fraction" [rows "SELECT AVG(i) FROM (SELECT INTERVAL '1' MONTH AS i UNION ALL SELECT INTERVAL '2' MONTH) x"] {{{1 mon 15 days}}}
 check "interval / n and * n" [rows "SELECT INTERVAL '1' MONTH / 3, INTERVAL '1' MONTH * 0.5, INTERVAL '2' DAY * 2, INTERVAL '3' MONTH / 3"] {{{10 days} {15 days} {4 days} {1 mon}}}
