@@ -150,7 +150,19 @@ proc ::mkmock::cmd_view {cmd path args} {
         size {
             lassign [_resolve $path] id idx
             if {$idx ne ""} { error "size needs a view path" }
-            return [llength [dict get $vo($id) rows]]
+            set rows [dict get $vo($id) rows]
+            if {[llength $args] == 0} { return [llength $rows] }
+            # mk::view size path N : shrink, or grow with default rows (as Metakit does)
+            set n [lindex $args 0]
+            if {![string is integer -strict $n] || $n < 0} { error "expected integer but got \"$n\"" }
+            if {[info exists ::mkmock::failSize] && $::mkmock::failSize} { error "mock: size change refused" }
+            if {$n < [llength $rows]} {
+                set rows [lrange $rows 0 [expr {$n - 1}]]
+            } else {
+                while {[llength $rows] < $n} { lappend rows [_defaults [dict get $vo($id) layout]] }
+            }
+            dict set vo($id) rows $rows
+            return $n
         }
         delete {
             lassign [split $path .] tag vname

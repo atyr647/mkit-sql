@@ -4,8 +4,7 @@
 set here [file dirname [file normalize [info script]]]
 if {![info exists ::env(MKIT_MK4TCL)] || $::env(MKIT_MK4TCL) eq ""} { puts "set MKIT_MK4TCL to the Mk4tcl shared library, or to 'builtin' inside a tclkit" ; exit 2 }
 source $here/mk4load.tcl
-source $here/vendor/store.tcl
-source [file join [file dirname $here] mkitsql mkitsql.tcl]
+source $here/loadengine.tcl
 set f [expr {[info exists ::env(TMPDIR)] ? $::env(TMPDIR) : "/tmp"}]/mkitsql_real_[pid].mk ; file delete $f
 set db [store::openFile $f -create]
 set pass 0 ; set fail 0

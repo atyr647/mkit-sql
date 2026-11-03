@@ -31,7 +31,11 @@ PostgreSQL rather than SQLite or MySQL, it says so. Examples use the sample data
 **NULL.** Metakit has no NULL, so a stored value is never NULL. NULLs appear while a query runs (`LEFT JOIN`,
 `SELECT NULL`, `SUM` of no rows, `NULLIF`, ...) and obey standard three-valued logic. Writing a NULL stores the
 column default (`0` or empty text), so `WHERE col IS NULL` never matches stored rows. Result grids show NULL
-as `NULL` (`::mkitsql::nullText`).
+as `NULL` (`::mkitsql::nullText`). NULL cannot be forged: inside the engine it is a tagged value built on
+U+FDD0 (a Unicode *noncharacter*), and no value can ever contain that character: it is rejected in SQL text and
+parameters, `CHR(64976)` refuses to create it, and text read from a file has it replaced by U+FFFD (a statement
+that read such a value will not write, so the replacement is never saved). `INTERVAL` values use the same prefix, so
+text such as `'ivl:5'` is just text.
 
 **Typing is static and standard.** `7 / 2` is `3`; `'2' < '10'` is false (text comparison); text and numbers
 compare as numbers when the text is numeric; `LIKE` is case-sensitive (`ILIKE` is not); text sorts by code
@@ -241,7 +245,43 @@ Metakit index.
 ::mkitsql::query {SELECT * FROM employees WHERE name = :n} $db {n Ada}
 ```
 
-Parameters are values, never SQL text, so they cannot inject SQL.
+Parameters are values, never SQL text, so they cannot inject SQL. To pass NULL, name the parameter in the
+`nulls` argument (positions for `?`, names for `:name`); no text value, however it is spelled, ever becomes NULL:
+
+```tcl
+::mkitsql::query {SELECT ? IS NULL, ? IS NULL} $db {a b} {} {2}      ;# -> {0 1}
+```
+
+## Large tables and memory
+
+A query never has to fit in memory. Scans are read in chunks and every operator that has to hold rows (sort,
+`GROUP BY`, `DISTINCT` and `DISTINCT` aggregates, joins, `UNION/INTERSECT/EXCEPT`, windows over big inputs, and
+the row sets that `INSERT ... SELECT`, `UPDATE`, `MERGE` and `CREATE TABLE AS` build before touching the file) is
+limited by `::mkitsql::memBytes` (default 32 MB per operator) and spills to temporary files beyond that
+(`::mkitsql::tempDir`, default the system temp directory; removed after every statement). Use `stream` to
+process a result without ever holding it:
+
+```tcl
+proc onRows {rows} { foreach r $rows { ... } ; return 0 }          ;# return 1 to stop (after this chunk)
+::mkitsql::stream {SELECT * FROM big ORDER BY name} $db {} onRows
+```
+
+`query` and `run` return the whole result (at most `::mkitsql::maxRows` rows are kept; the result says
+`truncated`). What is still held in memory, by design: one *partition* of a window function that does not fit
+(a single partition larger than memory), the value set of an `IN (SELECT ...)` (capped at 5,000,000 values with a
+clear error), the row ids of a `DELETE`, and the final text of `STRING_AGG`.
+
+## Storage layer
+
+The engine reaches Metakit only through `::mkitsql::db` (`mkitsql/db.tcl`, directly on Mk4tcl, no MK Studio
+needed). Inside MK Studio, `mkitsql/db_studio.tcl` forwards the same interface to MK Studio's `::store` so both
+share the open files. `mk::view delete` leaves a view's rows behind, so `dropView` empties the view first and
+abandons the drop with the original error if that fails.
+
+```tcl
+package require mkitsql                                   ;# standalone: loads Mk4tcl itself
+set db [::mkitsql::db::openFile game.mk -create]
+```
 
 ## Errors
 
@@ -253,7 +293,7 @@ underline the problem. Runtime errors say what was wrong and, where it helps, wh
 
 | Left out | Why |
 | --- | --- |
-| Constraints, defaults, keys, indexes, `AUTOINCREMENT` | Metakit stores none of these |
+| Constraints (`PRIMARY KEY`, `UNIQUE`, `FOREIGN KEY`, `CHECK`, `NOT NULL`), defaults, indexes, `AUTOINCREMENT` | Metakit stores none of these; they are rejected, never silently ignored |
 | SQL `VIEW`s, triggers, stored procedures, permissions, cursors, locking | not applicable to a single-process embedded file |
 | `ON CONFLICT` / upsert | needs keys; use `MERGE` |
 | Savepoints | Metakit can only roll back to the last commit |

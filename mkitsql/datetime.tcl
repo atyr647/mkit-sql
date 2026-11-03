@@ -4,7 +4,7 @@
 # "2026-03-05 14:30:00", "14:30:00") and compare correctly as text.
 #
 # An INTERVAL value exists only while a query runs.  Internally it is the string
-#     ivl:<months>:<seconds>
+#     U+FDD0 "ivl:" <months> ":" <seconds>      (U+FDD0 never occurs in data - see expr.tcl - so no text is ever mistaken for an interval)
 # (months and seconds are kept apart because a month has no fixed length).  It is shown
 # as  "1 year 2 mons 3 days 04:05:06"  and cannot be stored in a column.
 
@@ -15,16 +15,21 @@ namespace eval ::mkitsql {
 proc ::mkitsql::ivMake {m s} {
     set m [expr {int($m)}]
     if {$s == int($s) && abs($s) < 1e15} { set s [expr {int($s)}] } else { set s [expr {double($s)}] }
-    return ivl:$m:$s
+    return $::mkitsql::IV$m:$s
 }
 proc ::mkitsql::ivSplit {v} {
-    if {![regexp {^ivl:(-?\d+):(-?[0-9.eE+-]+)$} $v -> m s]} {
+    if {![::mkitsql::isIv $v] || ![regexp {^.....(-?\d+):(-?[0-9.eE+-]+)$} $v -> m s]} {
         fail "'[string range $v 0 40]' is not an interval"
     }
     return [list $m $s]
 }
 # seconds with 30-day months: the convention used to compare and sort intervals
-proc ::mkitsql::ivTotal {v} { lassign [ivSplit $v] m s ; expr {$m * 2592000.0 + $s} }
+proc ::mkitsql::ivTotal {v} {
+    # already converted (sorting converts a key once; a spilled run may be sorted again)
+    if {![isIv $v] && [string is double -strict $v]} { return $v }
+    lassign [ivSplit $v] m s
+    expr {$m * 2592000.0 + $s}
+}
 
 # Human-readable form:  1 year 2 mons 3 days 04:05:06
 proc ::mkitsql::ivFormat {v} {
@@ -216,7 +221,7 @@ proc ::mkitsql::fmtSecs {t} {
     ::mkitsql::ivMake 0 [expr {[::mkitsql::dtEpoch $pa] - [::mkitsql::dtEpoch $pb]}]
 }
 ::mkitsql::defstrict cast_interval {v} {
-    if {[string match ivl:* $v]} { return $v }
+    if {[::mkitsql::isIv $v]} { return $v }
     lassign [::mkitsql::ivParse $v "" ""] m s
     ::mkitsql::ivMake $m $s
 }
@@ -238,3 +243,6 @@ proc ::mkitsql::ivExtract {field v} {
     }
     fail "Unknown EXTRACT field '$field' for an interval"
 }
+
+# Is `v` an INTERVAL value?  Intervals carry the prefix  U+FDD0 "ivl:" ; no data can start with it.
+proc ::mkitsql::isIv {v} { string equal -length 5 $v $::mkitsql::IV }

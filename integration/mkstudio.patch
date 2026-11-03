@@ -71,13 +71,15 @@ diff --git a/mkstudio.vfs/lib/app-mkstudio/store.tcl b/mkstudio.vfs/lib/app-mkst
 index 9286540..52c90c4 100644
 --- a/mkstudio.vfs/lib/app-mkstudio/store.tcl
 +++ b/mkstudio.vfs/lib/app-mkstudio/store.tcl
-@@ -309,6 +309,9 @@ proc ::store::createView {tag name layout} {
+@@ -309,6 +309,11 @@ proc ::store::createView {tag name layout} {
  
  proc ::store::dropView {tag name} {
      if {![hasView $tag $name]} { error "View '$name' does not exist in '$tag'." }
 +    # `mk::view delete` leaves the rows behind: a view created again under the same name would
-+    # get its old rows back.  Empty it first.
-+    catch {mk::view size $tag.$name 0}
++    # get its old rows back.  Empty it first - and let a failure abort the drop (no catch).
++    mk::view size $tag.$name 0
++    set left [mk::view size $tag.$name]
++    if {$left != 0} { error "Cannot drop '$name': $left rows could not be cleared." }
      mk::view delete $tag.$name
      touch $tag
  }

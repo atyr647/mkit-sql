@@ -2,8 +2,7 @@
 #   tclsh tests/doc_examples.tcl
 set here [file dirname [file normalize [info script]]]
 source $here/mk4load.tcl
-source $here/vendor/store.tcl
-source [file join [file dirname $here] mkitsql mkitsql.tcl]
+source $here/loadengine.tcl
 set f [expr {[info exists ::env(TMPDIR)] ? $::env(TMPDIR) : "/tmp"}]/mkitsql_docs_[pid].mk
 file delete $f
 set db [store::createSample $f]
@@ -64,6 +63,16 @@ ok intro3 "DESCRIBE people"
 ok param1 "SELECT * FROM employees WHERE dept = ? AND salary > ?" __none__ {3 50000}
 ok param2 "SELECT * FROM employees WHERE name = :n" __none__ {n Ada}
 if {[dict get [mkitsql::query {SELECT name FROM employees WHERE name = :n} $db {n {Ada Lovelace}}] rows] ne {{{Ada Lovelace}}}} { incr fail ; puts "FAIL param named query" } else { incr pass }
+if {[dict get [mkitsql::query {SELECT ? IS NULL, ? IS NULL} $db {a b} {} {2}] rows] ne {{0 1}}} { incr fail ; puts "FAIL param nulls" } else { incr pass }
+# --- Large tables and memory: stream
+set ::seen {}
+proc onRows {rows} { foreach r $rows { lappend ::seen [lindex $r 0] } ; return 0 }
+set res [mkitsql::stream {SELECT name FROM departments ORDER BY name} $db {} onRows]
+if {$::seen ne {Design Engineering Research Sales Support} || [dict get $res count] != 5} { incr fail ; puts "FAIL stream: $::seen" } else { incr pass }
+set ::calls 0
+proc stopAfterOne {rows} { incr ::calls ; return 1 }
+mkitsql::stream {SELECT name FROM employees} $db {} stopAfterOne
+if {$::calls != 1} { incr fail ; puts "FAIL stream stop" } else { incr pass }
 
 store::closeFile $db ; file delete $f
 puts "$pass passed, $fail failed"

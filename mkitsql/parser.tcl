@@ -1351,7 +1351,13 @@ proc ::mkitsql::parse {tokens text} {
 }
 
 proc ::mkitsql::parseScript {text} {
+    variable M
     set out {}
+    # U+FDD0 marks NULL inside the engine and must never appear in a value; SQL text cannot contain it
+    set bad [string first $M $text]
+    if {$bad >= 0} {
+        return -code error -errorcode [list MKQL SYNTAX $bad 1] "The character U+FDD0 is reserved (the engine uses it to mark NULL) and cannot appear in SQL text"
+    }
     foreach st [splitStatements [tokenize $text]] {
         set a [lindex $st 0 2]
         set last [lindex $st end]

@@ -8,8 +8,8 @@ set here [file dirname [file normalize [info script]]]
 set root [file dirname $here]
 source $here/mk4load.tcl
 puts "(Tcl [info patchlevel], $::mk4kind)"
-source $here/vendor/store.tcl
-source $root/mkitsql/mkitsql.tcl
+source $here/loadengine.tcl
+source $here/budget.tcl
 
 set pattern [expr {$argc ? [lindex $argv 0] : "*"}]
 set pass 0 ; set fail 0
@@ -636,7 +636,7 @@ q {INSERT INTO "select" ("from", "order") VALUES (1, 'x')}
 check name_reserved_sel [rows {SELECT "from", "order" FROM "select" WHERE "from" > 0}] {{1 x}}
 q {DROP TABLE "select"}
 check utf8 [rows "SELECT UPPER('h\u00e9llo'), LENGTH('h\u00e9llo')"] [list [list "H\u00c9LLO" 5]]
-check drop [store::hasView $db zz] 0
+check drop [mkitsql::db::hasView $db zz] 0
 # a dropped table must not leave its rows behind for a new table of the same name
 q "CREATE TABLE ghost (a INT, b TEXT)"
 q "INSERT INTO ghost VALUES (1, 'x'), (2, 'y')"
@@ -648,6 +648,22 @@ q "COMMIT"
 q "CREATE TABLE ghost (a INT, c TEXT)"
 check drop_recreate_committed [one "SELECT COUNT(*) FROM ghost"] 0
 q "DROP TABLE ghost"
+# if emptying the view fails, the drop must be abandoned - never swallowed (works on real Metakit too)
+q "CREATE TABLE keep (a INT)"
+q "INSERT INTO keep VALUES (1), (2), (3)"
+rename ::mk::view ::mk::view_real
+proc ::mk::view {cmd args} {
+    if {$cmd eq "size" && [llength $args] == 2} { error "simulated: cannot resize" }
+    return [::mk::view_real $cmd {*}$args]
+}
+set dropErr [errmsg "DROP TABLE keep"]
+rename ::mk::view {}
+rename ::mk::view_real ::mk::view
+check drop_clear_fails_reported [string match "*simulated: cannot resize*" $dropErr] 1
+check drop_clear_fails_kept [mkitsql::db::hasView $db keep] 1
+check drop_clear_fails_rows [one "SELECT COUNT(*) FROM keep"] 3
+q "DROP TABLE keep"
+check drop_clear_ok [mkitsql::db::hasView $db keep] 0
 check drop_missing [string match "Unknown table 'zz'*" [errmsg "DROP TABLE zz"]] 1
 check drop_ie [ok "DROP TABLE IF EXISTS zz"] ok
 q "INSERT INTO notes (id, body) VALUES (1, 'hello'), (2, 'it''s quoted')"
@@ -663,7 +679,7 @@ q "ALTER TABLE notes DROP COLUMN flag"
 check dropcol [lsearch -exact [lmap_ [store::layout $db.notes] {c {lindex $c 0}}] flag] -1
 check alter_unknown [string match "Unknown column 'nope' in 'notes'." [errmsg "ALTER TABLE notes DROP COLUMN nope"]] 1
 q "ALTER TABLE notes RENAME TO memos"
-check rename_table [list [store::hasView $db notes] [store::hasView $db memos] [one "SELECT COUNT(*) FROM memos"]] {0 1 2}
+check rename_table [list [mkitsql::db::hasView $db notes] [mkitsql::db::hasView $db memos] [one "SELECT COUNT(*) FROM memos"]] {0 1 2}
 check rename_keeps_layout [llength [store::layout $db.memos]] 8
 q "DROP TABLE memos"
 check constraint_pk [string match "PRIMARY KEY is not supported*" [errmsg "CREATE TABLE k (id INT PRIMARY KEY)"]] 1
@@ -721,7 +737,7 @@ check param_named_reuse [rows "SELECT id FROM employees WHERE id = :x OR id = :x
 check param_mix  [errmsg "SELECT ? + :a"] {A statement cannot mix ? and :name parameters}
 check param_odd  [errmsg "SELECT :a" {a}] {Named parameters must be given as a dict of name value pairs}
 check param_extra [rows "SELECT 1" {5 6}] {1}
-check param_null [rows "SELECT ? IS NULL" [list $mkitsql::N]] {1}
+check param_null [dict get [q "SELECT ? IS NULL, ? IS NULL" {a b} {2}] rows] {{0 1}}
 check param_query_api [dict get [mkitsql::query "SELECT name FROM departments WHERE id = ?" $db {3}] rows] {Sales}
 check param_miss [errmsg "SELECT ?"] {No value was supplied for parameter #1}
 check param_ins [ok "INSERT INTO departments (id, name) VALUES (?, ?)"] "ERROR: No value was supplied for parameter #1"
@@ -763,5 +779,5 @@ check ro_create [errmsg "CREATE TABLE t (a INT)"] "Database '$ro' is open read-o
 store::closeFile $ro
 file delete $f
 
-puts "\n$pass passed, $fail failed"
+puts "\n$pass passed, $fail failed   (spill files created during the run: $::mkitsql::spillSeq)"
 exit [expr {$fail ? 1 : 0}]

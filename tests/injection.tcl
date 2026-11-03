@@ -3,8 +3,7 @@
 #   tclsh tests/injection.tcl        (MKIT_MK4TCL as for the other tests)
 set here [file dirname [file normalize [info script]]]
 source $here/mk4load.tcl
-source $here/vendor/store.tcl
-source [file join [file dirname $here] mkitsql mkitsql.tcl]
+source $here/loadengine.tcl
 set f [expr {[info exists ::env(TMPDIR)] ? $::env(TMPDIR) : "/tmp"}]/mkitsql_inj_[pid].mk
 file delete $f
 set db [store::openFile $f -create]

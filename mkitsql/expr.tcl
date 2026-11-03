@@ -3,7 +3,7 @@
 # A bound expression tree is compiled into the text of a small Tcl proc, so
 # evaluating it per row costs a handful of proc calls instead of a recursive
 # interpreter walk.  Values are plain Tcl strings; SQL NULL is the sentinel
-# string  "\uE000NULL"  (see ::mkitsql::N).  Metakit itself has no NULL: NULLs
+# string  "\uFDD0NULL"  (see ::mkitsql::N).  Metakit itself has no NULL: NULLs
 # only arise during evaluation (LEFT JOIN, SELECT NULL, empty aggregates ...)
 # and are turned into the column default (0 / "") when written back.
 #
@@ -19,7 +19,18 @@
 #   {sub planId type} {case operand whens else} {cast e type} {func NAME distinct args}
 
 namespace eval ::mkitsql {
-    variable N "\uE000NULL"
+    # NULL is the sentinel string  M + "NULL"  where M is U+FDD0, a Unicode *noncharacter* (reserved
+    # for internal use, never assigned).  The engine keeps one invariant: NO VALUE EVER CONTAINS M.
+    #   - stored text is cleaned when it is read (M -> U+FFFD, see cleanText)
+    #   - SQL text and parameters containing M are rejected
+    #   - CHR() refuses to create it, and blobs are bytes (0-255), so they cannot hold it
+    #   - every string operation only rearranges characters it was given
+    # so no expression can ever build the sentinel from data: NULL cannot be forged.
+    variable M "\uFDD0"
+    variable N "\uFDD0NULL"
+    variable R [format %c 65533]
+    variable IV "\uFDD0ivl:"      ;# prefix of an INTERVAL value (see datetime.tcl)
+    variable sanitized 0
     variable cxCount 0
     variable likeCache
     array set likeCache {}
@@ -36,36 +47,36 @@ namespace eval ::mkitsql::cx {}
 # the result is NULL without running the body.
 proc ::mkitsql::defstrict {name arglist body} {
     set chk {}
-    foreach a $arglist { lappend chk "\$[lindex $a 0] eq \"\\uE000NULL\"" }
-    proc ::mkitsql::rt::$name $arglist "if \{[join $chk { || }]\} \{return \"\\uE000NULL\"\}\n$body"
+    foreach a $arglist { lappend chk "\$[lindex $a 0] eq \"\\uFDD0NULL\"" }
+    proc ::mkitsql::rt::$name $arglist "if \{[join $chk { || }]\} \{return \"\\uFDD0NULL\"\}\n$body"
 }
 
-proc ::mkitsql::rt::isnull  {v} { expr {$v eq "\uE000NULL"} }
-proc ::mkitsql::rt::notnull {v} { expr {$v ne "\uE000NULL"} }
-proc ::mkitsql::rt::not {v} { if {$v eq "\uE000NULL"} { return $v } ; expr {!$v} }
+proc ::mkitsql::rt::isnull  {v} { expr {$v eq "\uFDD0NULL"} }
+proc ::mkitsql::rt::notnull {v} { expr {$v ne "\uFDD0NULL"} }
+proc ::mkitsql::rt::not {v} { if {$v eq "\uFDD0NULL"} { return $v } ; expr {!$v} }
 proc ::mkitsql::rt::and2 {a b} {
     # a is known not to be 0
     if {$b eq "0"} { return 0 }
-    if {$a eq "\uE000NULL" || $b eq "\uE000NULL"} { return "\uE000NULL" }
+    if {$a eq "\uFDD0NULL" || $b eq "\uFDD0NULL"} { return "\uFDD0NULL" }
     return 1
 }
 proc ::mkitsql::rt::or2 {a b} {
     # a is known not to be 1
     if {$b eq "1"} { return 1 }
-    if {$a eq "\uE000NULL" || $b eq "\uE000NULL"} { return "\uE000NULL" }
+    if {$a eq "\uFDD0NULL" || $b eq "\uFDD0NULL"} { return "\uFDD0NULL" }
     return 0
 }
 # numeric value in boolean context -> 1 / 0 / NULL
 proc ::mkitsql::rt::tobool {v} {
-    if {$v eq "\uE000NULL"} { return $v }
+    if {$v eq "\uFDD0NULL"} { return $v }
     expr {$v != 0}
 }
 proc ::mkitsql::rt::istf {v want neg} {
-    if {$v eq "\uE000NULL"} { return $neg }
+    if {$v eq "\uFDD0NULL"} { return $neg }
     expr {(($v != 0) == $want) ^ $neg}
 }
 proc ::mkitsql::rt::isdist {a b neg} {
-    set an [expr {$a eq "\uE000NULL"}] ; set bn [expr {$b eq "\uE000NULL"}]
+    set an [expr {$a eq "\uFDD0NULL"}] ; set bn [expr {$b eq "\uFDD0NULL"}]
     if {$an || $bn} { return [expr {($an != $bn) ^ $neg}] }
     expr {($a ne $b) ^ $neg}
 }
@@ -73,7 +84,7 @@ proc ::mkitsql::rt::isdist {a b neg} {
 # ---- numbers ---------------------------------------------------------------
 # Convert text to a number (used when a text value meets an arithmetic operator).
 proc ::mkitsql::rt::num {v} {
-    if {$v eq "\uE000NULL"} { return $v }
+    if {$v eq "\uFDD0NULL"} { return $v }
     set s [string trim $v]
     if {![regexp {^[-+]?(\d+(\.\d*)?|\.\d+)([eE][-+]?\d+)?$} $s]} {
         ::mkitsql::fail "Invalid number: '[string range $v 0 40]'"
@@ -127,7 +138,7 @@ proc ::mkitsql::rt::looksnum {v} {
 # ---- LIKE ------------------------------------------------------------------
 proc ::mkitsql::likeRegexp {pat esc} {
     variable likeCache
-    if {[info exists likeCache($pat,$esc)]} { return $likeCache($pat,$esc) }
+    if {[info exists likeCache([list $pat $esc])]} { return $likeCache([list $pat $esc]) }
     set re "^"
     set n [string length $pat]
     for {set i 0} {$i < $n} {incr i} {
@@ -141,11 +152,11 @@ proc ::mkitsql::likeRegexp {pat esc} {
     }
     append re "\$"
     if {[array size likeCache] > 500} { array unset likeCache }
-    set likeCache($pat,$esc) "(?s)$re"
-    return $likeCache($pat,$esc)
+    set likeCache([list $pat $esc]) "(?s)$re"
+    return $likeCache([list $pat $esc])
 }
 proc ::mkitsql::rt::like {v pat esc ci} {
-    if {$v eq "\uE000NULL" || $pat eq "\uE000NULL" || $esc eq "\uE000NULL"} { return "\uE000NULL" }
+    if {$v eq "\uFDD0NULL" || $pat eq "\uFDD0NULL" || $esc eq "\uFDD0NULL"} { return "\uFDD0NULL" }
     set re [::mkitsql::likeRegexp $pat $esc]
     if {$ci} { return [regexp -nocase -- $re $v] }
     return [regexp -- $re $v]
@@ -153,13 +164,13 @@ proc ::mkitsql::rt::like {v pat esc ci} {
 
 # ---- IN with a literal list ------------------------------------------------
 proc ::mkitsql::rt::inlist {v list kind hasNull} {
-    if {$v eq "\uE000NULL"} { return $v }
+    if {$v eq "\uFDD0NULL"} { return $v }
     switch -- $kind {
         n { set hit [expr {[lsearch -exact -real $list $v] >= 0}] }
         default { set hit [expr {[lsearch -exact -ascii $list $v] >= 0}] }
     }
     if {$hit} { return 1 }
-    if {$hasNull} { return "\uE000NULL" }
+    if {$hasNull} { return "\uFDD0NULL" }
     return 0
 }
 
@@ -270,7 +281,7 @@ proc ::mkitsql::rt::fn_RANDOM {} { expr {rand()} }
 # SUBSTR(s, start [, len])  -- 1-based; follows the SQL standard for
 # out-of-range start / length.
 ::mkitsql::defstrict fn_SUBSTR {s start {len ""}} {
-    if {$len eq "\uE000NULL"} { return $len }
+    if {$len eq "\uFDD0NULL"} { return $len }
     set from $start
     if {$len eq ""} {
         set to [string length $s]
@@ -310,38 +321,41 @@ proc ::mkitsql::rt::fn_RANDOM {} { expr {rand()} }
     return $s$pad
 }
 ::mkitsql::defstrict fn_ASCII {s} { if {$s eq ""} { return 0 } ; scan [string index $s 0] %c }
-::mkitsql::defstrict fn_CHR {n} { format %c $n }
+::mkitsql::defstrict fn_CHR {n} {
+    if {$n == 64976} { ::mkitsql::fail "CHR(64976) is reserved: U+FDD0 marks NULL inside the engine" }
+    format %c $n
+}
 proc ::mkitsql::rt::fn_CONCAT {args} {
     set out ""
-    foreach a $args { if {$a ne "\uE000NULL"} { append out $a } }
+    foreach a $args { if {$a ne "\uFDD0NULL"} { append out $a } }
     return $out
 }
 proc ::mkitsql::rt::fn_CONCAT_WS {sep args} {
-    if {$sep eq "\uE000NULL"} { return $sep }
+    if {$sep eq "\uFDD0NULL"} { return $sep }
     set parts {}
-    foreach a $args { if {$a ne "\uE000NULL"} { lappend parts $a } }
+    foreach a $args { if {$a ne "\uFDD0NULL"} { lappend parts $a } }
     return [join $parts $sep]
 }
 proc ::mkitsql::rt::fn_NULLIF {a b eqproc} {
-    if {$a eq "\uE000NULL"} { return $a }
-    if {[$eqproc $a $b] eq "1"} { return "\uE000NULL" }
+    if {$a eq "\uFDD0NULL"} { return $a }
+    if {[$eqproc $a $b] eq "1"} { return "\uFDD0NULL" }
     return $a
 }
 # GREATEST / LEAST ignore NULLs (as PostgreSQL does); kind n = numeric, s = text.
 proc ::mkitsql::rt::fn_GREATEST {kind args} {
-    set best "\uE000NULL"
+    set best "\uFDD0NULL"
     foreach a $args {
-        if {$a eq "\uE000NULL"} continue
-        if {$best eq "\uE000NULL"} { set best $a ; continue }
+        if {$a eq "\uFDD0NULL"} continue
+        if {$best eq "\uFDD0NULL"} { set best $a ; continue }
         if {$kind eq "n" ? $a > $best : [string compare $a $best] > 0} { set best $a }
     }
     return $best
 }
 proc ::mkitsql::rt::fn_LEAST {kind args} {
-    set best "\uE000NULL"
+    set best "\uFDD0NULL"
     foreach a $args {
-        if {$a eq "\uE000NULL"} continue
-        if {$best eq "\uE000NULL"} { set best $a ; continue }
+        if {$a eq "\uFDD0NULL"} continue
+        if {$best eq "\uFDD0NULL"} { set best $a ; continue }
         if {$kind eq "n" ? $a < $best : [string compare $a $best] < 0} { set best $a }
     }
     return $best
@@ -352,7 +366,7 @@ proc ::mkitsql::rt::fn_CURRENT_DATE {} { clock format [clock seconds] -format %Y
 proc ::mkitsql::rt::fn_CURRENT_TIME {} { clock format [clock seconds] -format %H:%M:%S }
 proc ::mkitsql::rt::fn_CURRENT_TIMESTAMP {} { clock format [clock seconds] -format "%Y-%m-%d %H:%M:%S" }
 ::mkitsql::defstrict fn_EXTRACT {field v} {
-    if {[string match ivl:* $v]} { return [::mkitsql::ivExtract $field $v] }
+    if {[::mkitsql::isIv $v]} { return [::mkitsql::ivExtract $field $v] }
     set p [::mkitsql::dtParse $v]
     dict with p {}
     if {$kind eq "time" && $field in {YEAR MONTH DAY DOW DOY}} {
@@ -641,7 +655,7 @@ proc ::mkitsql::cgBin {node ctx} {
     error "cgBin: $op"
 }
 
-# text form of an operand (intervals are shown, not shown as ivl:..)
+# text form of an operand (an interval value is tagged internally; this shows it as text)
 proc ::mkitsql::textWord {c} {
     if {[lindex $c 1] eq "interval"} { return "\[::mkitsql::rt::iv_fmt [lindex $c 0]\]" }
     return [lindex $c 0]
@@ -879,7 +893,9 @@ proc ::mkitsql::compileExpr {node ctx} {
     variable cxCount
     lassign [cg $node $ctx] w t
     set name ::mkitsql::cx::p[incr cxCount]
-    proc $name {r0 outer} "return $w"
+    set body "return $w"
+    verifyCode $body
+    proc $name {r0 outer} $body
     return [list $name $t]
 }
 # Compile a condition (WHERE / HAVING / ON): must be boolean or numeric.
@@ -891,7 +907,9 @@ proc ::mkitsql::compileCond {node ctx} {
     }
     set w [asBool $wt condition]
     set name ::mkitsql::cx::p[incr cxCount]
-    proc $name {r0 outer} "return $w"
+    set body "return $w"
+    verifyCode $body
+    proc $name {r0 outer} $body
     return [list $name bool]
 }
 # Compile a list of expressions into one proc returning a list of their values.
@@ -903,6 +921,39 @@ proc ::mkitsql::compileList {nodes ctx} {
         lappend words $w ; lappend types $t
     }
     set name ::mkitsql::cx::p[incr cxCount]
-    proc $name {r0 outer} "list [join $words { }]"
+    set body "list [join $words { }]"
+    verifyCode $body
+    proc $name {r0 outer} $body
     return [list $name $types]
+}
+
+# ---- keeping the NULL marker out of every value --------------------------------------
+# Text that comes from a database file (cell values, table and column names) is the only data the
+# engine did not receive through the SQL text or a parameter; it goes through here.  A file can
+# contain anything, so the marker character is replaced by U+FFFD (and counted: a statement that
+# read such a value refuses to WRITE, so the replacement can never be saved back by accident).
+proc ::mkitsql::cleanText {s} {
+    variable M ; variable R ; variable sanitized
+    if {[string first $M $s] < 0} { return $s }
+    incr sanitized
+    return [string map [list $M $::mkitsql::R] $s]
+}
+# a list of rows (lists of cells); the fast path is one scan of the whole chunk
+proc ::mkitsql::cleanRows {rows} {
+    variable M ; variable R ; variable sanitized
+    incr sanitized
+    set out {}
+    foreach r $rows {
+        set r2 {}
+        foreach v $r { lappend r2 [string map [list $M $::mkitsql::R] $v] }
+        lappend out $r2
+    }
+    return $out
+}
+# Called right before a statement writes: it must not have read a cleaned value.
+proc ::mkitsql::assertClean {} {
+    variable sanitized
+    if {$sanitized} {
+        fail "Refusing to write: this statement read a text value that contains U+FDD0 (a reserved character the engine uses for NULL), shown as U+FFFD. Rewrite those values first (UPDATE ... SET col = 'x' WHERE ...)."
+    }
 }

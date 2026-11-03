@@ -5,8 +5,7 @@
 # name", ...) mean a bug.
 set here [file dirname [file normalize [info script]]]
 source $here/mk4load.tcl
-source $here/vendor/store.tcl
-source [file join [file dirname $here] mkitsql mkitsql.tcl]
+source $here/loadengine.tcl
 set N [expr {$argc > 0 ? [lindex $argv 0] : 20000}]
 expr {srand([expr {$argc > 1 ? [lindex $argv 1] : 1}])}
 set f [expr {[info exists ::env(TMPDIR)] ? $::env(TMPDIR) : "/tmp"}]/mkitsql_fuzz_[pid].mk

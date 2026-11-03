@@ -2,8 +2,7 @@
 # Not part of the pass/fail suite; it prints a table so regressions are easy to spot.
 set here [file dirname [file normalize [info script]]]
 source $here/mk4load.tcl
-source $here/vendor/store.tcl
-source [file join [file dirname $here] mkitsql mkitsql.tcl]
+source $here/loadengine.tcl
 set n [expr {$argc ? [lindex $argv 0] : 200000}]
 set f [expr {[info exists ::env(TMPDIR)] ? $::env(TMPDIR) : "/tmp"}]/mkitsql_scale_[pid].mk
 file delete $f

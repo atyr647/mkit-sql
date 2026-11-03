@@ -4,8 +4,8 @@
 set here [file dirname [file normalize [info script]]]
 set root [file dirname [file dirname $here]]
 source $root/tests/mk4load.tcl
-source $root/tests/vendor/store.tcl
-source $root/mkitsql/mkitsql.tcl
+source $root/tests/loadengine.tcl
+source $root/tests/budget.tcl
 lassign $argv script out
 set tmp [expr {[info exists ::env(TMPDIR)] ? $::env(TMPDIR) : "/tmp"}]/mkitsql_diff_[pid].mk
 file delete $tmp

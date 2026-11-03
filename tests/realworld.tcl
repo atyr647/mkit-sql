@@ -3,8 +3,7 @@
 #   MKIT_MK4TCL=builtin tclkit/tclkit-8.6.3 tests/realworld.tcl tclkit/tclkit-8.5.17
 set here [file dirname [file normalize [info script]]]
 source $here/mk4load.tcl
-source $here/vendor/store.tcl
-source [file join [file dirname $here] mkitsql mkitsql.tcl]
+source $here/loadengine.tcl
 if {$argc < 1} { puts "usage: realworld.tcl <a tclkit or other Metakit file>" ; exit 2 }
 set copy [expr {[info exists ::env(TMPDIR)] ? $::env(TMPDIR) : "/tmp"}]/mkitsql_rw_[pid].kit
 file copy -force [lindex $argv 0] $copy

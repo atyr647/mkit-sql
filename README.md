@@ -1,13 +1,16 @@
 # mkit-sql
 
-Standard SQL for [Metakit](https://www.equi4.com/metakit/) database files, in pure Tcl. It is the query engine for
-[MK Studio](https://github.com/atyr647/mkstudio) and also works on its own in any Tcl program that has Mk4tcl.
+A large, heavily tested subset of standard SQL for [Metakit](https://www.equi4.com/metakit/) database files, in
+pure Tcl. It is the query engine for [MK Studio](https://github.com/atyr647/mkstudio) and also works on its own in
+any Tcl program that has Mk4tcl. **It is not "fully SQL-standard compliant"**: Metakit stores no constraints,
+indexes, exact decimals or NULLs, so those parts of SQL cannot be honoured (see [What it does not
+have](#what-it-does-not-have)).
 
 ```tcl
 lappend auto_path /path/to/mkit-sql                      ;# the directory that contains mkitsql/
-package require mkitsql                                  ;# needs MK Studio's ::store layer (store.tcl)
+package require mkitsql                                  ;# standalone: nothing from MK Studio is needed
 
-set db [::store::openFile game.mk -create]
+set db [::mkitsql::db::openFile game.mk -create]
 ::mkitsql::run {CREATE TABLE players (id INT, name VARCHAR(20), score DOUBLE PRECISION,
                                       items TABLE (item TEXT, qty INT))} $db
 ::mkitsql::run {INSERT INTO players (id, name, score) VALUES (1, 'Ada', 9.5), (2, 'Bob', 7)} $db
@@ -29,13 +32,21 @@ TABLE` (also `AS SELECT`), transactions, `information_schema`, parameters, and M
 (*subviews*) as first-class citizens. Writes are all-or-nothing and range-checked. Syntax errors carry a character
 position for editor underlining; a UI can cancel any long query.
 
-Deliberately **not** supported (Metakit has no equivalent): `PRIMARY KEY` / `UNIQUE` / `FOREIGN KEY` / `CHECK` /
-`NOT NULL` / `DEFAULT`, indexes, SQL views, triggers, permissions, savepoints, upsert (use `MERGE`). Also not built
-yet: `ROLLUP/CUBE/GROUPING SETS`, `COLLATE`, `SIMILAR TO`. See [Not supported](docs/SQL.md#not-supported).
+## What it does not have
 
-Things that differ from what you may be used to: Metakit has **no NULL** (NULLs exist only while a query runs;
-storing one writes `0` / empty text), `DECIMAL` is a double (not exact), integer `/` truncates (`7 / 2` is `3`),
-`LIKE` is case-sensitive, and a column rename moves the column to the end (a Metakit limitation).
+These are gaps, not bugs; each is rejected with a clear message rather than silently ignored.
+
+| Missing | Why / what happens instead |
+| --- | --- |
+| **Persistent constraints**: `PRIMARY KEY`, `UNIQUE`, `FOREIGN KEY`, `CHECK`, `NOT NULL`, `DEFAULT` | Metakit stores none. The statement is refused. Nothing enforces integrity, so applications that expect the database to reject bad rows must check themselves. |
+| **Indexes** | Metakit has no secondary indexes. Equality joins and correlated lookups use hash tables built per query; a point lookup is still a scan. |
+| **Exact decimal arithmetic** | `DECIMAL`/`NUMERIC` are 64-bit floats. Do not use them for money. |
+| **Persistent NULL** | Metakit has no NULL. NULLs exist while a query runs (`LEFT JOIN`, `SELECT NULL`, empty aggregates...) and obey three-valued logic; storing one writes `0` / empty text, so `WHERE col IS NULL` never matches stored rows. |
+| SQL views, triggers, stored procedures, permissions, savepoints, upsert (`ON CONFLICT`; use `MERGE`) | no Metakit equivalent |
+| `ROLLUP/CUBE/GROUPING SETS`, `COLLATE`, `SIMILAR TO`, window `EXCLUDE`, `IGNORE NULLS` | not built yet |
+
+Other things that differ from what you may be used to: integer `/` truncates (`7 / 2` is `3`), `LIKE` is
+case-sensitive (`ILIKE` is not), and a column rename moves the column to the end (a Metakit limitation).
 
 ## Runtimes
 
@@ -62,49 +73,95 @@ integration/install-into-mkstudio.sh /path/to/mkstudio
 
 It copies the engine into `mkstudio.vfs/lib/mkitsql/` and applies [`integration/mkstudio.patch`](integration/mkstudio.patch)
 (loader, a standard-SQL sample script, explorer refresh after `MERGE`, and a fix so dropping a view discards its
-rows). `mkitsql/engine_studio.tcl` is the adapter. On a patched fresh clone, MK Studio's own lint, its 38-check
+rows and a failure to do so aborts the drop). `mkitsql/engine_studio.tcl` is the adapter. On a patched fresh clone, MK Studio's own lint, its 38-check
 engine contract and its 41 UI-logic checks all pass.
+
+## Storage layer
+
+The engine reaches Metakit through one interface, `::mkitsql::db` (`openFile closeFile tags views layout size rows
+subSize appendRow setCell deleteRows createView dropView restructure rebuildColumn commit rollback dirty readonly`).
+`mkitsql/db.tcl` implements it directly on Mk4tcl and is the default, so **mkit-sql needs no file from MK Studio**.
+Inside MK Studio, `mkitsql/db_studio.tcl` forwards the same interface to MK Studio's `::store`, so both share one set
+of open files (chosen automatically when `::store` is loaded; force one with `MKIT_BACKEND=standalone|studio`).
+Metakit's `mk::view delete` leaves a view's rows behind, so `dropView` empties the view first and **abandons the drop
+with the original error if that fails**: nothing is swallowed, and a table can never be dropped while its old rows
+could come back.
+
+## Large tables and memory
+
+A query does not have to fit in RAM. Scans are read in chunks; every operator that must hold rows (sort and top-N,
+`GROUP BY`, `DISTINCT` and `COUNT(DISTINCT ...)`, hash/sort-merge/nested-loop joins, `UNION/INTERSECT/EXCEPT`,
+windows over big inputs, recursion, and the row sets built by `INSERT ... SELECT`, `UPDATE`, `MERGE`, `CREATE TABLE
+AS`) is limited by `::mkitsql::memBytes` (default 32 MB per operator) and spills to temporary files beyond that (an
+external merge sort, hash tables that dump partial results, a sort-merge join when the build side does not fit).
+`::mkitsql::stream` hands a result to a callback chunk by chunk without ever holding it. Measured on real Metakit
+(`tests/scale_memory.tcl`, 200,000 rows, 4 MB budget): the whole 24-statement run peaks at **72 MB** (it used to be
+185-229 MB for the in-memory engine), with external sort, grouping by a unique key, joins of the table with itself,
+`UNION/INTERSECT/EXCEPT`, windows, `COUNT(DISTINCT id)` and 200,000-row `UPDATE`/`INSERT ... SELECT`/`CREATE TABLE
+AS` each adding a few MB. Honest limits: one *partition* of a window function must fit in memory; the value set of an
+`IN (SELECT ...)` is capped at 5,000,000 values (clear error beyond that); `DELETE` keeps one integer per deleted
+row; `query`/`run` return the whole (capped) result. Metakit itself is quadratic for scattered deletes and for
+changing the length of many strings in place (200,000 rows: tens of seconds), which is outside the engine.
+
+## Safety: NULL, intervals and generated code
+
+* **NULL cannot be forged.** Inside the engine NULL is a tagged value starting with U+FDD0, a Unicode
+  *noncharacter*, and the engine keeps one invariant: no value ever contains that character. SQL text and
+  parameters containing it are rejected, `CHR(64976)` refuses to create it, blobs are bytes, text read from a file has
+  it replaced by U+FFFD (and a statement that read such a value refuses to write, so the replacement is never saved
+  back), and string operations only rearrange characters they were given. Parameters are never interpreted: NULL is
+  passed out of band (`nulls` argument), not as a magic string. `INTERVAL` values use the same prefix, so text like
+  `'ivl:5'` is just text (`tests/nullforge.tcl`, 57 checks, including a randomised attempt to build the sentinel).
+* **SQL is compiled to small Tcl procs, so every string-to-code boundary is guarded three ways.** Values enter the
+  generated code only through `[list]` (one word, whatever it contains); `mkitsql/verify.tcl` then parses every
+  generated proc and refuses to install it unless it consists only of the commands the compiler emits (checked by a
+  mutation test: ~70,000 code injections, 17,000 of which would really run, none accepted); and `tests/lint.tcl`
+  keeps an **inventory of every place that can turn a string into code or reach outside the process** (`eval`,
+  `uplevel`, dynamic `proc` names, `open`, `source`...) with exact counts, so adding one fails CI until it is
+  reviewed. Auditing this found and fixed two real bugs (a `LIKE` cache whose key could collide, and text beginning
+  `ivl:` being taken for an interval).
 
 ## Verification
 
-Everything below was run on **both of MK Studio's runtimes**, tclkit 8.6.3 and tclkit 8.5.17 (each with its own
-built-in Mk4tcl 2.4.9.7), and also on a Mk4tcl built from source and on the pure-Tcl stand-in.
+Run on **both of MK Studio's runtimes**, tclkit 8.6.3 and tclkit 8.5.17 (each with its own built-in Mk4tcl 2.4.9.7),
+against **both storage layers**, and also on a Mk4tcl built from source and on the pure-Tcl stand-in.
 
 | | result |
 | --- | --- |
-| Engine suite, 526 checks | pass on both kits against **real Metakit**, and on the stand-in |
+| Engine suite (`tests/run.tcl`), 530 checks | pass on both kits, both storage layers, real Metakit; also on the stand-in |
+| Same suite with tiny memory budgets (`MKIT_MEMBYTES=1..2000 MKIT_CHUNK=1..11`) | pass: every sort, group, join, distinct and DML spills, thousands of spill files, none left behind |
 | Metakit-only checks (`tests/real_metakit.tcl`, 22) | pass: persistence across close/reopen, 64-bit values, binary, Unicode, nested subviews, every `ALTER`, drop/recreate |
-| **Differential test against SQLite** (`tests/differential`) | more than 60,000 generated queries (about 10,000 of them window queries), 0 mismatches; recursive CTEs and row values checked too. Differences are deliberate (below) |
-| **Code injection** (`tests/injection.tcl`, 1,218 checks) | hostile strings (`[exit 7]`, `}[set x 1]{`, backslashes, braces, NULs...) used as literals, parameters, aliases and stored data never run as code and always round-trip exactly |
-| **Fuzzer** (`tests/fuzz.tcl`) | more than 300,000 mutated statements: every failure is a clean engine error, none is a raw Tcl error |
-| **A Metakit file we did not create** (`tests/realworld.tcl`) | a tclkit's own boot database: nested tables, binary columns, joins, windows, subqueries - all work |
-| MK Studio's engine contract (38) and UI tests (16 + 41) | pass on both kits, real Metakit |
-| 200,000 rows on real Metakit (`tests/scale.tcl`) | most queries 0.2-1.5 s, heaviest 3.4 s, 185-229 MB peak |
-| Lint: ASCII, no shadowed commands, nothing newer than the target runtimes | clean |
-| **Not tested** | Windows and macOS; files far larger than memory allows (see below); the GitHub Actions workflow itself (never run, YAML validated only) |
-
-The engine is **in-memory per query**: scans, sorts and joins hold their rows in Tcl lists, so a query's working set
-must fit in RAM (about 1 KB per row at 5 columns; 200,000 rows peaked at 229 MB). Plain `LIMIT` queries and
-equality lookups stop early, but a full `ORDER BY` over millions of rows will not fit.
+| **Differential test against SQLite** (`tests/differential`) | more than 60,000 generated queries (about 10,000 window queries), 0 mismatches; repeated with a 50-byte memory budget |
+| Code injection (`tests/injection.tcl`, 1,218 checks) and code-generation audit (`tests/codegen_audit.tcl`, 44 checks + mutation test) | hostile strings never run as code and round-trip exactly |
+| NULL/interval forgery (`tests/nullforge.tcl`, 57) | no SQL text, parameter, stored value or function can produce NULL or an interval |
+| Fuzzer (`tests/fuzz.tcl`) | more than 300,000 mutated statements: every failure is a clean engine error |
+| A Metakit file we did not create (`tests/realworld.tcl`) | a tclkit's own boot database: nested tables, binary columns, joins, windows, subqueries |
+| MK Studio's engine contract (38) and UI tests (16 + 41) | pass on both kits, real Metakit, on a freshly patched checkout |
+| Memory (`tests/scale_memory.tcl`) | flat; see above |
+| Lint: ASCII, no shadowed commands, nothing newer than the target runtimes, code-boundary inventory | clean |
+| **Not tested** | Windows and macOS; tables of tens of millions of rows; the GitHub Actions workflow itself (never run, YAML validated only) |
 
 Deliberate differences from SQLite (found by the differential test): `ROUND` rounds the decimal value (so
 `ROUND(2.675, 2)` is `2.68`, as in PostgreSQL), `%` is for integers, typing is static (`COALESCE(int, real)` is
 real), and `LIKE` is case-sensitive.
 
-Two bugs in MK Studio's `store.tcl` showed up only on real Metakit. One is fixed in current MK Studio (a dropped
-view stays listed until commit); the other is not, so [`mkitsql/storefix.tcl`](mkitsql/storefix.tcl) and the
-mkstudio patch fix it: `mk::view delete` leaves the rows behind, so a table re-created under the same name came back
-**with its old rows**.
+Two bugs in MK Studio's `store.tcl` showed up only on real Metakit: a dropped view stays listed until commit, and
+`mk::view delete` leaves the rows behind (a table re-created under the same name came back **with its old rows**).
+Both are handled in the storage layer and in [`integration/mkstudio.patch`](integration/mkstudio.patch).
 
 ## Tests
 
 ```sh
-tclsh tests/run.tcl                       # 526 engine checks on the pure-Tcl stand-in   (glob to filter: 'join_*')
-tclsh tests/lint.tcl                      # static checks
+tclsh tests/run.tcl                       # 530 engine checks on the pure-Tcl stand-in   (glob to filter: 'join_*')
+MKIT_BACKEND=standalone tclsh tests/run.tcl   # ... on the standalone storage layer (default: MK Studio's ::store)
+MKIT_MEMBYTES=50 MKIT_CHUNK=3 tclsh tests/run.tcl   # tiny memory budget: everything spills
+tclsh tests/lint.tcl                      # static checks + inventory of code boundaries
 tclsh tests/doc_examples.tcl              # the examples in docs/SQL.md
 python3 tests/differential/diff.py [--n 3000] [--seed 1] [--kind window]      # compare with SQLite
 python3 tests/differential/diff.py --file tests/differential/recursive.sql
 tclsh tests/injection.tcl                 # hostile strings must stay inert
+tclsh tests/nullforge.tcl                 # NULL / interval cannot be forged
+tclsh tests/codegen_audit.tcl             # generated code verifier + mutation test
 tclsh tests/fuzz.tcl 40000 1              # mutated SQL must fail cleanly
 MKIT_MK4TCL=builtin tclkit/tclkit-8.6.3 tests/realworld.tcl tclkit/tclkit-8.5.17    # a Metakit file we did not create
 
@@ -113,6 +170,7 @@ export LD_LIBRARY_PATH=/tmp/mk4build/build/src MKIT_MK4TCL=/tmp/mk4build/build/t
 tclsh tests/run.tcl                       # the same suite on real Metakit
 tclsh tests/real_metakit.tcl              # checks that only mean something on real Metakit
 tclsh tests/scale.tcl 200000              # timings and memory
+tclkit/tclkit-8.6.3 tests/scale_memory.tcl 200000 4194304   # bounded memory (MKIT_MK4TCL=builtin)
 
 MKSTUDIO_DIR=/path/to/mkstudio tclsh tests/studio_contract.tcl                  # mkstudio's own engine contract
 MKSTUDIO_DIR=/path/to/mkstudio xvfb-run wish tests/studio_integration.tcl       # the real UI, mkit-sql behind it
@@ -120,25 +178,27 @@ MKSTUDIO_DIR=/path/to/mkstudio xvfb-run wish tests/studio_integration.tcl       
 
 `MKIT_MK4TCL` selects the Mk4tcl used by every script: unset = stand-in, `builtin` = the running tclkit's, or a path
 to a shared library. `.github/workflows/test.yml` runs all of the above.
-`tests/vendor/` holds copies of MK Studio's `store.tcl` and the Mk4tcl stand-in.
+`tests/vendor/` holds copies of MK Studio's `store.tcl` and the Mk4tcl stand-in (used only by tests).
 
 ## Layout
 
 ```
-mkitsql/mkitsql.tcl       entry point (run, query); mkitsql/pkgIndex.tcl for package require
+mkitsql/mkitsql.tcl       entry point (run, query, stream); mkitsql/pkgIndex.tcl for package require
 mkitsql/parser.tcl        lexer + parser -> AST (errors carry {MKQL SYNTAX pos len})
 mkitsql/bind.tcl          name resolution, * expansion, subqueries, CTEs, windows, type checks, column pruning
-mkitsql/expr.tcl          expression compiler (SQL expression -> small Tcl proc) and runtime functions
+mkitsql/expr.tcl          expression compiler (SQL expression -> small Tcl proc), runtime functions, NULL marker
+mkitsql/verify.tcl        checks every generated proc before it is installed
 mkitsql/datetime.tcl      DATE / TIME / TIMESTAMP / INTERVAL
-mkitsql/plan.tcl          planner + executor: scans, hash joins, filter pushdown, aggregation, sorting, set ops, recursion
+mkitsql/plan.tcl          planner: join planning, filter pushdown, lookup/scan caches, subquery runtime
+mkitsql/exec.tcl          streaming executor: scans, joins, aggregation, DISTINCT, sort, windows, set ops, recursion
+mkitsql/spill.tcl         memory budget, temp files, spools, external merge sort
 mkitsql/window.tcl        window-function runtime
 mkitsql/stmt.tcl          result shaping, INSERT/UPDATE/DELETE/MERGE, DDL, transactions
+mkitsql/db.tcl            storage layer on Mk4tcl (standalone, default)
+mkitsql/db_studio.tcl     the same interface forwarded to MK Studio's ::store
 mkitsql/engine_studio.tcl adapter for MK Studio's ::engine seam
-mkitsql/storefix.tcl      workaround for Metakit's drop behaviour
 integration/              install-into-mkstudio.sh + mkstudio.patch
 docs/SQL.md               the SQL reference
 ```
 
-The only file that talks to Mk4tcl is MK Studio's `store.tcl`; mkit-sql calls just `::store::` `tags views layout size
-rows subSize appendRow setCell deleteRows createView dropView restructure rebuildColumn commit rollback dirty
-readonly`.
+Only `db.tcl` and `db_studio.tcl` talk to Mk4tcl / `::store`.

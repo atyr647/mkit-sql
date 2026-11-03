@@ -11,6 +11,7 @@
 
 namespace eval ::mkitsql {
     variable nullText "NULL"     ;# how NULL is shown in result grids
+    variable streamCb ""         ;# set while ::mkitsql::stream runs
     variable autocommit 0        ;# 1 = commit after every successful write statement
     variable intMin -2147483648
     variable intMax 2147483647
@@ -29,8 +30,10 @@ proc ::mkitsql::resetStatement {} {
     set scopes {} ; set ctes {} ; set refLog {} ; set fromSoFar {}
 }
 
-proc ::mkitsql::execStatement {ast {db ""} {plist {}}} {
-    if {[catch {execStatement1 $ast $db $plist} res opts]} {
+proc ::mkitsql::execStatement {ast {db ""} {plist {}} {nulls {}}} {
+    set rc [catch {execStatement1 $ast $db $plist $nulls} res opts]
+    spillCleanup
+    if {$rc} {
         if {[string match "too many nested evaluations*" $res]} {
             fail "The statement is too deeply nested to run (too many subqueries or expressions inside each other)"
         }
@@ -39,10 +42,11 @@ proc ::mkitsql::execStatement {ast {db ""} {plist {}}} {
     return $res
 }
 
-proc ::mkitsql::execStatement1 {ast db plist} {
-    variable defaultDb ; variable cancel ; variable capRows
+proc ::mkitsql::execStatement1 {ast db plist nulls} {
+    variable defaultDb ; variable cancel ; variable capRows ; variable M ; variable N ; variable sanitized
     set savedParams $plist
     resetStatement
+    set sanitized 0
     set defaultDb $db
     set cancel 0 ; set capRows 0
     # `?` parameters take a list, `:name` parameters a dict; the statement says which it uses
@@ -54,6 +58,15 @@ proc ::mkitsql::execStatement1 {ast db plist} {
     } else {
         set i 0
         foreach v $savedParams { dict set pd [incr i] $v }
+    }
+    # Parameters are plain values.  NULL is passed out of band (the `nulls` argument: positions for
+    # `?`, names for `:name`), never as a magic string, so no text a user types can become NULL.
+    dict for {k v} $pd {
+        if {[string first $M $v] >= 0} { fail "Parameter [expr {[string is integer -strict $k] ? "#$k" : ":$k"}] contains U+FDD0, a character the engine reserves for NULL (pass NULL with the 'nulls' argument)" }
+    }
+    foreach k $nulls {
+        if {![dict exists $pd $k]} { fail "NULL was requested for parameter '$k', which the statement does not have" }
+        dict set pd $k $N
     }
     set ::mkitsql::params $pd
     switch -- [lindex $ast 0] {
@@ -70,7 +83,7 @@ proc ::mkitsql::execStatement1 {ast db plist} {
         rollback { return [execTxn rollback [lindex $ast 1]] }
         use {
             set d [findTag [lindex $ast 1]]
-            if {$d eq ""} { fail "Unknown database '[lindex $ast 1]'. Open databases: [join [::store::tags] {, }]" }
+            if {$d eq ""} { fail "Unknown database '[lindex $ast 1]'. Open databases: [join [::mkitsql::db::tags] {, }]" }
             return [dict create kind message text "Now using database '$d'." use $d affected -1]
         }
         showdbs   { return [execShowDbs] }
@@ -87,7 +100,7 @@ proc ::mkitsql::msg {text {affected -1}} {
 proc ::mkitsql::afterWrite {res} {
     variable autocommit
     if {$autocommit && [dict exists $res tag]} {
-        ::store::commit [dict get $res tag]
+        ::mkitsql::db::commit [dict get $res tag]
         dict set res text "[dict get $res text]  (committed)"
     }
     return $res
@@ -99,54 +112,76 @@ proc ::mkitsql::plural {n word} { return "$n $word[expr {$n == 1 ? {} : {s}}]" }
 #  SELECT
 # ============================================================================
 proc ::mkitsql::execSelect {q} {
-    variable maxRows ; variable capRows ; variable nullText ; variable plans ; variable N
+    variable maxRows ; variable nullText ; variable plans ; variable N ; variable S
     set bq [bindQuery $q]
     set id [compileQuery $bq {}]
     set p $plans($id)
     set kind [dict get $p kind]
-    if {$kind eq "select" && [dict get $p stoppable] && [dict get $p limit] eq ""} {
-        set capRows [expr {$maxRows + 1}]
-    }
-    set ids {}
-    if {$kind eq "select"} {
-        lassign [runSelect $p {}] rows ids
-    } else {
-        set rows [runPlan $id {}]
-    }
-    set capRows 0
-    set truncated 0
-    if {[llength $rows] > $maxRows} {
-        set rows [lrange $rows 0 [expr {$maxRows - 1}]]
-        set ids [lrange $ids 0 [expr {$maxRows - 1}]]
-        set truncated 1
-    }
-    set names [dict get $p names]
     set plain [expr {$kind eq "select" && [dict get $p plain]}]
-    # column types for the grid
-    set types {} ; set drill [dict create]
+    set hasRid [expr {$kind eq "select" && [dict get $p curPos] >= 0}]
+    set names [dict get $p names]
+    # column types for the grid, and which columns need special display
+    set types {} ; set drill [dict create] ; set ivCols {}
     set ci 0
     foreach t [dict get $p types] l [dict get $p letters] d [dict get $p drill] {
         if {$l ne ""} { lappend types $l } else { lappend types [letterOfType $t] }
         if {$plain && $d ne "0"} { dict set drill $ci $d }
+        if {$t eq "interval"} { lappend ivCols $ci }
         incr ci
     }
-    # intervals are held in an internal form; show them readably
-    set ivCols {}
-    set ci 0
-    foreach t [dict get $p types] { if {$t eq "interval"} { lappend ivCols $ci } ; incr ci }
-    if {[llength $ivCols]} {
-        set rows2 {}
-        foreach r $rows {
-            foreach i $ivCols { set v [lindex $r $i] ; if {$v ne $N} { lset r $i [ivFormat $v] } }
-            lappend rows2 $r
-        }
-        set rows $rows2
+    set c [newId]
+    set S($c,rows) {} ; set S($c,ids) {} ; set S($c,n) 0 ; set S($c,trunc) 0
+    variable streamCb
+    if {$streamCb ne ""} {
+        # ::mkitsql::stream: hand every chunk to the caller; nothing is kept
+        lassign $streamCb cb nullValue
+        set S($c,count) 0
+        streamPlan $id {} [list ::mkitsql::streamSink $c $cb $nullValue $ivCols] 0
+        set count $S($c,count) ; array unset S $c,*
+        return [dict create kind rowset cols $names types $types rows {} rowids {} source "" drill {} \
+            truncated 0 editable 0 count $count]
     }
-    # display: NULL text, "\u25B8 N rows" for subview counts
-    set outRows {}
-    set width [llength $names]
+    set cfg [list $hasRid $drill $ivCols $nullText $maxRows]
+    streamPlan $id {} [list ::mkitsql::resultSink $c $cfg] 1
+    set rows $S($c,rows) ; set ids $S($c,ids) ; set truncated $S($c,trunc)
+    array unset S $c,*
+    return [dict create kind rowset cols $names types $types rows $rows rowids $ids \
+        source [expr {$plain ? [dict get $p source] : ""}] drill $drill truncated $truncated editable $plain]
+}
+proc ::mkitsql::streamSink {c cb nullValue ivCols chunk} {
+    variable S ; variable N
+    if {[llength $ivCols]} {
+        set rows {}
+        foreach r $chunk {
+            foreach i $ivCols { set v [lindex $r $i] ; if {$v ne $N} { lset r $i [ivFormat $v] } }
+            lappend rows $r
+        }
+        set chunk $rows
+    }
+    set out {}
+    foreach r $chunk {
+        if {[lsearch -exact $r $N] >= 0} {
+            set r2 {}
+            foreach v $r { if {$v eq $N} { lappend r2 $nullValue } else { lappend r2 $v } }
+            set r $r2
+        }
+        lappend out $r
+    }
+    incr S($c,count) [llength $out]
+    if {[{*}$cb $out] eq "1"} { return 1 }
+    return 0
+}
+# collects display-ready rows, at most maxRows of them
+proc ::mkitsql::resultSink {c cfg chunk} {
+    variable S ; variable N
+    lassign $cfg hasRid drill ivCols nullText maxRows
     set hasDrill [dict size $drill]
-    foreach r $rows {
+    foreach el $chunk {
+        if {$S($c,n) >= $maxRows} { set S($c,trunc) 1 ; return 1 }
+        if {$hasRid} { set r [lindex $el 0] ; lappend S($c,ids) [lindex $el 1] } else { set r $el }
+        if {[llength $ivCols]} {
+            foreach i $ivCols { set v [lindex $r $i] ; if {$v ne $N} { lset r $i [ivFormat $v] } }
+        }
         if {[lsearch -exact $r $N] >= 0} {
             set r2 {}
             foreach v $r { if {$v eq $N} { lappend r2 $nullText } else { lappend r2 $v } }
@@ -158,10 +193,10 @@ proc ::mkitsql::execSelect {q} {
                 lset r $i "\u25B8 $n row[expr {$n == 1 ? {} : {s}}]"
             }
         }
-        lappend outRows $r
+        lappend S($c,rows) $r
+        incr S($c,n)
     }
-    return [dict create kind rowset cols $names types $types rows $outRows rowids $ids \
-        source [expr {$plain ? [dict get $p source] : ""}] drill $drill truncated $truncated editable $plain]
+    return 0
 }
 
 # ============================================================================
@@ -171,9 +206,9 @@ proc ::mkitsql::execSelect {q} {
 # {tag view path layout label}.
 proc ::mkitsql::resolveTarget {parts subs} {
     lassign [resolveTable $parts] tag view
-    if {[::store::readonly $tag]} { fail "Database '$tag' is open read-only." }
+    if {[::mkitsql::db::readonly $tag]} { fail "Database '$tag' is open read-only." }
     set path $tag.$view
-    set layout [::store::layout $path]
+    set layout [::mkitsql::db::layout $path]
     set label $view
     if {[llength $subs]} { lassign [walkSubs $path $layout $label $subs] path layout label }
     return [list $tag $view $path $layout $label]
@@ -225,7 +260,7 @@ proc ::mkitsql::coerceValue {col letter v} {
         }
     }
     # an interval stored into a text column keeps its readable form
-    if {[string match ivl:* $v]} { return [ivFormat $v] }
+    if {[isIv $v]} { return [ivFormat $v] }
     return $v
 }
 
@@ -251,29 +286,60 @@ proc ::mkitsql::execInsert {st} {
         lappend targets [list [lindex $lc 0] [lindex $lc 1]]
     }
     set src [dict get $st source]
+    # validate and convert everything first, into a spool (memory stays bounded; it spills to disk)
+    set conv [list ::mkitsql::convInsert $targets]
+    set sp [spoolNew]
     if {[dict get $src type] eq "defaults"} {
         set rows [list [lrepeat [llength $targets] $N]]
         if {[llength $cols] == 0} { set rows [list {}] }
+        convSink $sp $conv $rows
     } else {
         set bq [bindQuery $src]
         set id [compileQuery $bq {}]
-        set rows [runPlan $id {}]
         set w [llength [dict get $bq outNames]]
         if {$w != [llength $targets]} {
             fail "INSERT has [llength $targets] target column[expr {[llength $targets] == 1 ? {} : {s}}] but the source provides $w value[expr {$w == 1 ? {} : {s}}]"
         }
+        streamPlan $id {} [list ::mkitsql::convSink $sp $conv]
     }
-    # validate and convert everything first
     set props {} ; foreach t $targets { lappend props [lindex $t 0] }
-    set batch {}
-    foreach r $rows {
-        set vals {}
-        foreach t $targets v $r { lappend vals [coerceValue [lindex $t 0] [lindex $t 1] $v] }
-        lappend batch $vals
-    }
-    foreach vals $batch { ::store::appendRow $path $props $vals }
-    set n [llength $batch]
+    assertClean
+    spoolEach $sp [list ::mkitsql::applyInsert $path $props]
+    set n [spoolCount $sp]
+    spoolFree $sp
     return [dict create kind message text "[plural $n row] inserted into '$label'." affected $n tag $tag]
+}
+
+# ---- statements that change data: convert first (into a spool), apply afterwards ------------------
+proc ::mkitsql::convSink {sp conv chunk} {
+    set out {}
+    foreach r $chunk { lappend out [{*}$conv $r] }
+    spoolAdd $sp $out
+    return 0
+}
+proc ::mkitsql::convInsert {targets r} {
+    set vals {}
+    foreach t $targets v $r { lappend vals [coerceValue [lindex $t 0] [lindex $t 1] $v] }
+    return $vals
+}
+proc ::mkitsql::convUpdate {targets r} {
+    set vals {} ; set i 0
+    foreach t $targets {
+        lappend vals [coerceValue [lindex $t 0] [lindex $t 1] [lindex $r $i]]
+        incr i
+    }
+    return [list [lindex $r end] $vals]
+}
+proc ::mkitsql::applyUpdate {path targets chunk} {
+    foreach pr $chunk {
+        lassign $pr rid vals
+        foreach t $targets v $vals { ::mkitsql::db::setCell $path $rid [lindex $t 0] $v }
+    }
+    return 0
+}
+proc ::mkitsql::applyInsert {path props chunk} {
+    foreach vals $chunk { ::mkitsql::db::appendRow $path $props $vals }
+    return 0
 }
 
 # tiny map helper (Tcl 8.5 has no lmap)
@@ -311,24 +377,13 @@ proc ::mkitsql::execUpdate {st} {
     lappend items [list {col {} _rowid} {} _rowid]
     set bq [bindQuery [syntheticSelect $st $items]]
     set id [compileQuery $bq {}]
-    set rows [runPlan $id {}]
-    # convert all new values before touching the file
-    set plan {}
-    foreach r $rows {
-        set rid [lindex $r end]
-        set vals {}
-        set i 0
-        foreach t $targets {
-            lappend vals [coerceValue [lindex $t 0] [lindex $t 1] [lindex $r $i]]
-            incr i
-        }
-        lappend plan [list $rid $vals]
-    }
-    foreach pr $plan {
-        lassign $pr rid vals
-        foreach t $targets v $vals { ::store::setCell $path $rid [lindex $t 0] $v }
-    }
-    set n [llength $plan]
+    # convert all new values before touching the file (into a spool: bounded memory)
+    set sp [spoolNew]
+    streamPlan $id {} [list ::mkitsql::convSink $sp [list ::mkitsql::convUpdate $targets]]
+    assertClean
+    spoolEach $sp [list ::mkitsql::applyUpdate $path $targets]
+    set n [spoolCount $sp]
+    spoolFree $sp
     return [dict create kind message text "[plural $n row] updated in '$label'." affected $n tag $tag]
 }
 
@@ -340,7 +395,8 @@ proc ::mkitsql::execDelete {st} {
     set rows [runPlan $id {}]
     set idx {}
     foreach r $rows { lappend idx [lindex $r 0] }
-    if {[llength $idx]} { ::store::deleteRows $path $idx }
+    assertClean
+    if {[llength $idx]} { ::mkitsql::db::deleteRows $path $idx }
     set n [llength $idx]
     return [dict create kind message text "[plural $n row] deleted from '$label'." affected $n tag $tag]
 }
@@ -405,10 +461,36 @@ proc ::mkitsql::execMerge {st} {
     set q [dict create type query with {} body $sel order {} limit {} offset {}]
     set bq [bindQuery $q]
     set id [compileQuery $bq {}]
-    set rows [runPlan $id {}]
-
-    set updates {} ; set deletes {} ; set inserts {} ; set touched [dict create]
-    foreach r $rows {
+    # classify and convert every row first (updates and inserts go to spools, so memory stays bounded)
+    variable S
+    set mg [newId]
+    set S($mg,sU) [spoolNew] ; set S($mg,sI) [spoolNew] ; set S($mg,del) {}
+    set S($mg,touch) [sorterNew {{key 0 asc "" int}}]
+    streamPlan $id {} [list ::mkitsql::mergeSink $mg $plan]
+    # a target row may be changed once: the sorted list of touched row ids must have no repeats
+    set r [sorterReader $S($mg,touch)]
+    while {[llength [set g [readerGroup $r]]]} {
+        if {[llength [lindex $g 1]] > 1} {
+            readerFree $r
+            fail "MERGE would change the same target row twice: the ON condition matches one target row with more than one source row"
+        }
+    }
+    readerFree $r
+    assertClean
+    spoolEach $S($mg,sU) [list ::mkitsql::mergeApplyUpdate $path]
+    set deletes $S($mg,del)
+    if {[llength $deletes]} { ::mkitsql::db::deleteRows $path $deletes }
+    spoolEach $S($mg,sI) [list ::mkitsql::mergeApplyInsert $path]
+    set nu [spoolCount $S($mg,sU)] ; set nd [llength $deletes] ; set ni [spoolCount $S($mg,sI)]
+    spoolFree $S($mg,sU) ; spoolFree $S($mg,sI) ; sorterFree $S($mg,touch)
+    array unset S $mg,*
+    return [dict create kind message affected [expr {$nu + $nd + $ni}] tag $tag \
+        text "MERGE into '$label': $nu updated, $nd deleted, $ni inserted."]
+}
+proc ::mkitsql::mergeSink {mg plan chunk} {
+    variable S ; variable N
+    set ups {} ; set ins {} ; set touched {}
+    foreach r $chunk {
         set rid [lindex $r 0]
         set matched [expr {$rid ne $N}]
         foreach cl $plan {
@@ -417,36 +499,39 @@ proc ::mkitsql::execMerge {st} {
             if {[lindex $r $ci] ne "1"} continue
             switch -- $action {
                 delete - update {
-                    if {[dict exists $touched $rid]} {
-                        fail "MERGE would change the same target row twice: the ON condition matches one target row with more than one source row"
-                    }
-                    dict set touched $rid 1
+                    lappend touched [list $rid]
                     if {$action eq "delete"} {
-                        lappend deletes $rid
+                        lappend S($mg,del) $rid
                     } else {
                         set vals {} ; set k [lindex $cl 3]
                         foreach t [lindex $cl 4] { lappend vals [coerceValue [lindex $t 0] [lindex $t 1] [lindex $r $k]] ; incr k }
-                        lappend updates [list $rid [lindex $cl 4] $vals]
+                        lappend ups [list $rid [lindex $cl 4] $vals]
                     }
                 }
                 insert {
                     set vals {} ; set props {} ; set k [lindex $cl 3]
                     foreach t [lindex $cl 4] { lappend props [lindex $t 0] ; lappend vals [coerceValue [lindex $t 0] [lindex $t 1] [lindex $r $k]] ; incr k }
-                    lappend inserts [list $props $vals]
+                    lappend ins [list $props $vals]
                 }
             }
             break
         }
     }
-    foreach u $updates {
+    if {[llength $touched]} { sorterAdd $S($mg,touch) $touched }
+    if {[llength $ups]} { spoolAdd $S($mg,sU) $ups }
+    if {[llength $ins]} { spoolAdd $S($mg,sI) $ins }
+    return 0
+}
+proc ::mkitsql::mergeApplyUpdate {path chunk} {
+    foreach u $chunk {
         lassign $u rid targets vals
-        foreach t $targets v $vals { ::store::setCell $path $rid [lindex $t 0] $v }
+        foreach t $targets v $vals { ::mkitsql::db::setCell $path $rid [lindex $t 0] $v }
     }
-    if {[llength $deletes]} { ::store::deleteRows $path $deletes }
-    foreach i $inserts { ::store::appendRow $path [lindex $i 0] [lindex $i 1] }
-    set total [expr {[llength $updates] + [llength $deletes] + [llength $inserts]}]
-    return [dict create kind message affected $total tag $tag \
-        text "MERGE into '$label': [llength $updates] updated, [llength $deletes] deleted, [llength $inserts] inserted."]
+    return 0
+}
+proc ::mkitsql::mergeApplyInsert {path chunk} {
+    foreach i $chunk { ::mkitsql::db::appendRow $path [lindex $i 0] [lindex $i 1] }
+    return 0
 }
 
 # ============================================================================
@@ -455,7 +540,7 @@ proc ::mkitsql::execMerge {st} {
 # Where does a new table go?  Returns {tag name}.
 proc ::mkitsql::newTableName {parts} {
     variable defaultDb
-    set tags [::store::tags]
+    set tags [::mkitsql::db::tags]
     if {![llength $tags]} { fail "No database is open." }
     if {[llength $parts] == 2} {
         set tag [findTag [lindex $parts 0]]
@@ -495,35 +580,39 @@ proc ::mkitsql::defsToLayout {defs} {
 
 proc ::mkitsql::execCreate {st} {
     lassign [newTableName [dict get $st parts]] tag name
-    if {[::store::readonly $tag]} { fail "Database '$tag' is open read-only." }
+    if {[::mkitsql::db::readonly $tag]} { fail "Database '$tag' is open read-only." }
     checkName $name Table
     if {[findView $tag $name] ne ""} {
         if {[dict get $st ifnotexists]} { return [dict create kind message text "Table '$name' already exists in '$tag'; nothing to do." affected 0 tag $tag] }
         fail "Table '$name' already exists in '$tag'."
     }
     if {[dict exists $st query]} { return [createTableAs $tag $name [dict get $st query]] }
-    ::store::createView $tag $name [defsToLayout [dict get $st cols]]
+    ::mkitsql::db::createView $tag $name [defsToLayout [dict get $st cols]]
     return [dict create kind message text "Table '$name' created in '$tag'." affected 0 tag $tag]
 }
 
 # CREATE TABLE name AS <query>:  column types come from the query's static types.
 proc ::mkitsql::createTableAs {tag name q} {
-    variable plans ; variable N
+    variable plans ; variable N ; variable S
     set bq [bindQuery $q]
     set id [compileQuery $bq {}]
-    set rows [runPlan $id {}]
     set names [dict get $bq outNames] ; set types [dict get $bq outTypes]
-    set layout {} ; set seen {} ; set i 0
+    # column types come from the static types; an INT column becomes BIGINT if any value is too big
+    set seen {} ; set i 0 ; set intCols {}
     foreach n $names t $types {
         checkName $n Column
         if {[lsearch -exact $seen [string tolower $n]] >= 0} { fail "Column '$n' appears twice; give one an alias" }
         lappend seen [string tolower $n]
+        if {$t in {int bool}} { lappend intCols $i }
+        incr i
+    }
+    set cs [newId]
+    set S($cs,raw) [spoolNew] ; set S($cs,big) {}
+    streamPlan $id {} [list ::mkitsql::ctasRaw $cs $intCols]
+    set layout {} ; set i 0
+    foreach n $names t $types {
         switch -- $t {
-            int - bool { set letter I
-                foreach r $rows {
-                    set v [lindex $r $i]
-                    if {$v ne $N && ($v < $::mkitsql::intMin || $v > $::mkitsql::intMax)} { set letter L ; break }
-                } }
+            int - bool { set letter [expr {[lsearch -exact $S($cs,big) $i] >= 0 ? "L" : "I"}] }
             real { set letter D }
             blob { set letter B }
             default { set letter S }
@@ -532,16 +621,38 @@ proc ::mkitsql::createTableAs {tag name q} {
         incr i
     }
     # convert everything before creating anything
-    set batch {}
-    foreach r $rows {
+    set S($cs,conv) [spoolNew]
+    spoolEach $S($cs,raw) [list ::mkitsql::ctasConvert $S($cs,conv) $names $layout]
+    spoolFree $S($cs,raw)
+    assertClean
+    ::mkitsql::db::createView $tag $name $layout
+    spoolEach $S($cs,conv) [list ::mkitsql::applyInsert $tag.$name $names]
+    set n [spoolCount $S($cs,conv)]
+    spoolFree $S($cs,conv)
+    array unset S $cs,*
+    return [dict create kind message text "Table '$name' created in '$tag' with [plural $n row]." affected $n tag $tag]
+}
+proc ::mkitsql::ctasRaw {cs intCols chunk} {
+    variable S ; variable N
+    foreach i $intCols {
+        if {[lsearch -exact $S($cs,big) $i] >= 0} continue
+        foreach r $chunk {
+            set v [lindex $r $i]
+            if {$v ne $N && ($v < $::mkitsql::intMin || $v > $::mkitsql::intMax)} { lappend S($cs,big) $i ; break }
+        }
+    }
+    spoolAdd $S($cs,raw) $chunk
+    return 0
+}
+proc ::mkitsql::ctasConvert {dst names layout chunk} {
+    set out {}
+    foreach r $chunk {
         set vals {} ; set j 0
         foreach v $r { lappend vals [coerceValue [lindex $names $j] [lindex $layout $j 1] $v] ; incr j }
-        lappend batch $vals
+        lappend out $vals
     }
-    ::store::createView $tag $name $layout
-    foreach vals $batch { ::store::appendRow $tag.$name $names $vals }
-    set n [llength $batch]
-    return [dict create kind message text "Table '$name' created in '$tag' with [plural $n row]." affected $n tag $tag]
+    spoolAdd $dst $out
+    return 0
 }
 
 proc ::mkitsql::execDrop {st} {
@@ -552,8 +663,8 @@ proc ::mkitsql::execDrop {st} {
         }
     }
     lassign [resolveTable $parts] tag view
-    if {[::store::readonly $tag]} { fail "Database '$tag' is open read-only." }
-    ::store::dropView $tag $view
+    if {[::mkitsql::db::readonly $tag]} { fail "Database '$tag' is open read-only." }
+    ::mkitsql::db::dropView $tag $view
     return [dict create kind message text "Table '$view' dropped from '$tag'." affected 0 tag $tag]
 }
 
@@ -566,7 +677,7 @@ proc ::mkitsql::execAlter {st} {
             if {[findLayoutCol $layout $name] ne ""} { fail "Column '$name' already exists in '$label'." }
             checkName $name Column
             set new [lindex [defsToLayout [list $a1]] 0]
-            ::store::restructure $path [concat $layout [list $new]]
+            ::mkitsql::db::restructure $path [concat $layout [list $new]]
             set text "Column '$name' added to '$label'.  Existing rows get the default (0 or empty text)."
         }
         drop {
@@ -575,7 +686,7 @@ proc ::mkitsql::execAlter {st} {
             if {[llength $layout] == 1} { fail "A table must keep at least one column." }
             set new {}
             foreach x $layout { if {$x ne $c} { lappend new $x } }
-            ::store::restructure $path $new
+            ::mkitsql::db::restructure $path $new
             set text "Column '[lindex $c 0]' dropped from '$label'."
         }
         rename {
@@ -584,7 +695,7 @@ proc ::mkitsql::execAlter {st} {
             if {[lindex $c 1] eq "V"} { fail "Renaming a subview column is not supported (Metakit would discard its rows)." }
             checkName $a2 Column
             if {[findLayoutCol $layout $a2] ne "" && ![string equal -nocase $a1 $a2]} { fail "Column '$a2' already exists in '$label'." }
-            ::store::rebuildColumn $path [lindex $c 0] $a2 [lindex $c 1]
+            ::mkitsql::db::rebuildColumn $path [lindex $c 0] $a2 [lindex $c 1]
             set text "Column '[lindex $c 0]' renamed to '$a2'.  (Metakit moves a renamed column to the end of the table.)"
         }
         retype {
@@ -592,7 +703,7 @@ proc ::mkitsql::execAlter {st} {
             if {$c eq ""} { fail "Unknown column '$a1' in '$label'." }
             if {[lindex $c 1] eq "V"} { fail "A subview column cannot change type." }
             set letter [lindex [sqlType $a2] 0]
-            ::store::rebuildColumn $path [lindex $c 0] [lindex $c 0] $letter
+            ::mkitsql::db::rebuildColumn $path [lindex $c 0] [lindex $c 0] $letter
             set text "Column '[lindex $c 0]' changed to $a2.  (Metakit moves it to the end of the table.)"
         }
         renametable {
@@ -600,9 +711,9 @@ proc ::mkitsql::execAlter {st} {
             checkName $a1 Table
             if {[findView $tag $a1] ne ""} { fail "Table '$a1' already exists in '$tag'." }
             # Metakit cannot rename a view: copy it (subviews included), then drop the original
-            ::store::createView $tag $a1 $layout
+            ::mkitsql::db::createView $tag $a1 $layout
             copyRows $path $tag.$a1 $layout
-            ::store::dropView $tag $view
+            ::mkitsql::db::dropView $tag $view
             set text "Table '$view' renamed to '$a1'."
         }
     }
@@ -616,11 +727,11 @@ proc ::mkitsql::copyRows {src dst layout} {
     foreach c $layout {
         if {[lindex $c 1] eq "V"} { lappend subs $c } else { lappend props [lindex $c 0] }
     }
-    set n [::store::size $src]
+    set n [::mkitsql::db::size $src]
     for {set first 0} {$first < $n} {incr first 1000} {
         set i $first
-        foreach r [::store::rows $src $props $first 1000] {
-            set j [::store::appendRow $dst $props $r]
+        foreach r [::mkitsql::db::rows $src $props $first 1000] {
+            set j [::mkitsql::db::appendRow $dst $props $r]
             foreach sc $subs {
                 set nm [lindex $sc 0]
                 copyRows $src!$i.$nm $dst!$j.$nm [lindex $sc 2]
@@ -635,14 +746,14 @@ proc ::mkitsql::copyRows {src dst layout} {
 # ============================================================================
 proc ::mkitsql::execTxn {what db} {
     variable defaultDb
-    set tags [::store::tags]
+    set tags [::mkitsql::db::tags]
     if {$db ne ""} {
         set t [findTag $db]
         if {$t eq ""} { fail "Unknown database '$db'. Open databases: [join $tags {, }]" }
         set targets [list $t]
     } else {
         set targets {}
-        foreach t $tags { if {[::store::dirty $t] > 0} { lappend targets $t } }
+        foreach t $tags { if {[::mkitsql::db::dirty $t] > 0} { lappend targets $t } }
         if {![llength $targets]} {
             return [msg "Nothing to $what: there are no pending changes." 0]
         }
@@ -650,12 +761,12 @@ proc ::mkitsql::execTxn {what db} {
     set total 0
     foreach t $targets {
         if {$what eq "commit"} {
-            if {[::store::readonly $t]} { fail "Database '$t' is open read-only." }
-            set n [::store::dirty $t]
-            ::store::commit $t
+            if {[::mkitsql::db::readonly $t]} { fail "Database '$t' is open read-only." }
+            set n [::mkitsql::db::dirty $t]
+            ::mkitsql::db::commit $t
         } else {
-            set n [::store::dirty $t]
-            ::store::rollback $t
+            set n [::mkitsql::db::dirty $t]
+            ::mkitsql::db::rollback $t
         }
         incr total $n
     }
@@ -672,15 +783,15 @@ proc ::mkitsql::rowset {cols types rows} {
 
 proc ::mkitsql::execShowDbs {} {
     set rows {}
-    foreach t [::store::tags] {
-        lappend rows [list $t [::store::path $t] [llength [::store::views $t]] \
-            [expr {[::store::readonly $t] ? "read-only" : "read/write"}] [::store::dirty $t]]
+    foreach t [::mkitsql::db::tags] {
+        lappend rows [list $t [::mkitsql::db::path $t] [llength [::mkitsql::db::views $t]] \
+            [expr {[::mkitsql::db::readonly $t] ? "read-only" : "read/write"}] [::mkitsql::db::dirty $t]]
     }
     return [rowset {database file tables mode pending_changes} {"" "" N "" N} $rows]
 }
 
 proc ::mkitsql::execShowTables {db} {
-    set tags [::store::tags]
+    set tags [::mkitsql::db::tags]
     if {$db ne ""} {
         set t [findTag $db]
         if {$t eq ""} { fail "Unknown database '$db'. Open databases: [join $tags {, }]" }
@@ -688,8 +799,8 @@ proc ::mkitsql::execShowTables {db} {
     }
     set rows {}
     foreach t $tags {
-        foreach v [::store::views $t] {
-            lappend rows [list $t $v [::store::size $t.$v] [llength [::store::layout $t.$v]]]
+        foreach v [::mkitsql::db::views $t] {
+            lappend rows [list [cleanText $t] [cleanText $v] [::mkitsql::db::size $t.$v] [llength [::mkitsql::db::layout $t.$v]]]
         }
     }
     return [rowset {database table rows columns} {"" "" N N} $rows]
@@ -697,7 +808,7 @@ proc ::mkitsql::execShowTables {db} {
 
 proc ::mkitsql::execDescribe {st} {
     lassign [resolveTable [dict get $st parts]] tag view
-    set path $tag.$view ; set layout [::store::layout $path]
+    set path $tag.$view ; set layout [::mkitsql::db::layout $path]
     if {[llength [dict get $st subs]]} { lassign [walkSubs $path $layout $view [dict get $st subs]] path layout label }
     set rows {} ; set n 0
     foreach r [flattenLayout $layout "" 0] { lappend rows [linsert $r 0 [incr n]] }
@@ -708,10 +819,10 @@ proc ::mkitsql::flattenLayout {layout prefix depth} {
     foreach c $layout {
         lassign $c n l sub
         if {$l eq "V"} {
-            lappend out [list $prefix$n TABLE subview V]
+            lappend out [list [cleanText $prefix$n] TABLE subview V]
             set out [concat $out [flattenLayout $sub "$prefix$n." [expr {$depth + 1}]]]
         } else {
-            lappend out [list $prefix$n [letterSqlName $l] column $l]
+            lappend out [list [cleanText $prefix$n] [letterSqlName $l] column $l]
         }
     }
     return $out

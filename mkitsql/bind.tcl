@@ -31,16 +31,16 @@ namespace eval ::mkitsql {
 # ============================================================================
 #  Catalog
 # ============================================================================
-proc ::mkitsql::dbNames {} { return [::store::tags] }
+proc ::mkitsql::dbNames {} { return [::mkitsql::db::tags] }
 
 proc ::mkitsql::findTag {name} {
-    foreach t [::store::tags] { if {[string equal -nocase $t $name]} { return $t } }
+    foreach t [::mkitsql::db::tags] { if {[string equal -nocase $t $name]} { return $t } }
     return ""
 }
 
 # Case-insensitive view lookup in one database.  Exact match wins.
 proc ::mkitsql::findView {tag name} {
-    set views [::store::views $tag]
+    set views [::mkitsql::db::views $tag]
     if {[lsearch -exact $views $name] >= 0} { return $name }
     set hits {}
     foreach v $views { if {[string equal -nocase $v $name]} { lappend hits $v } }
@@ -54,7 +54,7 @@ proc ::mkitsql::findView {tag name} {
 # Resolve a (possibly db-qualified) table name to {tag view}.
 proc ::mkitsql::resolveTable {parts} {
     variable defaultDb
-    set tags [::store::tags]
+    set tags [::mkitsql::db::tags]
     if {![llength $tags]} { fail "No database is open." }
     if {[llength $parts] == 2} {
         set tag [findTag [lindex $parts 0]]
@@ -63,7 +63,7 @@ proc ::mkitsql::resolveTable {parts} {
         }
         set v [findView $tag [lindex $parts 1]]
         if {$v eq ""} {
-            fail "Database '$tag' has no table '[lindex $parts 1]'.  Tables: [join [::store::views $tag] {, }]"
+            fail "Database '$tag' has no table '[lindex $parts 1]'.  Tables: [join [::mkitsql::db::views $tag] {, }]"
         }
         return [list $tag $v]
     }
@@ -84,7 +84,7 @@ proc ::mkitsql::resolveTable {parts} {
         fail "Table '$name' exists in several databases ([join $tl {, }]).  Qualify it, e.g. [lindex $tl 0].$name"
     }
     set avail {}
-    foreach t $tags { foreach v [::store::views $t] { lappend avail $v } }
+    foreach t $tags { foreach v [::mkitsql::db::views $t] { lappend avail $v } }
     fail "Unknown table '$name'.  Tables: [expr {[llength $avail] ? [join $avail {, }] : {(none)}}]"
 }
 
@@ -92,7 +92,7 @@ proc ::mkitsql::resolveTable {parts} {
 proc ::mkitsql::walkSubs {path layout label subs} {
     foreach s $subs {
         lassign $s idx sub
-        set n [::store::size $path]
+        set n [::mkitsql::db::size $path]
         if {$idx >= $n} { fail "Row $idx does not exist in '$label' (it has $n rows)" }
         set found ""
         foreach c $layout {
@@ -353,7 +353,7 @@ proc ::mkitsql::bindSource {node} {
             # ---- a real table
             lassign [resolveTable $parts] tag view
             set path $tag.$view
-            set layout [::store::layout $path]
+            set layout [::mkitsql::db::layout $path]
             set label $view
             if {[llength $subs]} {
                 lassign [walkSubs $path $layout $label $subs] path layout label
