@@ -30,7 +30,7 @@ def make_setup(rng):
 
 # ---------------------------------------------------------------- query generator
 class Gen:
-    def __init__(self, rng): self.r = rng
+    def __init__(self, rng, kind="basic"): self.r = rng; self.kind = kind
     def pick(self, *a): return self.r.choice(a)
 
     def intx(self, d=0):
@@ -101,8 +101,61 @@ class Gen:
         if k == 6: return "MAX(%s)" % c
         return "SUM(%s * 2)" % c
 
+    def frame(self, ordcol):
+        r = self.r
+        mode = r.choice(["ROWS", "ROWS", "GROUPS", "RANGE"])
+        def b(kind):
+            if mode == "RANGE" and ordcol not in ("id", "x", "g"):
+                return r.choice(["UNBOUNDED %s" % kind, "CURRENT ROW"])
+            return r.choice(["UNBOUNDED %s" % kind, "CURRENT ROW", "%d %s" % (r.randint(0, 3), kind)])
+        a, z = b("PRECEDING"), b("FOLLOWING")
+        if a.startswith("UNBOUNDED F") or a.startswith("CURRENT") and False: a = "CURRENT ROW"
+        # keep start <= end
+        if z.endswith("PRECEDING"): z = "CURRENT ROW"
+        if a.endswith("FOLLOWING"): a = "CURRENT ROW"
+        if a == "CURRENT ROW" and z.endswith("PRECEDING"): z = "CURRENT ROW"
+        return "%s BETWEEN %s AND %s" % (mode, a, z)
+
+    def winspec(self):
+        r = self.r
+        part = r.choice(["", "PARTITION BY g", "PARTITION BY g % 2", "PARTITION BY s"])
+        ordcol = r.choice(["id", "x", "g", "s", "id DESC", "x DESC"])
+        order = "ORDER BY %s" % ordcol + ("" if ordcol == "id" or ordcol == "id DESC" else ", id")
+        return part, ordcol.split()[0], order
+
+    def window_query(self):
+        r = self.r
+        part, oc, order = self.winspec()
+        base = (part + " " + order).strip()
+        k = r.randint(0, 9)
+        if k == 0:
+            fn = r.choice(["ROW_NUMBER()", "RANK()", "DENSE_RANK()", "PERCENT_RANK()", "CUME_DIST()", "NTILE(%d)" % r.randint(1, 7)])
+            o = "ORDER BY %s" % oc if fn != "ROW_NUMBER()" and fn[:5] != "NTILE" else order
+            return "SELECT id, %s OVER (%s %s) FROM t1 ORDER BY id" % (fn, part, o)
+        if k == 1:
+            fn = r.choice(["LAG", "LEAD"])
+            args = r.choice(["x", "id", "s", "x, 2", "id, 1, -1", "s, 2, 'none'"])
+            return "SELECT id, %s(%s) OVER (%s) FROM t1 ORDER BY id" % (fn, args, base)
+        if k == 2:
+            fn = r.choice(["FIRST_VALUE", "LAST_VALUE"])
+            fr = (" " + self.frame(oc)) if r.random() < .6 else ""
+            return "SELECT id, %s(%s) OVER (%s%s) FROM t1 ORDER BY id" % (fn, r.choice(["x", "id", "s"]), base, fr)
+        if k == 3:
+            fr = (" " + self.frame(oc)) if r.random() < .6 else ""
+            return "SELECT id, NTH_VALUE(%s, %d) OVER (%s%s) FROM t1 ORDER BY id" % (r.choice(["x", "s"]), r.randint(1, 4), base, fr)
+        if k <= 6:
+            agg = r.choice(["SUM(x)", "SUM(id)", "AVG(x)", "MIN(x)", "MAX(s)", "COUNT(*)", "COUNT(x)", "MIN(s)", "MAX(id)"])
+            fr = (" " + self.frame(oc)) if r.random() < .7 else ""
+            return "SELECT id, %s OVER (%s%s) FROM t1%s ORDER BY id" % (agg, base, fr, (" WHERE " + self.cond()) if r.random() < .3 else "")
+        if k == 7:
+            return "SELECT id, SUM(id) OVER w, COUNT(*) OVER (w ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) FROM t1 WINDOW w AS (%s) ORDER BY id" % base
+        if k == 8:
+            return "SELECT g, SUM(x), RANK() OVER (ORDER BY SUM(x) DESC), SUM(SUM(x)) OVER (ORDER BY g), COUNT(*) OVER () FROM t1 GROUP BY g ORDER BY g"
+        return "SELECT id, ROW_NUMBER() OVER (%s), SUM(x) OVER (PARTITION BY g), ROW_NUMBER() OVER (ORDER BY id DESC) FROM t1 WHERE x > 0 ORDER BY id" % base
+
     def query(self):
         r = self.r
+        if self.kind == "window": return self.window_query()
         k = r.randint(0, 12)
         W = lambda: (" WHERE " + self.cond()) if r.random() < .7 else ""
         if k <= 2:
@@ -157,7 +210,7 @@ def normrows(rows, ordered):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--n", type=int, default=3000); ap.add_argument("--seed", type=int, default=1)
-    ap.add_argument("--show", type=int, default=15); ap.add_argument("--file")
+    ap.add_argument("--show", type=int, default=15); ap.add_argument("--file"); ap.add_argument("--kind", default="basic")
     ap.add_argument("--setup-only-sqlite", action="store_true")
     a = ap.parse_args()
     rng = random.Random(a.seed)
@@ -165,7 +218,7 @@ def main():
     if a.file:
         queries = [l.strip() for l in open(a.file, encoding="utf-8") if l.strip() and not l.startswith("--")]
     else:
-        g = Gen(rng); seen = set(); queries = []
+        g = Gen(rng, a.kind); seen = set(); queries = []
         while len(queries) < a.n:
             q = g.query()
             if q not in seen: seen.add(q); queries.append(q)
@@ -181,20 +234,20 @@ def main():
     con.execute("PRAGMA case_sensitive_like=ON")
     for s in setup:
         con.execute(s.replace("DOUBLE PRECISION", "REAL").replace("VARCHAR(30)", "TEXT"))
-    ok = bad = 0; mism = []; rej_mine = []; rej_sql = []
+    ok = bad = both = 0; mism = []; rej_mine = []; rej_sql = []
     for q, m in zip(queries, mine):
         try:
             sres = con.execute(q).fetchall(); serr = None
         except Exception as e:
             sres = None; serr = str(e)
-        if not m["ok"] and serr is not None: ok += 1; continue          # both reject
+        if not m["ok"] and serr is not None: both += 1; continue          # both reject
         if not m["ok"]: rej_mine.append((q, m["err"])); continue
         if serr is not None: rej_sql.append((q, serr)); continue
         ordered = "ORDER BY" in q.upper()
         x, y = normrows(m["rows"], ordered), normrows(sres, ordered)
         if x == y: ok += 1
         else: bad += 1; mism.append((q, x[:6], y[:6], len(x), len(y)))
-    print("queries: %d   agree: %d   MISMATCH: %d   rejected only by mkit-sql: %d   rejected only by SQLite: %d" % (len(queries), ok, bad, len(rej_mine), len(rej_sql)))
+    print("queries: %d   agree: %d (+%d rejected by both)   MISMATCH: %d   rejected only by mkit-sql: %d   rejected only by SQLite: %d" % (len(queries), ok, both, bad, len(rej_mine), len(rej_sql)))
     for q, x, y, nx, ny in mism[:a.show]:
         print("\nMISMATCH:", q); print("   mkit-sql (%d rows): %s" % (nx, x)); print("   sqlite   (%d rows): %s" % (ny, y))
     for q, e in rej_mine[:a.show]:

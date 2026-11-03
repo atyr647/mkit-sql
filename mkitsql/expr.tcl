@@ -553,6 +553,7 @@ proc ::mkitsql::cg {node ctx} {
         case { return [cgCase $node $ctx] }
         cast { return [cgCast $node $ctx] }
         func { return [cgFunc $node $ctx] }
+        win { fail "Window functions are only allowed in the select list and in ORDER BY" }
     }
     error "cg: unknown node [lindex $node 0]"
 }

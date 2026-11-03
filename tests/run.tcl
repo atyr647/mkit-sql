@@ -240,6 +240,83 @@ check union_null [rows "SELECT NULL UNION SELECT NULL"] {NULL}
 check paren_query [rows "(SELECT 1) UNION (SELECT 2) ORDER BY 1"] {1 2}
 
 # ============================================================================
+#  Text that merely LOOKS like a number must come back untouched
+#  (Tcl's expr rewrites "007" -> 7 and "1e3" -> 1000.0; the engine must never do that)
+# ============================================================================
+q "CREATE TABLE codes (id INT, code VARCHAR(20), grp VARCHAR(20))"
+foreach {i c g} {1 007 1e3 2 1e3 007 3 0x10 007 4 { 5 } 1e3 5 +5 007 6 abc 007 7 00 1e3} {
+    q "INSERT INTO codes VALUES ($i, '$c', '$g')"
+}
+set raw [list 007 1e3 0x10 { 5 } +5 abc 00]
+check lit_text   [col0 "SELECT code FROM codes ORDER BY id"] $raw
+check lit_group  [lsort [col0 "SELECT grp FROM codes GROUP BY grp"]] [lsort {1e3 007}]
+check lit_group2 [lsort [col0 "SELECT code FROM codes GROUP BY code"]] [lsort $raw]
+check lit_distinct [lsort [col0 "SELECT DISTINCT code FROM codes"]] [lsort $raw]
+check lit_order  [col0 "SELECT code FROM codes ORDER BY code"] [lsort -ascii $raw]
+check lit_orderd [col0 "SELECT code FROM codes ORDER BY code DESC"] [lsort -ascii -decreasing $raw]
+check lit_minmax [rows "SELECT MIN(code), MAX(code) FROM codes"] [list [list { 5 } abc]]
+check lit_null_row [rows "SELECT code, NULL FROM codes WHERE id = 1"] {{007 NULL}}
+check lit_null_row2 [rows "SELECT code, d.id FROM codes c LEFT JOIN departments d ON d.id = c.id + 100 WHERE c.id = 2"] {{1e3 NULL}}
+check lit_case  [col0 "SELECT CASE WHEN id = 1 THEN code ELSE grp END FROM codes WHERE id IN (1, 2) ORDER BY id"] {007 007}
+check lit_coalesce [col0 "SELECT COALESCE(NULLIF(code, 'zz'), 'q') FROM codes WHERE id = 1"] {007}
+check lit_name  [dict get [q "SELECT 1e3, 007 FROM codes LIMIT 1"] cols] {1e3 007}
+check lit_in    [col0 "SELECT id FROM codes WHERE code IN ('007', '1e3') ORDER BY id"] {1 2}
+check lit_eq    [col0 "SELECT id FROM codes WHERE code = '007'"] {1}
+check lit_strcmp [col0 "SELECT id FROM codes WHERE code = '7'"] {}
+check lit_union [lsort [col0 "SELECT code FROM codes WHERE id <= 2 UNION SELECT '1e3'"]] [lsort {007 1e3}]
+q "DROP TABLE codes"
+
+# ============================================================================
+#  Window functions
+# ============================================================================
+set V "(VALUES (1, 'a'), (2, 'a'), (2, 'b'), (5, 'b'), (7, 'b')) t(x, p)"
+check win_rownum  [col0 "SELECT ROW_NUMBER() OVER (ORDER BY x, p) FROM $V ORDER BY 1"] {1 2 3 4 5}
+check win_rank    [rows "SELECT x, RANK() OVER (ORDER BY x), DENSE_RANK() OVER (ORDER BY x) FROM $V ORDER BY x, p"] {{1 1 1} {2 2 2} {2 2 2} {5 4 3} {7 5 4}}
+check win_running [rows "SELECT x, SUM(x) OVER (ORDER BY x) FROM $V ORDER BY x, p"] {{1 1} {2 5} {2 5} {5 10} {7 17}}
+check win_rows    [rows "SELECT x, SUM(x) OVER (ORDER BY x, p ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) FROM $V ORDER BY x, p"] {{1 1} {2 3} {2 4} {5 7} {7 12}}
+check win_range   [rows "SELECT x, COUNT(*) OVER (ORDER BY x RANGE BETWEEN 1 PRECEDING AND 1 FOLLOWING) FROM $V ORDER BY x, p"] {{1 3} {2 3} {2 3} {5 1} {7 1}}
+check win_groups  [rows "SELECT x, SUM(x) OVER (ORDER BY x GROUPS BETWEEN 1 PRECEDING AND CURRENT ROW) FROM $V ORDER BY x, p"] {{1 1} {2 5} {2 5} {5 9} {7 12}}
+check win_part    [rows "SELECT p, x, SUM(x) OVER (PARTITION BY p) FROM $V ORDER BY p, x"] {{a 1 3} {a 2 3} {b 2 14} {b 5 14} {b 7 14}}
+check win_whole   [col0 "SELECT COUNT(*) OVER () FROM $V"] {5 5 5 5 5}
+check win_lag     [rows "SELECT x, LAG(x) OVER (ORDER BY x, p), LEAD(x, 2, -1) OVER (ORDER BY x, p) FROM $V ORDER BY x, p"] {{1 NULL 2} {2 1 5} {2 2 7} {5 2 -1} {7 5 -1}}
+check win_firstlast [rows "SELECT x, FIRST_VALUE(x) OVER (PARTITION BY p ORDER BY x), LAST_VALUE(x) OVER (PARTITION BY p ORDER BY x ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) FROM $V ORDER BY p, x"] {{1 1 2} {2 1 2} {2 2 7} {5 2 7} {7 2 7}}
+check win_lastdefault [col0 "SELECT LAST_VALUE(x) OVER (ORDER BY x) FROM $V ORDER BY x, p"] {1 2 2 5 7}
+check win_nth     [col0 "SELECT NTH_VALUE(x, 2) OVER (ORDER BY x, p) FROM $V ORDER BY x, p"] {NULL 2 2 2 2}
+check win_ntile   [col0 "SELECT NTILE(2) OVER (ORDER BY x, p) FROM $V ORDER BY x, p"] {1 1 1 2 2}
+check win_pct     [col0 "SELECT PERCENT_RANK() OVER (ORDER BY x) FROM $V ORDER BY x, p"] {0.0 0.25 0.25 0.75 1.0}
+check win_cume    [col0 "SELECT CUME_DIST() OVER (ORDER BY x) FROM $V ORDER BY x, p"] {0.2 0.6 0.6 0.8 1.0}
+check win_avg_min [rows "SELECT p, MIN(x) OVER (PARTITION BY p), MAX(x) OVER (PARTITION BY p), AVG(x) OVER (PARTITION BY p) FROM $V WHERE x = 1 OR x = 7 ORDER BY p"] {{a 1 1 1.0} {b 7 7 7.0}}
+check win_strmax  [rows "SELECT MAX(p) OVER () FROM $V LIMIT 1"] {b}
+check win_named   [rows "SELECT x, SUM(x) OVER w FROM $V WINDOW w AS (ORDER BY x, p) ORDER BY x, p"] {{1 1} {2 3} {2 5} {5 10} {7 17}}
+check win_named2  [rows "SELECT x, SUM(x) OVER (w ROWS 1 PRECEDING) FROM $V WINDOW w AS (ORDER BY x, p) ORDER BY x, p"] {{1 1} {2 3} {2 4} {5 7} {7 12}}
+check win_expr    [col0 "SELECT SUM(x) OVER (ORDER BY x, p) * 10 FROM $V ORDER BY x, p"] {10 30 50 100 170}
+check win_in_order [col0 "SELECT x FROM $V ORDER BY ROW_NUMBER() OVER (ORDER BY x DESC, p)"] {7 5 2 2 1}
+check win_distinct [rows "SELECT DISTINCT p, COUNT(*) OVER (PARTITION BY p) FROM $V ORDER BY p"] {{a 2} {b 3}}
+check win_group   [rows "SELECT dept, COUNT(*), RANK() OVER (ORDER BY SUM(salary) DESC) FROM employees GROUP BY dept ORDER BY dept"] [
+    set tots {} ; foreach r $emp { set d [lindex $r 3] ; dict set tots $d [expr {[dict exists $tots $d] ? [dict get $tots $d] + [lindex $r 2] : [lindex $r 2]}] }
+    set res {} ; foreach d [lsort -integer [dict keys $tots]] {
+        set rk 1 ; foreach e [dict keys $tots] { if {[dict get $tots $e] > [dict get $tots $d]} { incr rk } }
+        lappend res [list $d [dict size [dict create]] $rk] }
+    lmap_ $res {r {lindex $r 0}} ; set out {} ; foreach r $res { lappend out [list [lindex $r 0] 4 [lindex $r 2]] } ; set out]
+check win_empty   [rows "SELECT ROW_NUMBER() OVER (ORDER BY id) FROM employees WHERE id > 1000"] {}
+check win_subq    [col0 "SELECT n FROM (SELECT x, ROW_NUMBER() OVER (ORDER BY x, p) AS n FROM $V) q WHERE n > 3 ORDER BY n"] {4 5}
+check win_text_order [col0 "SELECT p || x FROM $V ORDER BY ROW_NUMBER() OVER (ORDER BY p DESC, x DESC)"] {b7 b5 b2 a2 a1}
+check win_e_where [errmsg "SELECT x FROM $V WHERE ROW_NUMBER() OVER () = 1"] {Window functions are not allowed in WHERE}
+check win_e_nest  [errmsg "SELECT SUM(ROW_NUMBER() OVER ()) OVER () FROM $V"] {Window function calls cannot be nested}
+check win_e_name  [string match "Unknown window 'zz'*" [errmsg "SELECT SUM(x) OVER zz FROM $V"]] 1
+check win_e_noover [errmsg "SELECT ROW_NUMBER() FROM $V"] {ROW_NUMBER() is a window function and needs an OVER clause}
+check win_e_notfn [errmsg "SELECT UPPER(p) OVER () FROM $V"] {UPPER() is not a window function}
+check win_e_frame [errmsg "SELECT SUM(x) OVER (ORDER BY x ROWS BETWEEN CURRENT ROW AND 1 PRECEDING) FROM $V"] {Invalid window frame: the start must not come after the end}
+check win_e_off   [errmsg "SELECT SUM(x) OVER (ORDER BY x ROWS 1.5 PRECEDING) FROM $V"] {A ROWS / GROUPS frame offset must be a whole number}
+check win_e_range [errmsg "SELECT SUM(x) OVER (ORDER BY x, p RANGE 1 PRECEDING) FROM $V"] {A RANGE frame with an offset needs exactly one ORDER BY column}
+check win_e_args  [errmsg "SELECT NTILE() OVER () FROM $V"] {Window function NTILE() takes 1 argument, not 0}
+check win_e_group [string match "Window functions are not allowed in GROUP BY" [errmsg "SELECT 1 FROM $V GROUP BY ROW_NUMBER() OVER ()"]] 1
+check win_e_dist  [string match "*DISTINCT*" [errmsg "SELECT COUNT(DISTINCT x) OVER () FROM $V"]] 1
+check win_filter  [rows "SELECT COUNT(*) FILTER (WHERE x > 1), SUM(x) FILTER (WHERE p = 'b'), MAX(x) FILTER (WHERE x < 5) FROM $V"] {{4 14 2}}
+check win_filter_g [rows "SELECT p, COUNT(*) FILTER (WHERE x = 2) FROM $V GROUP BY p ORDER BY p"] {{a 1} {b 1}}
+check win_filter_w [col0 "SELECT SUM(x) FILTER (WHERE x > 1) OVER (ORDER BY x, p) FROM $V ORDER BY x, p"] {NULL 2 4 9 16}
+
+# ============================================================================
 #  Subviews (Metakit's nested tables)
 # ============================================================================
 set r [q "SELECT id, skills FROM employees WHERE id = 1"]
@@ -462,7 +539,6 @@ check num_cond0 [rows "SELECT 1 WHERE 0"] {}
 catch {mkitsql::parseScript "SELECT id FROM employees WHERE id = = 3"} m opts
 check e_pos [dict get $opts -errorcode] {MKQL SYNTAX 36 1}
 check e_script [llength [mkitsql::parseScript "SELECT 1; SELECT 2;; -- c\n SELECT 3 /* x */"]] 3
-check e_window [string match "*not supported*" [errmsg "SELECT ROW_NUMBER() OVER (ORDER BY id) FROM employees"]] 1
 
 # ============================================================================
 #  Read-only databases

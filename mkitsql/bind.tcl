@@ -18,6 +18,7 @@ namespace eval ::mkitsql {
     variable ctes {}           ;# stack of {name cols query} visible CTEs (innermost first)
     variable refLog {}         ;# stack of lists of {level srcId} (outer references)
     variable params {}         ;# dict: 1-based index or name -> value
+    variable curWindows {}     ;# named windows (WINDOW clause) of the SELECT being bound
     variable defaultDb ""
     variable fromSoFar {}      ;# sources bound so far in the FROM clause being bound
     variable curCol "%cur"     ;# hidden column holding a row's cursor path
@@ -196,6 +197,7 @@ proc ::mkitsql::bindFrom {node} {
                 set scopes $savedScopes
                 if {$rc} { return -options $opts $bon }
                 if {[hasAgg $bon]} { fail "Aggregate functions are not allowed in JOIN conditions" }
+                if {[hasWin $bon]} { fail "Window functions are not allowed in JOIN conditions" }
             }
             return [list join $type $bl $br $bon]
         }
@@ -277,7 +279,7 @@ proc ::mkitsql::bindSource {node} {
                             }
                             set outNames $ccols
                         }
-                        return [newSource derived [expr {$alias eq "" ? $cname : $alias}] \
+                        return [newSource derived [pickName $alias $cname] \
                             [derivedCols $outNames [dict get $bq outTypes] $bq] bq $bq]
                     }
                 }
@@ -293,7 +295,7 @@ proc ::mkitsql::bindSource {node} {
                         }
                         set col [lindex [dict get $s cols] $ci]
                         noteRef 0 [dict get $s id] $curCol
-                        return [newSource lateral [expr {$alias eq "" ? [lindex $col 0] : $alias}] \
+                        return [newSource lateral [pickName $alias [lindex $col 0]] \
                             [layoutCols [lindex $col 4]] parent [dict get $s id] sub [lindex $col 0] \
                             layout [lindex $col 4]]
                     }
@@ -310,13 +312,18 @@ proc ::mkitsql::bindSource {node} {
             if {[llength $subs]} {
                 lassign [walkSubs $path $layout $label $subs] path layout label
             }
-            set name [expr {$alias ne "" ? $alias : [lindex [split $label .] 0]}]
+            set name [pickName $alias [lindex [split $label .] 0]]
             if {$alias eq "" && [llength $subs]} { set name [lindex $subs end 1] }
             return [newSource table $name [layoutCols $layout] path $path tag $tag layout $layout label $label]
         }
     }
     error "bindSource"
 }
+
+# NOTE: never route data or names through  expr {c ? $a : $b}  -- expr rewrites numeric-looking
+# strings ("007" -> 7, "1e3" -> 1000.0).  These helpers use plain `if`.
+proc ::mkitsql::pickName {alias default} { if {$alias ne ""} { return $alias } ; return $default }
+proc ::mkitsql::drillName {col} { if {[lindex $col 3]} { return [lindex $col 0] } ; return 0 }
 
 proc ::mkitsql::derivedCols {names types bq} {
     set cols {} ; set i 0
@@ -340,7 +347,7 @@ proc ::mkitsql::infoSource {which alias} {
         }
         default { fail "Unknown information_schema table '$which'.  Available: tables, columns" }
     }
-    return [newSource info [expr {$alias eq "" ? $which : $alias}] $cols which $which]
+    return [newSource info [pickName $alias $which] $cols which $which]
 }
 
 # ============================================================================
@@ -501,6 +508,7 @@ proc ::mkitsql::bx {node} {
             return [list case [expr {$operand eq "" ? "" : [bx $operand]}] $bw [bx $else]]
         }
         cast { return [list cast [bx [lindex $node 1]] [lindex $node 2]] }
+        win { return [bindWindow $node] }
         func {
             lassign $node _ name distinct args
             set ba {}
@@ -541,6 +549,115 @@ proc ::mkitsql::bindSubquery {q} {
     return [list $bq $outer]
 }
 
+# ---- window functions -------------------------------------------------------
+# argument count limits  {min max}
+proc ::mkitsql::winArity {name} {
+    switch -- $name {
+        ROW_NUMBER - RANK - DENSE_RANK - PERCENT_RANK - CUME_DIST { return {0 0} }
+        NTILE - FIRST_VALUE - LAST_VALUE - COUNT - SUM - AVG - MIN - MAX { return {1 1} }
+        LAG - LEAD { return {1 3} }
+        NTH_VALUE { return {2 2} }
+        STRING_AGG - GROUP_CONCAT { return {1 2} }
+    }
+    return {0 0}
+}
+
+proc ::mkitsql::winType {node} {
+    lassign $node _ name distinct args spec
+    switch -- $name {
+        ROW_NUMBER - RANK - DENSE_RANK - NTILE - COUNT { return int }
+        PERCENT_RANK - CUME_DIST - AVG { return real }
+        SUM {
+            set t [dryType [lindex $args 0]]
+            return [expr {$t in {int bool} ? "int" : "real"}]
+        }
+        STRING_AGG - GROUP_CONCAT { return text }
+    }
+    return [dryType [lindex $args 0]]
+}
+
+# Merge a named window into a spec (parser form) and return the effective spec.
+proc ::mkitsql::resolveWindowSpec {spec {depth 0}} {
+    variable curWindows
+    set base [dict get $spec base]
+    if {$base eq ""} { return $spec }
+    if {$depth > 10} { fail "Window definitions refer to each other in a loop" }
+    set key [string tolower $base]
+    if {![info exists curWindows] || ![dict exists $curWindows $key]} {
+        fail "Unknown window '$base'.  Define it with WINDOW $base AS (...)"
+    }
+    set def [resolveWindowSpec [dict get $curWindows $key] [expr {$depth + 1}]]
+    if {[llength [dict get $spec partition]]} { fail "Window '$base' already defines PARTITION BY" }
+    if {[llength [dict get $spec order]] && [llength [dict get $def order]]} { fail "Window '$base' already defines ORDER BY" }
+    if {[llength [dict get $spec frame]] && [llength [dict get $def frame]]} { fail "Window '$base' already defines a frame" }
+    set out $def
+    if {[llength [dict get $spec order]]} { dict set out order [dict get $spec order] }
+    if {[llength [dict get $spec frame]]} { dict set out frame [dict get $spec frame] }
+    dict set out base ""
+    return $out
+}
+
+proc ::mkitsql::bindFrameBound {b mode} {
+    set kind [lindex $b 0]
+    if {$kind in {preceding following}} {
+        set e [bx [lindex $b 1]]
+        if {[lindex $e 0] ne "lit" || [lindex $e 1] ni {int real} || [lindex $e 2] < 0} {
+            fail "A window frame offset must be a non-negative number"
+        }
+        if {$mode in {rows groups} && ![string is integer -strict [lindex $e 2]]} {
+            fail "A ROWS / GROUPS frame offset must be a whole number"
+        }
+        return [list $kind [lindex $e 2]]
+    }
+    return [list $kind {}]
+}
+
+proc ::mkitsql::bindWindow {node} {
+    variable aggs ; variable winFuncs
+    lassign $node _ name distinct args spec
+    if {$distinct} { fail "DISTINCT is not supported inside window functions" }
+    lassign [winArity $name] mn mx
+    set na [llength $args]
+    if {[lindex $args 0 0] eq "star"} {
+        if {$name ne "COUNT"} { fail "'*' is only allowed in COUNT(*)" }
+    } elseif {$na < $mn || $na > $mx} {
+        fail "Window function ${name}() takes [expr {$mn == $mx ? $mn : "$mn to $mx"}] argument[expr {$mx == 1 ? {} : {s}}], not $na"
+    }
+    set ba {}
+    foreach a $args { lappend ba [expr {[lindex $a 0] eq "star" ? $a : [bx $a]}] }
+    foreach a $ba { if {[lindex $a 0] ne "star" && [hasWin $a]} { fail "Window function calls cannot be nested" } }
+    set spec [resolveWindowSpec $spec]
+    set part {}
+    foreach e [dict get $spec partition] {
+        set b [bx $e]
+        if {[hasWin $b]} { fail "Window function calls cannot be nested" }
+        lappend part $b
+    }
+    set ord {}
+    foreach o [dict get $spec order] {
+        lassign $o e dir nulls
+        set b [bx $e]
+        if {[hasWin $b]} { fail "Window function calls cannot be nested" }
+        lappend ord [list $b $dir $nulls]
+    }
+    set frame [dict get $spec frame]
+    if {[llength $frame]} {
+        lassign $frame mode b1 b2
+        set b1 [bindFrameBound $b1 $mode] ; set b2 [bindFrameBound $b2 $mode]
+        # start cannot come after end
+        set rank {unbounded_preceding 0 preceding 1 current 2 following 3 unbounded_following 4}
+        if {[dict get $rank [lindex $b1 0]] > [dict get $rank [lindex $b2 0]] ||
+            [lindex $b1 0] eq "unbounded_following" || [lindex $b2 0] eq "unbounded_preceding"} {
+            fail "Invalid window frame: the start must not come after the end"
+        }
+        if {$mode eq "range" && ([lindex $b1 0] in {preceding following} || [lindex $b2 0] in {preceding following})} {
+            if {[llength $ord] != 1} { fail "A RANGE frame with an offset needs exactly one ORDER BY column" }
+        }
+        set frame [list $mode $b1 $b2]
+    }
+    return [list win $name 0 $ba [dict create base "" partition $part order $ord frame $frame]]
+}
+
 # ---- tree utilities --------------------------------------------------------
 proc ::mkitsql::hasAgg {node} {
     variable aggs
@@ -552,6 +669,10 @@ proc ::mkitsql::hasAgg {node} {
         }
         lit - ref - slot - insub - exists - sub - star {
             if {[lindex $node 0] eq "insub"} { return [hasAgg [lindex $node 1]] }
+            return 0
+        }
+        win {
+            foreach c [exprChildren $node] { if {[hasAgg $c]} { return 1 } }
             return 0
         }
         un { return [hasAgg [lindex $node 2]] }
@@ -583,6 +704,18 @@ proc ::mkitsql::hasAgg {node} {
 # (Subquery nodes are not descended into; only IN's left operand is mapped.)
 proc ::mkitsql::mapChildren {node fn} {
     switch -- [lindex $node 0] {
+        win {
+            lassign $node t name distinct args spec
+            set na {}
+            foreach a $args { lappend na [expr {[lindex $a 0] eq "star" ? $a : [{*}$fn $a]}] }
+            set np {}
+            foreach e [dict get $spec partition] { lappend np [{*}$fn $e] }
+            set no {}
+            foreach o [dict get $spec order] { lappend no [lreplace $o 0 0 [{*}$fn [lindex $o 0]]] }
+            dict set spec partition $np
+            dict set spec order $no
+            return [list $t $name $distinct $na $spec]
+        }
         lit - ref - slot - exists - sub { return $node }
         un { return [list un [lindex $node 1] [{*}$fn [lindex $node 2]]] }
         bin { return [list bin [lindex $node 1] [{*}$fn [lindex $node 2]] [{*}$fn [lindex $node 3]]] }
@@ -623,9 +756,24 @@ proc ::mkitsql::mapChildren {node fn} {
     error "mapChildren: [lindex $node 0]"
 }
 
+# Does the expression contain a window function call?  (subqueries are not entered)
+proc ::mkitsql::hasWin {node} {
+    if {[lindex $node 0] eq "win"} { return 1 }
+    foreach c [exprChildren $node] { if {[hasWin $c]} { return 1 } }
+    return 0
+}
+
 # The immediate child expressions of a bound node (subqueries are not entered).
 proc ::mkitsql::exprChildren {node} {
     switch -- [lindex $node 0] {
+        win {
+            set l {}
+            foreach a [lindex $node 3] { if {[lindex $a 0] ne "star"} { lappend l $a } }
+            set spec [lindex $node 4]
+            foreach e [dict get $spec partition] { lappend l $e }
+            foreach o [dict get $spec order] { lappend l [lindex $o 0] }
+            return $l
+        }
         un { return [list [lindex $node 2]] }
         bin { return [list [lindex $node 2] [lindex $node 3]] }
         isnull - istf - cast - insub { return [list [lindex $node 1]] }
@@ -826,6 +974,7 @@ proc ::mkitsql::replaceAggs {node} {
     if {[lindex $node 0] eq "func" && [lsearch -exact $aggs [lindex $node 1]] >= 0} {
         return [list lit [aggType $node] x]
     }
+    if {[lindex $node 0] eq "win"} { return [list lit [winType $node] x] }
     return [mapChildren $node ::mkitsql::replaceAggs]
 }
 
@@ -871,6 +1020,15 @@ proc ::mkitsql::refreshTree {t srcs} {
 }
 
 proc ::mkitsql::bindSelectExprs {sel order srcs bfrom} {
+    variable curWindows
+    set savedWindows $curWindows
+    set curWindows [expr {[dict exists $sel windows] ? [dict get $sel windows] : [dict create]}]
+    set rc [catch {bindSelectExprs2 $sel $order $srcs $bfrom} res opts]
+    set curWindows $savedWindows
+    return -options $opts $res
+}
+
+proc ::mkitsql::bindSelectExprs2 {sel order srcs bfrom} {
     # items (with * expansion)
     set items {} ; set names {} ; set types {} ; set letters {} ; set drills {}
     foreach it [dict get $sel items] {
@@ -888,7 +1046,7 @@ proc ::mkitsql::bindSelectExprs {sel order srcs bfrom} {
                     lappend names [lindex $c 0]
                     lappend types [lindex $c 1]
                     lappend letters [lindex $c 2]
-                    lappend drills [expr {[lindex $c 3] ? [lindex $c 0] : 0}]
+                    lappend drills [drillName $c]
                 }
             }
             if {!$matched} {
@@ -900,7 +1058,7 @@ proc ::mkitsql::bindSelectExprs {sel order srcs bfrom} {
         set b [bx $e]
         lappend items $b
         set nm $alias
-        if {$nm eq ""} { set nm [expr {[lindex $e 0] eq "col" ? [lindex $e 2] : $text}] }
+        if {$nm eq ""} { if {[lindex $e 0] eq "col"} { set nm [lindex $e 2] } else { set nm $text } }
         lappend names $nm
         lappend types "?"
         if {[lindex $b 0] eq "ref"} {
@@ -908,7 +1066,7 @@ proc ::mkitsql::bindSelectExprs {sel order srcs bfrom} {
             set ci [expr {$s eq "" ? -1 : [srcColIndex $s [lindex $b 3]]}]
             if {$ci >= 0} {
                 set col [lindex [dict get $s cols] $ci]
-                lappend letters [lindex $col 2] ; lappend drills [expr {[lindex $col 3] ? [lindex $col 0] : 0}]
+                lappend letters [lindex $col 2] ; lappend drills [drillName $col]
             } else { lappend letters "" ; lappend drills 0 }
         } else { lappend letters "" ; lappend drills 0 }
     }
@@ -922,6 +1080,7 @@ proc ::mkitsql::bindSelectExprs {sel order srcs bfrom} {
     if {$where ne ""} {
         set bwhere [bx $where]
         if {[hasAgg $bwhere]} { fail "Aggregate functions are not allowed in WHERE; use HAVING" }
+        if {[hasWin $bwhere]} { fail "Window functions are not allowed in WHERE" }
     }
     # GROUP BY (ordinals and output aliases allowed)
     set group {}
@@ -944,12 +1103,16 @@ proc ::mkitsql::bindSelectExprs {sel order srcs bfrom} {
         }
         set bg [bx $g]
         if {[hasAgg $bg]} { fail "Aggregate functions are not allowed in GROUP BY" }
+        if {[hasWin $bg]} { fail "Window functions are not allowed in GROUP BY" }
         lappend group $bg
     }
     # HAVING
     set having [dict get $sel having]
     set bhaving ""
-    if {$having ne ""} { set bhaving [bx $having] }
+    if {$having ne ""} {
+        set bhaving [bx $having]
+        if {[hasWin $bhaving]} { fail "Window functions are not allowed in HAVING" }
+    }
     # ORDER BY
     set border {}
     foreach o $order {

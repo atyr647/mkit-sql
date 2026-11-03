@@ -130,7 +130,7 @@ proc ::mkitsql::execSelect {q} {
     foreach r $rows {
         if {[lsearch -exact $r $N] >= 0} {
             set r2 {}
-            foreach v $r { lappend r2 [expr {$v eq $N ? $nullText : $v}] }
+            foreach v $r { if {$v eq $N} { lappend r2 $nullText } else { lappend r2 $v } }
             set r $r2
         }
         if {$hasDrill} {

@@ -199,8 +199,30 @@ proc ::mkitsql::compileSelect {bs outerMaps} {
         dict set p agg [dict create gkey $gkey ng $ng aargs $aargs specs $specs]
         set ctx [dict create maps [concat [list {}] $outerMaps]]
         set items $items2 ; set having $having2 ; set order $order2
+        set baseWidth [expr {$ng + [llength $aggNodes]}]
     } else {
         set ctx $preCtx
+        set baseWidth [dict get $root width]
+    }
+
+    # ---- window functions: each call becomes a slot appended to the tuple
+    set winSpecs {}
+    set anyWin 0
+    foreach e $items { if {[hasWin $e]} { set anyWin 1 } }
+    foreach o $order { if {[lindex $o 0 0] ne "outcol" && [hasWin [lindex $o 0]]} { set anyWin 1 } }
+    if {$anyWin} {
+        variable rwWins ; variable rwBase
+        set rwWins {} ; set rwBase $baseWidth
+        set items2 {}
+        foreach e $items { lappend items2 [rwWin $e] }
+        set order2 {}
+        foreach o $order {
+            lassign $o e dir nulls
+            lappend order2 [list [expr {[lindex $e 0] eq "outcol" ? $e : [rwWin $e]}] $dir $nulls]
+        }
+        set items $items2 ; set order $order2
+        foreach w $rwWins { lappend winSpecs [compileWindow $w $ctx] }
+        dict set p windows $winSpecs
     }
     if {$having ne ""} {
         lassign [compileCond $having $ctx] hp _
@@ -231,7 +253,7 @@ proc ::mkitsql::compileSelect {bs outerMaps} {
 
     # ---- row ids for editable (plain, single-table) results
     set plain 0 ; set curPos -1 ; set source ""
-    if {![dict get $bs isAgg] && ![dict get $bs distinct] && [llength $srcs] == 1} {
+    if {![dict get $bs isAgg] && ![dict get $bs distinct] && [llength $srcs] == 1 && !$anyWin} {
         set s [lindex $srcs 0]
         if {[dict get $s kind] in {table lateral}} {
             set plain 1
@@ -243,7 +265,7 @@ proc ::mkitsql::compileSelect {bs outerMaps} {
     dict set p plain $plain
     dict set p source $source
     # may the scan stop early once enough rows were produced?
-    dict set p stoppable [expr {![dict get $bs isAgg] && ![dict get $bs distinct] && ![llength $ospec] && [llength $srcs] <= 1 && $whereProc eq ""}]
+    dict set p stoppable [expr {![dict get $bs isAgg] && ![dict get $bs distinct] && ![llength $ospec] && [llength $srcs] <= 1 && $whereProc eq "" && !$anyWin}]
     return $p
 }
 
@@ -312,6 +334,47 @@ proc ::mkitsql::hasOuterRef {node} {
     }
     foreach c [exprChildren $node] { if {[hasOuterRef $c]} { return 1 } }
     return 0
+}
+
+# ---- window rewriting ------------------------------------------------------
+proc ::mkitsql::rwWin {node} {
+    variable rwWins ; variable rwBase
+    switch -- [lindex $node 0] {
+        win {
+            set k [lsearch -exact $rwWins $node]
+            if {$k < 0} { set k [llength $rwWins] ; lappend rwWins $node }
+            return [list slot [expr {$rwBase + $k}] [winType $node]]
+        }
+        lit - slot - ref - sub - exists { return $node }
+    }
+    return [mapChildren $node ::mkitsql::rwWin]
+}
+
+# Compile one window call into a plan dict for runWindows.
+proc ::mkitsql::compileWindow {w ctx} {
+    lassign $w _ name distinct args spec
+    set part [dict get $spec partition]
+    set ords [dict get $spec order]
+    set exprs $part
+    set otypes {} ; set dirs {} ; set nulls {}
+    foreach o $ords {
+        lappend exprs [lindex $o 0]
+        lappend otypes [dryType [lindex $o 0]]
+        lappend dirs [lindex $o 1] ; lappend nulls [lindex $o 2]
+    }
+    set argNodes {}
+    set sortKind s
+    if {[lindex $args 0 0] ne "star"} {
+        foreach a $args { lappend argNodes $a }
+        if {$name in {SUM AVG} && [dryType [lindex $argNodes 0]] eq "text"} {
+            lset argNodes 0 [list cast [lindex $argNodes 0] double]
+        }
+        if {[llength $argNodes]} { set sortKind [expr {[isNumType [dryType [lindex $argNodes 0]]] ? "n" : "s"}] }
+    }
+    lassign [compileList [concat $exprs $argNodes] $ctx] wp _
+    return [dict create fn $name np [llength $part] no [llength $ords] nargs [llength $argNodes] \
+        star [expr {[lindex $args 0 0] eq "star"}] proc $wp dirs $dirs nulls $nulls otypes $otypes \
+        frame [dict get $spec frame] sortKind $sortKind]
 }
 
 # ---- FROM tree -------------------------------------------------------------
@@ -572,6 +635,7 @@ proc ::mkitsql::runSelect {p outer} {
             set rows $keep
         }
     }
+    if {[dict exists $p windows]} { set rows [runWindows [dict get $p windows] $rows $outer] }
     set items [dict get $p items]
     set order [dict get $p order]
     set norder [llength $order]
@@ -587,7 +651,7 @@ proc ::mkitsql::runSelect {p outer} {
             dict set seen $out 1
         }
         if {$norder} {
-            set ek [expr {$okeys ne "" ? [$okeys $r $outer] : {}}]
+            if {$okeys ne ""} { set ek [$okeys $r $outer] } else { set ek {} }
             set rec {}
             foreach o $order {
                 lassign $o kind idx
@@ -790,7 +854,7 @@ proc ::mkitsql::runAgg {a rows outer} {
     set gidx [dict create]
     array set S {} ; array set C {} ; array set SEEN {}
     foreach r $rows {
-        set key [expr {$ng ? [$gkey $r $outer] : ""}]
+        if {$ng} { set key [$gkey $r $outer] } else { set key "" }
         if {![dict exists $gidx $key]} {
             set gi [llength $order]
             dict set gidx $key $gi ; lappend order $key
@@ -811,7 +875,7 @@ proc ::mkitsql::runAgg {a rows outer} {
                     }
                     switch -- $kind {
                         count { incr S($gi,$k) }
-                        sum   { set S($gi,$k) [expr {$S($gi,$k) eq $N ? $v : $S($gi,$k) + $v}] }
+                        sum   { if {$S($gi,$k) eq $N} { set S($gi,$k) $v } else { set S($gi,$k) [expr {$S($gi,$k) + $v}] } }
                         avg   { set S($gi,$k) [expr {$S($gi,$k) + $v}] ; incr C($gi,$k) }
                         min {
                             if {$S($gi,$k) eq $N} { set S($gi,$k) $v } elseif {
@@ -848,7 +912,7 @@ proc ::mkitsql::runAgg {a rows outer} {
                 }
                 string_agg {
                     if {![llength $S($gi,$k)]} { lappend t $N } else {
-                        set sep [expr {[info exists C($gi,$k)] ? $C($gi,$k) : ","}]
+                        if {[info exists C($gi,$k)]} { set sep $C($gi,$k) } else { set sep "," }
                         lappend t [join $S($gi,$k) $sep]
                     }
                 }

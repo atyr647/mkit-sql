@@ -25,7 +25,7 @@ namespace eval ::mkitsql {
         ALL AND AS ASC BETWEEN BY CASE CAST CREATE CROSS DELETE DESC DISTINCT DROP ELSE END
         ESCAPE EXCEPT EXISTS FALSE FETCH FROM FULL GROUP HAVING ILIKE IN INNER INSERT INTERSECT
         INTO IS JOIN LEFT LIKE LIMIT NATURAL NOT NULL OFFSET ON OR ORDER OUTER RIGHT SELECT SET
-        TABLE THEN TRUE UNION UPDATE USING VALUES WHEN WHERE WITH
+        TABLE THEN TRUE UNION UPDATE USING VALUES WHEN WHERE WINDOW WITH
     }
     # Words the editor highlights (superset of reserved).
     variable keywords {
@@ -36,8 +36,11 @@ namespace eval ::mkitsql {
         ALTER ADD COLUMN RENAME TO IF BEGIN COMMIT ROLLBACK TRANSACTION WORK START TRUNCATE
         NULLS FIRST LAST NEXT ROW ROWS ONLY DEFAULT USE SHOW TABLES DATABASES DESCRIBE
         EXTRACT TRIM SUBSTRING POSITION FOR LEADING TRAILING BOTH TYPE DATA
+        OVER PARTITION ROWS RANGE GROUPS UNBOUNDED PRECEDING FOLLOWING CURRENT FILTER WINDOW RECURSIVE
+        ANY SOME MERGE USING MATCHED INTERVAL
     }
     variable aggs {COUNT SUM AVG MIN MAX STRING_AGG GROUP_CONCAT}
+    variable winFuncs {ROW_NUMBER RANK DENSE_RANK PERCENT_RANK CUME_DIST NTILE LAG LEAD FIRST_VALUE LAST_VALUE NTH_VALUE}
     variable maxRows 100000          ;# cap for SELECTs with no LIMIT (UI protection)
     variable progressHook {}         ;# called between chunks so a UI can stay responsive
     variable cancel 0
@@ -426,6 +429,7 @@ proc ::mkitsql::parseColumnOrCall {} {
 }
 
 proc ::mkitsql::parseCall {} {
+    variable winFuncs ; variable aggs
     set nameTok [advance]
     set name [string toupper [lindex $nameTok 1]]
     expectOp (
@@ -439,12 +443,95 @@ proc ::mkitsql::parseCall {} {
         while {[acceptOp ,]} { lappend args [parseExpr] }
     }
     expectOp )
-    if {[isKw [peek] OVER]} { err "Window functions (OVER) are not supported yet" [peek] }
-    if {[isKw [peek] FILTER]} { err "The FILTER clause is not supported yet; use SUM(CASE WHEN ... THEN ... END)" [peek] }
+    # aggregate FILTER (WHERE c)  ==  aggregate over  CASE WHEN c THEN arg END  (aggregates skip NULLs)
+    if {[isKw [peek] FILTER]} {
+        if {$name ni {COUNT SUM AVG MIN MAX STRING_AGG GROUP_CONCAT}} { err "FILTER is only allowed on aggregate functions" [peek] }
+        advance ; expectOp ( ; expectKw WHERE
+        set f [parseExpr]
+        expectOp )
+        if {[lindex $args 0 0] eq "star"} {
+            set args [list [list case {} [list [list $f {lit int 1}]] {lit null {}}]]
+        } else {
+            set args [lreplace $args 0 0 [list case {} [list [list $f [lindex $args 0]]] {lit null {}}]]
+        }
+    }
+    if {[isKw [peek] OVER]} {
+        if {$name ni $winFuncs && $name ni $aggs} { err "${name}() is not a window function" $nameTok }
+        advance
+        return [list win $name $distinct $args [parseWindowSpec]]
+    }
+    if {$name in $winFuncs} { err "${name}() is a window function and needs an OVER clause" $nameTok }
     if {$distinct && $name ni {COUNT SUM AVG MIN MAX STRING_AGG GROUP_CONCAT}} {
         err "DISTINCT is only allowed in aggregate functions" $nameTok
     }
     return [list func $name $distinct $args]
+}
+
+# OVER name   |   OVER ( [name] [PARTITION BY ..] [ORDER BY ..] [ROWS|RANGE|GROUPS frame] )
+proc ::mkitsql::parseWindowSpec {} {
+    set spec [dict create base "" partition {} order {} frame {}]
+    if {![isOp [peek] (]} {
+        dict set spec base [parseName "window name"]
+        return $spec
+    }
+    advance
+    set t [peek]
+    if {$t ne "" && [lindex $t 0] in {ident qident} && !([isKw $t PARTITION] || [isKw $t ORDER] || [isKw $t ROWS] || [isKw $t RANGE] || [isKw $t GROUPS]) && !([isOp [peek 1] ,])} {
+        dict set spec base [parseName "window name"]
+    }
+    if {[acceptKw PARTITION]} {
+        expectKw BY
+        set l [list [parseExpr]]
+        while {[acceptOp ,]} { lappend l [parseExpr] }
+        dict set spec partition $l
+    }
+    if {[acceptKw ORDER]} {
+        expectKw BY
+        set l {}
+        while 1 {
+            set e [parseExpr]
+            set dir asc
+            if {[acceptKw DESC]} { set dir desc } else { acceptKw ASC }
+            set nulls ""
+            if {[acceptKw NULLS]} {
+                if {[acceptKw FIRST]} { set nulls first } elseif {[acceptKw LAST]} { set nulls last } \
+                  else { err "Expected FIRST or LAST after NULLS" [peek] }
+            }
+            lappend l [list $e $dir $nulls]
+            if {![acceptOp ,]} break
+        }
+        dict set spec order $l
+    }
+    foreach m {ROWS RANGE GROUPS} {
+        if {[acceptKw $m]} {
+            if {[acceptKw BETWEEN]} {
+                set b1 [parseFrameBound]
+                expectKw AND
+                set b2 [parseFrameBound]
+            } else {
+                set b1 [parseFrameBound]
+                set b2 {current}
+            }
+            dict set spec frame [list [string tolower $m] $b1 $b2]
+            break
+        }
+    }
+    if {[isKw [peek] EXCLUDE]} { err "Window frame EXCLUDE is not supported" [peek] }
+    expectOp )
+    return $spec
+}
+
+proc ::mkitsql::parseFrameBound {} {
+    if {[acceptKw UNBOUNDED]} {
+        if {[acceptKw PRECEDING]} { return {unbounded_preceding} }
+        expectKw FOLLOWING
+        return {unbounded_following}
+    }
+    if {[acceptKw CURRENT]} { expectKw ROW ; return {current} }
+    set e [parseConcat]
+    if {[acceptKw PRECEDING]} { return [list preceding $e] }
+    expectKw FOLLOWING
+    return [list following $e]
 }
 
 proc ::mkitsql::parseCase {} {
@@ -675,8 +762,21 @@ proc ::mkitsql::parseSelectCore {} {
         }
     }
     if {[acceptKw HAVING]} { set having [parseExpr] }
+    set windows [dict create]
+    if {[acceptKw WINDOW]} {
+        while 1 {
+            set wn [parseName "window name"]
+            expectKw AS
+            expectOp (
+            # re-use the OVER parser by stepping back onto the '('
+            variable ti
+            incr ti -1
+            dict set windows [string tolower $wn] [parseWindowSpec]
+            if {![acceptOp ,]} break
+        }
+    }
     return [dict create type select distinct $distinct items $items from $from \
-        where $where group $group having $having]
+        where $where group $group having $having windows $windows]
 }
 
 # item := * | name.* | expr [[AS] alias]      ->  {expr alias text}
