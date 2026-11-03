@@ -1,8 +1,8 @@
 diff --git a/mkstudio.vfs/lib/app-mkstudio/app.tcl b/mkstudio.vfs/lib/app-mkstudio/app.tcl
-index ceaf8ba..f676dd7 100644
+index b04fc7f..c3938ab 100644
 --- a/mkstudio.vfs/lib/app-mkstudio/app.tcl
 +++ b/mkstudio.vfs/lib/app-mkstudio/app.tcl
-@@ -639,7 +639,7 @@ proc ::app::newSample {} {
+@@ -644,7 +644,7 @@ proc ::app::newSample {} {
      afterDbChange
      ::explorer::expandDb $tag
      setStatus "Sample database '$tag' created: employees (with a skills subview), departments, products, orders (with a lines subview)." ok
@@ -11,7 +11,7 @@ index ceaf8ba..f676dd7 100644
      set id [newQuery $text $tag 1]
  }
  
-@@ -902,10 +902,10 @@ proc ::app::saveScript {{as 0} {id ""}} {
+@@ -907,10 +907,10 @@ proc ::app::saveScript {{as 0} {id ""}} {
      set f [docFrame $id]
      set file $A(file,$id)
      if {$as || $file eq ""} {
@@ -25,7 +25,7 @@ index ceaf8ba..f676dd7 100644
          if {$file eq ""} { return 0 }
      }
      if {[catch {
-@@ -924,7 +924,7 @@ proc ::app::openScript {} {
+@@ -929,7 +929,7 @@ proc ::app::openScript {} {
      variable A ; variable cfg
      set file [tk_getOpenFile -title "Open script" \
          -initialdir [expr {$cfg(lastDir) ne "" && [file isdirectory $cfg(lastDir)] ? $cfg(lastDir) : [pwd]}] \
@@ -68,10 +68,46 @@ index 5db1a59..0153a20 100644
  }
  package provide app-mkstudio 1.0
 diff --git a/mkstudio.vfs/lib/app-mkstudio/store.tcl b/mkstudio.vfs/lib/app-mkstudio/store.tcl
-index 74f6bd1..4a058a4 100644
+index e5b9540..36eed0a 100644
 --- a/mkstudio.vfs/lib/app-mkstudio/store.tcl
 +++ b/mkstudio.vfs/lib/app-mkstudio/store.tcl
-@@ -497,6 +497,48 @@ proc ::store::layout {path} {
+@@ -465,6 +465,16 @@ proc ::store::endCommit {path} {
+     syncDisk $path
+     catch {file delete [commitRecord $path]}
+ }
++# Does a valid 16-byte Metakit footer end exactly at `end` (the state a committed file of that size has)?  The repairs below only
++# cut or restore a file when this holds for the state they restore: a damaged header (an offset that is too small, a record that
++# does not match) must never make them throw real data away.
++proc ::store::footerOkAt {path end} {
++    if {$end < 24 || $end > [file size $path]} { return 0 }
++    if {[catch {set h [open $path rb] ; set head [read $h 2] ; seek $h [expr {$end - 16}] start ; set tail [read $h 16] ; close $h}] || [string length $tail] != 16} { return 0 }
++    set fmt [expr {$head eq "JL" ? "I" : "i"}]
++    binary scan $tail $fmt$fmt$fmt$fmt w0 footPos w2 tocPos
++    return [expr {($w0 & 0xFFFFFFFF) == 0x80000000 && (($w2 >> 24) & 0xFF) == 0x80 && ($footPos & 0xFFFFFFFF) == $end - 16 && ($tocPos & 0xFFFFFFFF) < $end - 16}]
++}
+ # Put right an interrupted commit.  Needs the write lock.  Returns "" (nothing to do) or what was done.
+ proc ::store::repairFile {path} {
+     set rec [commitRecord $path]
+@@ -477,6 +487,9 @@ proc ::store::repairFile {path} {
+                 file delete $rec                                      ;# the commit never wrote anything
+                 return ""
+             }
++            if {[file size $path] >= $size && ![footerOkAt $path $size]} {
++                return "Warning: an interrupted commit was found, but the file does not end in a valid footer where it should; nothing was changed."
++            }
+             if {[file size $path] >= $size} {
+                 set h [open $path r+b]
+                 seek $h 0 start ; puts -nonewline $h [binary format H* $hex] ; flush $h
+@@ -491,7 +504,7 @@ proc ::store::repairFile {path} {
+         }
+         file delete $rec
+     }
+-    if {$info ne "" && [dict get $info size] > [dict get $info offset]} {
++    if {$info ne "" && [dict get $info size] > [dict get $info offset] && [footerOkAt $path [dict get $info offset]]} {
+         set h [open $path r+b] ; chan truncate $h [dict get $info offset] ; close $h
+         return "The unfinished end of an interrupted commit was discarded."
+     }
+@@ -593,6 +606,48 @@ proc ::store::layout {path} {
  proc ::store::size   {path} { mk::view size $path }
  
  # -- reading rows ------------------------------------------------------------
@@ -120,7 +156,7 @@ index 74f6bd1..4a058a4 100644
  # Fetch `count` rows starting at `first`, returning a list of value-lists in
  # the order of `props` (which must all be scalar properties).
  proc ::store::rows {path props first count} {
-@@ -509,7 +551,13 @@ proc ::store::rows {path props first count} {
+@@ -605,7 +660,13 @@ proc ::store::rows {path props first count} {
              lappend out {}
          } elseif {$one} {
              # a single property comes back unwrapped, so wrap it ourselves
@@ -135,7 +171,7 @@ index 74f6bd1..4a058a4 100644
          } else {
              lappend out [mk::get $path!$i {*}$props]
          }
-@@ -527,10 +575,18 @@ proc ::store::fetch {path props first count} {
+@@ -623,10 +684,18 @@ proc ::store::fetch {path props first count} {
          0 { for {set i $first} {$i <= $last} {incr i} { lappend out {} } }
          1 {
              set p [lindex $props 0]
@@ -156,7 +192,7 @@ index 74f6bd1..4a058a4 100644
          }
      }
      return $out
-@@ -543,10 +599,18 @@ proc ::store::fetchAt {path props indices} {
+@@ -639,10 +708,18 @@ proc ::store::fetchAt {path props indices} {
          0 { foreach i $indices { lappend out {} } }
          1 {
              set p [lindex $props 0]
@@ -177,7 +213,7 @@ index 74f6bd1..4a058a4 100644
          }
      }
      return $out
-@@ -771,6 +835,11 @@ proc ::store::createView {tag name layout} {
+@@ -867,6 +944,11 @@ proc ::store::createView {tag name layout} {
  
  proc ::store::dropView {tag name} {
      if {![hasView $tag $name]} { error "View '$name' does not exist in '$tag'." }

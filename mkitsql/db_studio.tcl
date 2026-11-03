@@ -20,18 +20,40 @@ proc ::mkitsql::db::openFile {path args} {
     set unchecked [expr {"-unchecked" in $args}] ; set verify [expr {"-verify" in $args}]
     set fargs {}
     foreach a $args { if {$a ni {-unchecked -verify}} { lappend fargs $a } }
-    if {!$unchecked && [file exists [file normalize $path]]} { ::mkitsql::dbRequireIntact [file normalize $path] }
-    if {$verify && [file exists [file normalize $path]] && [file size [file normalize $path]] > 0} { ::mkitsql::dbVerify [file normalize $path] }
-    set tag [::store::openFile $path {*}$fargs]
-    # Mk4tcl opens a damaged file as an empty database; the frame check above catches most damage before the open, this one
-    # catches a file that opened with fewer views than its header promises
     set real [file normalize $path]
+    # A newer MK Studio puts right an interrupted commit while it opens a file for writing (after taking the lock): the frame
+    # check must then come AFTER the open, or it would refuse the very file that is about to be repaired.  An older one does not,
+    # so its files are checked first.
+    set repairs [llength [info commands ::store::repairFile]]
+    if {!$repairs} {
+        if {!$unchecked && [file exists $real]} { ::mkitsql::dbRequireIntact $real }
+        if {$verify && [file exists $real] && [file size $real] > 0} { ::mkitsql::dbVerify $real }
+    }
+    if {$repairs && !$unchecked && "-readonly" ni $args && [file exists $real]} {
+        # the store repairs an interrupted commit when it opens for writing; make sure that repair cannot throw data away
+        set why [::mkitsql::db::repairUnsafe $real]
+        if {$why ne ""} {
+            return -code error -errorcode [list MKIT DAMAGED $why] "This file does not look like an intact Metakit database ($why):\n$real\nIt was not opened, so nothing was changed. Open a backup, or pass -unchecked to open it anyway."
+        }
+    }
+    set tag [::store::openFile $path {*}$fargs]
+    if {$repairs && [file exists $real] && [catch {
+        if {!$unchecked} { ::mkitsql::dbRequireIntact $real }
+        if {$verify && [file size $real] > 0} { ::mkitsql::dbVerify $real }
+    } err opts]} {
+        catch {::store::closeFile $tag}
+        return -options $opts $err
+    }
+    # Mk4tcl opens a damaged file as an empty database; the frame check catches most damage, this one catches a file that
+    # opened with fewer views than its header promises
     if {!$unchecked && [file exists $real] && ![::mkitsql::dbSignatureOk $real [llength [mk::file views $tag]]]} {
         catch {::store::closeFile $tag}
         return -code error -errorcode [list MKIT DAMAGED "not a Metakit database"] "This file isn't a Metakit database, so it was not opened:\n$real"
     }
     return $tag
 }
+# what was put right when the file was opened (an interrupted commit), "" if nothing
+proc ::mkitsql::db::repairedNote {tag} { if {[llength [info commands ::store::repairedNote]]} { return [::store::repairedNote $tag] } ; return "" }
 proc ::mkitsql::db::closeFile {tag} { ::store::closeFile $tag ; ::mkitsql::typeForget $tag }
 proc ::mkitsql::db::commit {tag} { ::store::commit $tag }
 proc ::mkitsql::db::rollback {tag} { ::store::rollback $tag }

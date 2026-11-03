@@ -216,12 +216,21 @@ proc ::mkitsql::db::openFile {path args} {
     set path [realPath $path]
     foreach t $tags { if {$file($t) eq $path} { error "File is already open as '$t': $path" } }
     if {!$create && ![::file exists $path]} { error "File not found: $path" }
-    if {!$unchecked} { ::mkitsql::dbRequireIntact $path }       ;# a damaged file would open as an empty database
-    if {$verify && [::file exists $path] && [::file size $path] > 0} { ::mkitsql::dbVerify $path }   ;# untrusted: read it all in a throw-away process first
-    set mine ""
+    set mine "" ; set repairNote ""
     if {!$readonly} {
-        set mine [takeLock $path]                       ;# before opening, so a refusal touches nothing
+        set mine [takeLock $path]                       ;# before anything touches the file, so a refusal touches nothing
         if {$mine eq "" && $requireLock} { error "Cannot create the lock file for $path (is the folder writable?)" }
+        # with the lock held nobody else is in the middle of a commit: put right a commit that was interrupted
+        if {[::file exists $path] && [catch {repairFile $path} repairNote]} { set repairNote "" }
+    }
+    # a damaged file would open as an empty database (and a later COMMIT would replace the real data); an untrusted one is read
+    # completely in a throw-away process first.  Both happen AFTER the repair, so a file that only needed one is not refused.
+    if {[catch {
+        if {!$unchecked} { ::mkitsql::dbRequireIntact $path }
+        if {$verify && [::file exists $path] && [::file size $path] > 0} { ::mkitsql::dbVerify $path }
+    } err opts]} {
+        if {$mine ne ""} { releaseLock $path $mine }
+        return -options $opts $err
     }
     set tag [makeTag $path]
     set opts {-nocommit}
@@ -239,6 +248,7 @@ proc ::mkitsql::db::openFile {path args} {
         return -code error -errorcode [list MKIT DAMAGED "not a Metakit database"] "This file isn't a Metakit database, so it was not opened:\n$path"
     }
     lappend tags $tag
+    if {$repairNote ne ""} { variable repaired ; set repaired($tag) $repairNote }
     set file($tag) $path ; set ro($tag) $readonly ; set dirty($tag) 0
     if {$readonly} {
         set h [lockHolder $path]
@@ -255,14 +265,95 @@ proc ::mkitsql::db::closeFile {tag} {
     catch {mk::file close $tag}
     set i [lsearch -exact $tags $tag]
     if {$i >= 0} { set tags [lreplace $tags $i $i] }
-    unset -nocomplain file($tag) ro($tag) dirty($tag)
+    unset -nocomplain file($tag) ro($tag) dirty($tag) ::mkitsql::db::repaired($tag)
     ::mkitsql::typeForget $tag                       ;# what Metakit remembers about column types dies with the open file
 }
 proc ::mkitsql::db::commit {tag} {
-    variable dirty
+    variable dirty ; variable file
+    set record 0
+    if {$dirty($tag) > 0} { set record [beginCommit $file($tag)] }
     mk::file commit $tag
     set dirty($tag) 0
+    if {$record} { endCommit $file($tag) }
 }
+
+# ---- interrupted commits and power loss -------------------------------------------------------------------------
+# The same mechanism, file names and formats as MK Studio's store.tcl (a file may be opened by either after a crash of the other).
+# What a Metakit commit does to the file (measured with strace by MK Studio's tests/test_power_loss.tcl; ours: tests/power_loss.tcl):
+#   1. a few small in-place writes (an 8-byte marker in the old tail),
+#   2. the new data and a new tail APPENDED after the end of the file,
+#   3. LAST, the 8-byte header at offset 0, which holds the offset of the new end of the file.
+# There is no fsync anywhere.  So a crash between 2 and 3 leaves the OLD header and a LONGER file, which Metakit opens as an EMPTY
+# database without any error (a plain `kill` rarely lands in that few milliseconds, a deterministic one does every time), and after a
+# POWER CUT the pages may reach the disk in any order.  Two repairs make both recoverable:
+#   * before a commit starts, <file>.commit records the committed header and size (forced to disk where the system has `sync`); after
+#     the commit the file is forced to disk and the record removed.  If the record is found when the file is opened for writing, the
+#     commit never finished (or was never confirmed): header and size are put back - the database is exactly what it was before it.
+#   * without a record, a file longer than its header says (an unfinished append) is cut back to the header's offset.
+# Not covered: a disk that loses data it said was written, or a system with no way to force data out (Windows has no `sync`
+# command: there, kills are covered and power loss is as safe as the operating system's own write ordering).
+namespace eval ::mkitsql::db { variable durable 1 ; variable repaired ; array set repaired {} }   ;# durable 0 turns the sync calls off
+# force the files (and the folder entry) to disk where the system can: coreutils `sync FILE...` (Linux), else a plain `sync`
+proc ::mkitsql::db::syncDisk {args} {
+    variable durable
+    if {!$durable || $::tcl_platform(platform) eq "windows"} return
+    set paths {}
+    foreach p $args { lappend paths $p ; lappend paths [::file dirname $p] }
+    if {[catch {exec sync {*}[lsort -unique $paths]}]} { catch {exec sync} }
+}
+# Called before mk::file commit: remember the state we can fall back to.
+proc ::mkitsql::db::beginCommit {path} {
+    set info [headerInfo $path]
+    if {$info eq ""} { return 0 }
+    set rec [commitRecord $path]
+    if {[catch {
+        set h [open $rec w] ; puts -nonewline $h "[dict get $info header] [dict get $info size]" ; close $h
+    }]} { return 0 }
+    syncDisk $rec $path
+    return 1
+}
+proc ::mkitsql::db::endCommit {path} {
+    syncDisk $path
+    catch {::file delete [commitRecord $path]}
+}
+# Put right an interrupted commit.  Needs the write lock.  Returns "" (nothing to do) or what was done.
+proc ::mkitsql::db::repairFile {path} {
+    set rec [commitRecord $path]
+    set info [headerInfo $path]
+    if {[::file exists $rec]} {
+        if {[catch {set h [open $rec r] ; set d [string trim [read $h 200]] ; close $h}]} { return "" }
+        lassign [split $d " "] hex size
+        if {[string length $hex] == 16 && [string is integer -strict $size] && $info ne ""} {
+            if {[::file size $path] == $size && [dict get $info header] eq $hex} {
+                ::file delete $rec                                       ;# the commit never wrote anything
+                return ""
+            }
+            if {[::file size $path] >= $size && ![footerOkAt $path $size]} {
+                return "Warning: an interrupted commit was found, but the file does not end in a valid footer where it should; nothing was changed."
+            }
+            if {[::file size $path] >= $size} {
+                set h [open $path r+b]
+                seek $h 0 start ; puts -nonewline $h [binary format H* $hex] ; flush $h
+                chan truncate $h $size
+                close $h
+                syncDisk $path
+                ::file delete $rec
+                return "An unfinished commit was undone: the database is as it was before that commit."
+            }
+            # the file is SHORTER than it was before the commit: nothing we can put back
+            return "Warning: this file is shorter than it was at its last commit - the database may be damaged."
+        }
+        ::file delete $rec
+    }
+    if {$info ne "" && [dict get $info size] > [dict get $info offset] && [footerOkAt $path [dict get $info offset]]} {
+        set h [open $path r+b] ; chan truncate $h [dict get $info offset] ; close $h
+        return "The unfinished end of an interrupted commit was discarded."
+    }
+    return ""
+}
+# interrupted commits repaired while opening, by tag - for the application to tell the user
+proc ::mkitsql::db::repairedNote {tag} { variable repaired ; if {[info exists repaired($tag)]} { return $repaired($tag) } ; return "" }
+
 # Discard uncommitted work (newer Mk4tcl has `mk::file rollback`; otherwise reopen, which is safe with -nocommit).
 proc ::mkitsql::db::rollback {tag} {
     variable dirty ; variable file ; variable ro
@@ -337,7 +428,19 @@ proc ::mkitsql::db::formatLayout {layout} {
     }
     return $parts
 }
-proc ::mkitsql::db::layout {path} { parseLayout [mk::view layout $path] }
+# Layout of a view or subview.  Real Mk4tcl answers `mk::view layout` for a subview path ("db.view!3.sub") with the TOP-LEVEL
+# view's layout, so descend through the nested definitions ourselves (the same as MK Studio's ::store::layout).
+proc ::mkitsql::db::layout {path} {
+    set base [lindex [split $path !] 0]
+    set layout [parseLayout [mk::view layout $base]]
+    foreach {-> name} [regexp -all -inline {!\d+\.([A-Za-z0-9_]+)} $path] {
+        set found ""
+        foreach col $layout { if {[lindex $col 0] eq $name} { set found $col ; break } }
+        if {$found eq "" || [lindex $found 1] ne "V"} { error "no subview '$name' in $path" }
+        set layout [lindex $found 2]
+    }
+    return $layout
+}
 proc ::mkitsql::db::size   {path} { mk::view size $path }
 proc ::mkitsql::db::subSize {path idx prop} { mk::view size $path!$idx.$prop }
 

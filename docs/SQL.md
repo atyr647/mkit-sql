@@ -382,6 +382,23 @@ is reported at close, never ignored. Two users sharing a
 machine, or a process planting links in `/tmp`, cannot read, overwrite or redirect another user's spill files
 (`tests/tempsec.tcl`). Unusable folders and full disks are reported as errors that say what to set.
 
+## Interrupted commits and power loss
+
+A Metakit commit appends the new data and a new tail to the file and writes the 8-byte header at offset 0 **last**; it never
+calls fsync. A process killed between the appends and the header leaves the OLD header and a LONGER file, which Metakit opens as
+an *empty* database without any error - and a later `COMMIT` would then overwrite the real data. After a power cut the pages
+can also reach the disk in any order. mkit-sql therefore writes `<file>.commit` (the committed header and size) before every
+commit, forces the file to disk after it where the system has `sync`, and removes the record; opening a file *for writing* (the
+write lock is held, so nobody else is mid-commit) puts an unfinished commit back, so the database is exactly what it was before
+that commit (`::mkitsql::db::repairedNote $tag` says what was done). Without a record, a file longer than its header says is cut
+back to the header's offset. Both repairs happen only if a valid Metakit footer ends exactly where the restored state would
+end, so a damaged header can never make them throw data away; read-only opens cannot repair and refuse such a file. The file
+names and formats are MK Studio's (`store.tcl` does the same), so either program can repair what the other left behind.
+`::mkitsql::db::durable 0` turns the `sync` calls off. **Limits:** a disk that loses data it said was written; Windows, which has
+no `sync` command (kills are covered, power loss is as safe as the operating system's own write ordering); a commit that was
+confirmed to the caller only counts as durable after the file has been forced out, so a crash after `mk::file commit` but before
+that is rolled back.
+
 ## Damaged files, untrusted files, and what Metakit remembers
 
 Mk4tcl opens a damaged or truncated file as an *empty database*, and a later `COMMIT` would then overwrite the real

@@ -58,7 +58,14 @@ variant truncated_tail [string range $data 0 [expr {$size - 9}]]
 variant truncated_20 [string range $data 0 19]
 variant garbage_head [string repeat X 64][string range $data 64 end]
 variant flipped_footer [string range $data 0 [expr {$size - 17}]][string repeat \xff 16]
-variant extended [string range $data 0 end]ABCDE
+# a file LONGER than its header says is what an interrupted commit leaves (the data is appended, the header written last):
+# read-only it is refused (it would look like an empty database); opened for writing the unfinished tail is cut back
+set f $::area/v_extended.mk
+spit $f "${data}ABCDE"
+check "extended: read-only refused" [expr {[catch {mkitsql::db::openFile $f -readonly} m opts] ? [lrange [dict get $opts -errorcode] 0 1] : "opened"}] {MKIT DAMAGED}
+set tg [mkitsql::db::openFile $f]
+check "extended: opened for writing, the unfinished tail was discarded" [list [mkitsql::db::repairedNote $tg] [slurp $f]] [list "The unfinished end of an interrupted commit was discarded." $data]
+mkitsql::db::closeFile $tg
 variant header_size_wrong [string range $data 0 3]\x00\x00\x00\x07[string range $data 8 end]
 set f [variant not_a_db_but_jl_prefix "JL\x1a\x00[string repeat z 100]"]
 # a plain text file and a non-Metakit binary: caught after opening (no tables, no signature)

@@ -44,7 +44,10 @@ set boundaries [list \
     [list bind.tcl    {(^|[\[ \{])uplevel }  2 "withScopes / lmap2 run a script literal written in this file"] \
     [list expr.tcl    {^\s*proc [^ \{]*\$}   4 "defstrict (names from this file) and the three cx::pN procs, verified by verify.tcl"] \
     [list db.tcl      {catch \{open }          1 "the lock file, created exclusively (O_EXCL) - the protocol of MK Studio's docs/CONCURRENCY.md"] \
-    [list db.tcl      {(^|\[)open }            5 "the lock file (create, bounded read), its takeover guard (O_EXCL), /proc/<pid>/stat and /proc/stat"] \
+    [list db.tcl      {(^|\[)open }            9 "the lock file (create, bounded read), its takeover guard (O_EXCL), /proc/<pid>/stat and /proc/stat; the commit record (write, read) and the database file (rewritten header / cut back to undo an interrupted commit)"] \
+    [list dbcommon.tcl {(^|\[)open }           3 "reads the 8-byte header and 16-byte footer of a database file and the commit record, to decide whether a repair of an interrupted commit is safe"] \
+    [list db.tcl      {\{exec }                1 "`sync` (coreutils) forces the database file and its commit record to disk around a commit; fixed argument list, paths only"] \
+    [list db.tcl      {catch \{exec }          1 "the same `sync` call"] \
     [list db.tcl      {(^|\[)after }           1 "waits 40 ms for another process's takeover guard, as the lock protocol says (no event loop is entered)"] \
     [list dbcheck.tcl {(^|\[)open }            2 "reads the first and last bytes of a database file to validate its frame"] \
     [list spill.tcl   {(^|\[)open }            2 "reads /dev/urandom for the private folder's random name, and /proc/<pid>/stat"] \

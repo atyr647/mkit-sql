@@ -34,7 +34,7 @@ proc ::mkitsql::dbProblem {path} {
     set hdrSize [expr {$hdrSize & 0xFFFFFFFF}] ; set footPos [expr {$footPos & 0xFFFFFFFF}] ; set tocPos [expr {$tocPos & 0xFFFFFFFF}]
     set flag0 [expr {($w0 >> 24) & 0xFF}] ; set flag2 [expr {($w2 >> 24) & 0xFF}]
     if {$hdrSize > $size} { return "it is truncated: the header says $hdrSize bytes but the file has only $size" }
-    if {$hdrSize < $size} { return "the header says $hdrSize bytes but the file has $size (it was cut or extended by another program)" }
+    if {$hdrSize < $size} { return "the header says $hdrSize bytes but the file has $size (it was cut or extended by another program, or a commit was interrupted - opening it for writing undoes that)" }
     if {($w0 & 0xFFFFFFFF) != 0x80000000 || $flag2 != 0x80} { return "its footer is damaged" }
     if {$footPos != $size - 16} { return "its footer is not where the header says it should be" }
     if {$tocPos >= $footPos} { return "its table of contents lies outside the file" }

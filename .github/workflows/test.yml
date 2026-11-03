@@ -19,7 +19,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install tools
-        run: sudo apt-get update && sudo apt-get install -y python3 xvfb
+        run: sudo apt-get update && sudo apt-get install -y python3 xvfb strace
       - name: Fetch the tclkit runtimes (SHA1-verified)
         run: tests/fetch-tclkit.sh
 
@@ -113,6 +113,10 @@ jobs:
           MKIT_PUSHMIN=0 MKIT_MK4TCL=builtin $T86 tests/run.tcl
           MKIT_PUSHDOWN=0 MKIT_MK4TCL=builtin $T86 tests/run.tcl
           MKIT_TCLSH=$T86 MKIT_MK4TCL=builtin MKIT_PUSHMIN=0 python3 tests/differential/diff.py --n 3000 --seed 81
+      - name: Power loss - 406 synthesised crash states and 18 real commits killed after every Nth write (strace), both kits
+        run: |
+          for k in $T86 $T85; do MKIT_MK4TCL=builtin $k tests/power_loss.tcl; done
+          MKIT_BACKEND=studio MKIT_MK4TCL=builtin $T86 tests/studio_repair.tcl
       - name: Lock under crashes - kill at every step, a deterministic vanished-lock race, 60 races for a stale lock, chaos (both kits)
         run: |
           for k in $T86 $T85; do LOCK_ROUNDS=60 MKIT_MK4TCL=builtin $k tests/lock_crash.tcl; done

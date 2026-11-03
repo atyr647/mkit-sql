@@ -101,4 +101,45 @@ proc ::mkitsql::db::rowsAt {path props indices} {
     return $out
 }
 
+# ---- the frame of a committed Metakit file (shared: the repair of an interrupted commit, and the adapter's guard) ----------
+proc ::mkitsql::db::commitRecord {path} { return $path.commit }
+# {size S offset H header <8 bytes as hex>} for a Metakit file with the usual header, "" for anything else
+proc ::mkitsql::db::headerInfo {path} {
+    if {[catch {set h [open $path rb] ; set d [read $h 8] ; close $h}] || [string length $d] < 8} { return "" }
+    set magic [string range $d 0 1]
+    if {$magic eq "JL"} { binary scan $d x4I off } elseif {$magic eq "LJ"} { binary scan $d x4i off } else { return "" }
+    if {[string index $d 2] ne "\x1a"} { return "" }
+    binary scan $d H* hex
+    return [dict create size [::file size $path] offset [expr {$off & 0xFFFFFFFF}] header $hex]
+}
 
+# Does a valid 16-byte Metakit footer end exactly at `end` (the state a committed file of that size has)?  The repairs below only
+# cut or restore a file when this holds for the state they restore, so a damaged header can never make them throw data away.
+proc ::mkitsql::db::footerOkAt {path end} {
+    if {$end < 24 || $end > [::file size $path]} { return 0 }
+    if {[catch {set h [open $path rb] ; set head [read $h 2] ; seek $h [expr {$end - 16}] start ; set tail [read $h 16] ; close $h}] || [string length $tail] != 16} { return 0 }
+    set fmt [expr {$head eq "JL" ? "I" : "i"}]
+    binary scan $tail $fmt$fmt$fmt$fmt w0 footPos w2 tocPos
+    return [expr {($w0 & 0xFFFFFFFF) == 0x80000000 && (($w2 >> 24) & 0xFF) == 0x80 && ($footPos & 0xFFFFFFFF) == $end - 16 && ($tocPos & 0xFFFFFFFF) < $end - 16}]
+}
+
+# Would the repair of an interrupted commit (MK Studio's, or ours) be SAFE for this file?  "" if there is nothing to repair or the
+# state it would restore ends in a valid footer; otherwise why not.  An older MK Studio truncates a file to the size its header
+# claims without looking, so a damaged header could make it throw the real data away: the adapter checks first.
+proc ::mkitsql::db::repairUnsafe {path} {
+    set info [headerInfo $path]
+    if {$info eq ""} { return "" }
+    set rec [commitRecord $path]
+    if {[::file exists $rec]} {
+        if {[catch {set h [open $rec r] ; set d [string trim [read $h 200]] ; close $h}]} { return "" }
+        lassign [split $d " "] hex size
+        if {[string length $hex] == 16 && [string is integer -strict $size] && [::file size $path] >= $size && [dict get $info header] ne $hex} {
+            if {![footerOkAt $path $size]} { return "an interrupted commit was found, but the file does not end in a valid footer where it should" }
+        }
+        return ""
+    }
+    if {[dict get $info size] > [dict get $info offset] && ![footerOkAt $path [dict get $info offset]]} {
+        return "the file is longer than its header says, and no valid end of a committed file is where the header points"
+    }
+    return ""
+}
