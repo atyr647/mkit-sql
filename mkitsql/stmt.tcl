@@ -35,9 +35,11 @@ proc ::mkitsql::execStatement {ast {db ""} {plist {}}} {
     resetStatement
     set defaultDb $db
     set cancel 0 ; set capRows 0
-    # positional parameters are given as a list, named ones as a dict
+    # `?` parameters take a list, `:name` parameters a dict; the statement says which it uses
+    set info [expr {[llength $ast] > 2 ? [lindex $ast 2] : [dict create pos 0 named {}]}]
     set pd [dict create]
-    if {[llength $savedParams] && [llength $savedParams] % 2 == 0 && [paramsLookNamed $savedParams]} {
+    if {[llength [dict get $info named]]} {
+        if {[llength $savedParams] % 2} { fail "Named parameters must be given as a dict of name value pairs" }
         set pd $savedParams
     } else {
         set i 0
@@ -66,12 +68,6 @@ proc ::mkitsql::execStatement {ast {db ""} {plist {}}} {
         describe  { return [execDescribe [lindex $ast 1]] }
     }
     error "execStatement: unknown statement [lindex $ast 0]"
-}
-
-# {a 1 b 2} (even length, keys that are not plain integers) = named parameters
-proc ::mkitsql::paramsLookNamed {l} {
-    foreach {k v} $l { if {[string is integer -strict $k] && $k > 0 && $k <= [expr {[llength $l]}]} { return 0 } }
-    return 1
 }
 
 proc ::mkitsql::msg {text {affected -1}} {

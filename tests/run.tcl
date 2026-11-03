@@ -28,7 +28,7 @@ proc q {sql args} { mkitsql::run $sql $::db {*}$args }
 proc rows {sql args} { dict get [q $sql {*}$args] rows }
 proc col0 {sql} { set r {} ; foreach x [rows $sql] { lappend r [lindex $x 0] } ; return $r }
 proc one {sql} { lindex [rows $sql] 0 0 }
-proc errmsg {sql} { if {[catch {q $sql} m]} { return $m } ; return "(no error)" }
+proc errmsg {sql args} { if {[catch {q $sql {*}$args} m]} { return $m } ; return "(no error)" }
 proc ok {sql} { if {[catch {q $sql} m]} { return "ERROR: $m" } ; return ok }
 
 # ============================================================================
@@ -668,6 +668,15 @@ check param_pos [rows "SELECT name FROM employees WHERE id = ?" {3}] {{{Alan Tur
 check param_two [rows "SELECT id FROM employees WHERE id > ? AND id < ? ORDER BY id" {1 4}] {2 3}
 check param_named [rows "SELECT name FROM employees WHERE id = :id" {id 2}] {{{Grace Hopper}}}
 check param_text [rows "SELECT id FROM employees WHERE name = ?" {{Alan Turing}}] {3}
+check param_two_ints [rows "SELECT id FROM employees WHERE id > ? AND id < ? ORDER BY id" {3 6}] {4 5}
+check param_strings [rows "SELECT id FROM departments WHERE name = ? OR name = ? ORDER BY id" {Sales Design}] {2 3}
+check param_named_multi [rows "SELECT id FROM employees WHERE id > :lo AND id < :hi ORDER BY id" {lo 3 hi 6}] {4 5}
+check param_named_reuse [rows "SELECT id FROM employees WHERE id = :x OR id = :x + 1 ORDER BY id" {x 7}] {7 8}
+check param_mix  [errmsg "SELECT ? + :a"] {A statement cannot mix ? and :name parameters}
+check param_odd  [errmsg "SELECT :a" {a}] {Named parameters must be given as a dict of name value pairs}
+check param_extra [rows "SELECT 1" {5 6}] {1}
+check param_null [rows "SELECT ? IS NULL" [list $mkitsql::N]] {1}
+check param_query_api [dict get [mkitsql::query "SELECT name FROM departments WHERE id = ?" $db {3}] rows] {Sales}
 check param_miss [errmsg "SELECT ?"] {No value was supplied for parameter #1}
 check param_ins [ok "INSERT INTO departments (id, name) VALUES (?, ?)"] "ERROR: No value was supplied for parameter #1"
 check param_inj [rows "SELECT id FROM employees WHERE name = ?" {{x' OR '1'='1}}] {}

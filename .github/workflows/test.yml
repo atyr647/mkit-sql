@@ -18,6 +18,8 @@ jobs:
         run: tclsh8.6 tests/run.tcl
       - name: Package loads with package require
         run: tclsh8.6 tests/pkg_check.tcl
+      - name: Examples in docs/SQL.md still work
+        run: tclsh8.6 tests/doc_examples.tcl
       - name: Differential tests against SQLite
         run: |
           for seed in 1 2 3; do python3 tests/differential/diff.py --n 3000 --seed $seed; done

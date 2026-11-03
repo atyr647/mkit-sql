@@ -5,13 +5,15 @@
 # Needs the ::store API of MK Studio (store.tcl) to be loaded; ::store is the
 # only thing that talks to Mk4tcl.
 #
-# Drop-in for MK Studio's query layer:
-#   ::mkitsql::parseScript text            -> list of {ast first end statementText}
-#   ::mkitsql::execStatement ast defaultDb -> result dict (rowset / message)
+# Engine API (what MK Studio uses; see engine_studio.tcl):
+#   ::mkitsql::parseScript text                    -> list of {ast first end statementText}
+#   ::mkitsql::execStatement ast ?defaultDb? ?params? -> result dict (rowset / message)
 #
 # Convenience API:
-#   ::mkitsql::run   sql ?defaultDb? ?params?   -> result of the last statement
-#   ::mkitsql::query sql ?defaultDb? ?params?   -> {cols .. rows ..}  with NULL as "" unless -null given
+#   ::mkitsql::run   sql ?defaultDb? ?params?              -> result of the last statement
+#   ::mkitsql::query sql ?defaultDb? ?params? ?nullValue?  -> {cols .. rows ..}
+#
+# params: a list for `?` placeholders, a dict for `:name` placeholders (the statement says which it uses).
 
 package require Tcl 8.5
 

@@ -50,6 +50,7 @@ namespace eval ::mkitsql {
     variable toks {}
     variable ti 0
     variable nparam 0
+    variable namedParams {}      ;# :name parameters seen in the statement being parsed
 
     # comment | block comment | 'string' | "ident" | number | word | operator | stray char
     variable tokenRe {(--[^\n]*)|(/\*(?:[^*]|\*(?!/))*\*/)|('(?:[^']|'')*')|("(?:[^"]|"")*")|((?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?)|([A-Za-z_][A-Za-z0-9_$]*)|(<>|!=|<=|>=|==|\|\||[-+*/%=<>(),;.\[\]!@?:])|(\S)}
@@ -434,6 +435,8 @@ proc ::mkitsql::parsePrimary {} {
                     set n [peek 1]
                     if {$n ne "" && [lindex $n 0] eq "ident" && [lindex $n 2] == [lindex $t 2] + 1} {
                         advance ; advance
+                        variable namedParams
+                        if {[lsearch -exact $namedParams [lindex $n 1]] < 0} { lappend namedParams [lindex $n 1] }
                         return [list param [lindex $n 1]]
                     }
                 }
@@ -1291,8 +1294,8 @@ proc ::mkitsql::parseTxn {} {
 #  Statement dispatch
 # ============================================================================
 proc ::mkitsql::parse {tokens text} {
-    variable SRC ; variable toks ; variable ti ; variable nparam
-    set SRC $text ; set toks $tokens ; set ti 0 ; set nparam 0
+    variable SRC ; variable toks ; variable ti ; variable nparam ; variable namedParams
+    set SRC $text ; set toks $tokens ; set ti 0 ; set nparam 0 ; set namedParams {}
     set t [peek]
     set w [string toupper [lindex $t 1]]
     if {[lindex $t 0] ne "ident" && !([lindex $t 0] eq "op" && [lindex $t 1] eq "(")} {
@@ -1333,6 +1336,9 @@ proc ::mkitsql::parse {tokens text} {
         }
     }
     if {[peek] ne ""} { err "Unexpected [describe [peek]]" [peek] }
+    if {$nparam > 0 && [llength $namedParams]} { err "A statement cannot mix ? and :name parameters" [lindex $tokens 0] }
+    # the statement records how it takes parameters, so the caller never has to guess
+    lappend ast [dict create pos $nparam named $namedParams]
     return $ast
 }
 
