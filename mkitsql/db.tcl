@@ -182,7 +182,8 @@ proc ::mkitsql::db::takeLock {path} {
         if {[catch {set gh [open $guard {WRONLY CREAT EXCL} 0644] ; close $gh}]} {
             # somebody else is replacing the lock: a guard older than mutexStale was abandoned by a crash, otherwise give them a
             # moment (about 2.4 s over all attempts, as the protocol says) and look again
-            if {![catch {::file mtime $guard} mt] && [clock seconds] - $mt > $mutexStale} { catch {::file delete $guard} } else { after 40 }
+            if {![catch {::file mtime $guard} mt] && [clock seconds] - $mt > $mutexStale} { catch {::file delete $guard} ; continue }
+            after 40
             continue
         }
         lockStep mutex
