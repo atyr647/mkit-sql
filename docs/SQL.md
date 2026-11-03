@@ -390,7 +390,7 @@ EXPLAIN SELECT name FROM employees WHERE id = 5;
 What the planner does:
 
 * **Metakit-side narrowing.** Top-level `AND` conditions of the form `column = / < / <= / > / >= constant`,
-  `BETWEEN`, and `IN (constants)` on number and text columns are handed to Metakit's own `mk::select`, which tests the
+  `BETWEEN`, `IN (constants)`, and `LIKE 'abc%'` / `'%abc%'` (case-sensitive, no `_` or `ESCAPE`; handed over as Metakit's `-glob`: a 20,000-row prefix scan went from 178 ms to 14 ms) on number and text columns are handed to Metakit's own `mk::select`, which tests the
   column in C. Only the rows that can match are read, and the complete `WHERE` is still evaluated on them, so this can
   only ever skip rows that cannot match. Applies to tables of at least `::mkitsql::pushMin` (500) rows, and to
   `UPDATE` / `DELETE` too. On a table of 1,000,000 rows `WHERE id = 777777` takes 0.1 s instead of 3.8 s; a range

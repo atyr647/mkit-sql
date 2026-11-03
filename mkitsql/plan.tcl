@@ -490,6 +490,13 @@ proc ::mkitsql::pushSpec {s id conjuncts} {
                 set r1 [pushOne $cols $id $e >= $lo] ; set r2 [pushOne $cols $id $e <= $hi]
                 if {[llength $r1] && [llength $r2]} { lappend conds {*}$r1 {*}$r2 }
             }
+            like {
+                # col LIKE 'abc%' / '%abc%' (case-sensitive, no _): Metakit's own -glob decides it in C; the full LIKE is still evaluated on the candidates
+                lassign $c _ e pat esc neg ci
+                if {$neg || $ci || $esc ne "" || [lindex $e 0] ne "ref" || [lindex $pat 0] ne "lit" || [lindex $pat 1] ne "text"} continue
+                set r [pushLike $cols $id $e [lindex $pat 2]]
+                if {[llength $r]} { lappend conds {*}$r }
+            }
             in {
                 lassign $c _ e items neg
                 if {$neg || [llength $in] || [lindex $e 0] ne "ref" || ![llength $items] || [llength $items] > 64} continue
@@ -508,6 +515,24 @@ proc ::mkitsql::pushSpec {s id conjuncts} {
     # equalities narrow most, so Metakit should apply them first
     set conds [lsort -index 0 $conds]
     return [list $conds $in]
+}
+# column LIKE pattern -> {{glob column pattern}} for a text column, a pattern without _ and with at least one literal character, else {}
+proc ::mkitsql::pushLike {cols id ref pat} {
+    lassign $ref _ lvl src name rty
+    if {$lvl != 0 || $src != $id} { return {} }
+    set key [string tolower $name]
+    if {![dict exists $cols $key]} { return {} }
+    lassign [dict get $cols $key] cname letter
+    if {$letter ne "S" || [string first _ $pat] >= 0 || $pat eq ""} { return {} }
+    set g "" ; set lit 0 ; set afterPct 0
+    foreach ch [split $pat ""] {
+        if {$ch eq "%"} { if {!$afterPct} { append g "*" } ; set afterPct 1 ; continue }
+        set afterPct 0
+        if {$ch in {* ? [ ] \\}} { append g "\\" }
+        append g $ch ; set lit 1
+    }
+    if {!$lit} { return {} }
+    return [list [list glob $cname $g]]
 }
 # one comparison  column OP literal  ->  list of {kind column value} conditions, or {} when it cannot be pushed safely
 proc ::mkitsql::pushOne {cols id ref op k} {

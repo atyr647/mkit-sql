@@ -126,7 +126,7 @@ jobs:
       - name: SQL added in 0.5 - correlated subqueries remembered per key, EXCLUDE / DISTINCT / IGNORE NULLS, interval aggregates, SIMILAR TO, duplicate column names, ROLLUP / CUBE / GROUPING SETS, COLLATE; both kits, tiny budget too
         run: |
           for k in $T86 $T85; do
-            for t in decorrelate window_ext ivagg similar dupcols groupsets collate review2 insertrows aggfast tokenizer; do echo "== $k / $t"; MKIT_MK4TCL=builtin $k tests/$t.tcl; done
+            for t in decorrelate window_ext ivagg similar dupcols groupsets collate review2 insertrows aggfast tokenizer likepush; do echo "== $k / $t"; MKIT_MK4TCL=builtin $k tests/$t.tcl; done
             for t in ivagg groupsets decorrelate; do MKIT_MEMBYTES=2000 MKIT_CHUNK=11 MKIT_MK4TCL=builtin $k tests/$t.tcl; done
           done
           for b in standalone studio; do for t in decorrelate window_ext collate groupsets; do MKIT_BACKEND=$b MKIT_MK4TCL=builtin $T86 tests/$t.tcl; done; done
@@ -284,7 +284,7 @@ jobs:
           "$T9" tests/lint.tcl
           for b in standalone studio; do MKIT_BACKEND=$b "$T9" tests/run.tcl; done
       - name: Injection, NULL forgery, code generation, spill, robustness, review regressions, drop view, pushdown, bulk writes
-        run: for t in doc_examples injection nullforge codegen_audit dropview spillroundtrip robustness review_regress pushdown bulkwrite decorrelate window_ext ivagg similar dupcols groupsets collate review2 insertrows aggfast tokenizer; do echo "== $t"; "$T9" tests/$t.tcl; done
+        run: for t in doc_examples injection nullforge codegen_audit dropview spillroundtrip robustness review_regress pushdown bulkwrite decorrelate window_ext ivagg similar dupcols groupsets collate review2 insertrows aggfast tokenizer likepush; do echo "== $t"; "$T9" tests/$t.tcl; done
       - name: Temp files and locking (file modes are decimal on purpose - Tcl 9 reads 0600 as decimal), lock crash, soak, fuzzer
         run: |
           "$T9" tests/tempsec.tcl
@@ -387,7 +387,7 @@ jobs:
       - name: Engine and Metakit-specific tests, REAL Metakit, both kits
         run: |
           for k in "$T86" "$T85"; do
-            for t in run real_metakit doc_examples injection nullforge review_regress decorrelate window_ext ivagg similar dupcols groupsets collate review2 insertrows aggfast tokenizer; do echo "== $k / $t"; MKIT_MK4TCL=builtin "$k" tests/$t.tcl; done
+            for t in run real_metakit doc_examples injection nullforge review_regress decorrelate window_ext ivagg similar dupcols groupsets collate review2 insertrows aggfast tokenizer likepush; do echo "== $k / $t"; MKIT_MK4TCL=builtin "$k" tests/$t.tcl; done
           done
       - name: Forcing a file to disk (FlushFileBuffers through PowerShell on Windows, sync on macOS)
         run: MKIT_MK4TCL=builtin "$T86" tests/syncdisk.tcl

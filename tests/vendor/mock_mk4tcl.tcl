@@ -279,6 +279,7 @@ proc ::mkmock::cmd_select {path args} {
                 -exact { if {$t in {I L}} { set ok [expr {$x == $v}] } else { set ok [expr {$x eq $v}] } }
                 -min   { if {$t in {I L F D}} { set ok [expr {$x >= $v}] } else { set ok [expr {[string compare $x $v] >= 0}] } }
                 -max   { if {$t in {I L F D}} { set ok [expr {$x <= $v}] } else { set ok [expr {[string compare $x $v] <= 0}] } }
+                -glob  { set ok [string match $v $x] }
                 default { error "unknown select option $op" }
             }
             if {!$ok} break
