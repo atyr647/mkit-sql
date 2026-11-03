@@ -1,0 +1,83 @@
+diff --git a/mkstudio.vfs/lib/app-mkstudio/app.tcl b/mkstudio.vfs/lib/app-mkstudio/app.tcl
+index 97f1e85..68892e0 100644
+--- a/mkstudio.vfs/lib/app-mkstudio/app.tcl
++++ b/mkstudio.vfs/lib/app-mkstudio/app.tcl
+@@ -626,7 +626,7 @@ proc ::app::newSample {} {
+     afterDbChange
+     ::explorer::expandDb $tag
+     setStatus "Sample database '$tag' created: employees (with a skills subview), departments, products, orders (with a lines subview)." ok
+-    set text "-- Sample database. Press F5 to run the whole script, or select a statement and press F5.\nSELECT TOP 10 name, title, salary\nFROM employees\nORDER BY salary DESC;\n\nSELECT dept, COUNT(*) AS people, ROUND(AVG(salary), 0) AS avg_salary\nFROM employees\nGROUP BY dept\nORDER BY avg_salary DESC;\n\n-- skills is a subview (a nested table in every row).\n-- Double-click a \u25B8 cell in the grid to open it.\nSELECT id, name, skills FROM employees WHERE skills >= 3;"
++    set text "-- Sample database. Press F5 to run the whole script, or select a statement and press F5.\nSELECT name, title, salary\nFROM employees\nORDER BY salary DESC\nLIMIT 10;\n\nSELECT dept, COUNT(*) AS people, ROUND(AVG(salary), 0) AS avg_salary\nFROM employees\nGROUP BY dept\nORDER BY avg_salary DESC;\n\n-- skills is a subview (a nested table in every row).\n-- Double-click a \u25B8 cell in the grid to open it.\nSELECT id, name, skills FROM employees WHERE skills >= 3;"
+     set id [newQuery $text $tag 1]
+ }
+ 
+@@ -888,10 +888,10 @@ proc ::app::saveScript {{as 0} {id ""}} {
+     set f [docFrame $id]
+     set file $A(file,$id)
+     if {$as || $file eq ""} {
+-        set file [tk_getSaveFile -title "Save script" -defaultextension .mkql \
+-            -initialfile [expr {$A(file,$id) ne "" ? [file tail $A(file,$id)] : "query.mkql"}] \
++        set file [tk_getSaveFile -title "Save script" -defaultextension .sql \
++            -initialfile [expr {$A(file,$id) ne "" ? [file tail $A(file,$id)] : "query.sql"}] \
+             -initialdir [expr {$cfg(lastDir) ne "" && [file isdirectory $cfg(lastDir)] ? $cfg(lastDir) : [pwd]}] \
+-            -filetypes {{{MKQL scripts} {.mkql .sql}} {{All files} *}}]
++            -filetypes {{{SQL scripts} {.sql .mkql}} {{All files} *}}]
+         if {$file eq ""} { return 0 }
+     }
+     if {[catch {
+@@ -910,7 +910,7 @@ proc ::app::openScript {} {
+     variable A ; variable cfg
+     set file [tk_getOpenFile -title "Open script" \
+         -initialdir [expr {$cfg(lastDir) ne "" && [file isdirectory $cfg(lastDir)] ? $cfg(lastDir) : [pwd]}] \
+-        -filetypes {{{MKQL scripts} {.mkql .sql .txt}} {{All files} *}}]
++        -filetypes {{{SQL scripts} {.sql .mkql .txt}} {{All files} *}}]
+     if {$file eq ""} return
+     if {[catch {
+         set in [open $file r] ; fconfigure $in -encoding utf-8
+diff --git a/mkstudio.vfs/lib/app-mkstudio/docs.tcl b/mkstudio.vfs/lib/app-mkstudio/docs.tcl
+index 1df0d37..9eabb2b 100644
+--- a/mkstudio.vfs/lib/app-mkstudio/docs.tcl
++++ b/mkstudio.vfs/lib/app-mkstudio/docs.tcl
+@@ -250,7 +250,7 @@ proc ::qdoc::execute {id {parseOnly 0}} {
+             message {
+                 say $id "  \u2714  [dict get $res text]  \u00B7  $ms ms\n\n" ok
+                 if {[dict exists $res use]} { setDb $id [dict get $res use] ; set db [dict get $res use] }
+-                if {$kind in {insert update delete create drop alter commit rollback}} { set changed 1 }
++                if {$kind in {insert update delete merge create drop alter commit rollback}} { set changed 1 }
+             }
+         }
+     }
+diff --git a/mkstudio.vfs/lib/app-mkstudio/loader.tcl b/mkstudio.vfs/lib/app-mkstudio/loader.tcl
+index 5db1a59..0153a20 100644
+--- a/mkstudio.vfs/lib/app-mkstudio/loader.tcl
++++ b/mkstudio.vfs/lib/app-mkstudio/loader.tcl
+@@ -1,7 +1,14 @@
+ # loader.tcl -- loads every MK Studio source file, in dependency order.
+ package require Tk 8.5
+ set ::mkstudio_lib [file dirname [info script]]
+-foreach f {theme icons menus widgets store engine mkql grid editor explorer docs app} {
++foreach f {theme icons menus widgets store engine} {
++    source -encoding utf-8 [file join $::mkstudio_lib $f.tcl]
++}
++# the query language: mkit-sql (standard SQL).  To use the old built-in dialect instead, source
++# mkql.tcl here and drop the next two lines.
++source -encoding utf-8 [file join $::mkstudio_lib .. mkitsql mkitsql.tcl]
++source -encoding utf-8 [file join $::mkstudio_lib .. mkitsql engine_studio.tcl]
++foreach f {grid editor explorer docs app} {
+     source -encoding utf-8 [file join $::mkstudio_lib $f.tcl]
+ }
+ package provide app-mkstudio 1.0
+diff --git a/mkstudio.vfs/lib/app-mkstudio/store.tcl b/mkstudio.vfs/lib/app-mkstudio/store.tcl
+index 9286540..52c90c4 100644
+--- a/mkstudio.vfs/lib/app-mkstudio/store.tcl
++++ b/mkstudio.vfs/lib/app-mkstudio/store.tcl
+@@ -309,6 +309,9 @@ proc ::store::createView {tag name layout} {
+ 
+ proc ::store::dropView {tag name} {
+     if {![hasView $tag $name]} { error "View '$name' does not exist in '$tag'." }
++    # `mk::view delete` leaves the rows behind: a view created again under the same name would
++    # get its old rows back.  Empty it first.
++    catch {mk::view size $tag.$name 0}
+     mk::view delete $tag.$name
+     touch $tag
+ }

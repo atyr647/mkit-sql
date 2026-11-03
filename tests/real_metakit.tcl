@@ -2,8 +2,8 @@
 # 64-bit values, binary data, unicode, nested subviews, ALTERs, drop/recreate):
 #   MKIT_MK4TCL=/path/to/libMk4tcl.so tclsh tests/real_metakit.tcl
 set here [file dirname [file normalize [info script]]]
-if {![info exists ::env(MKIT_MK4TCL)] || $::env(MKIT_MK4TCL) eq ""} { puts "set MKIT_MK4TCL to the Mk4tcl shared library" ; exit 2 }
-load $::env(MKIT_MK4TCL) Mk4tcl
+if {![info exists ::env(MKIT_MK4TCL)] || $::env(MKIT_MK4TCL) eq ""} { puts "set MKIT_MK4TCL to the Mk4tcl shared library, or to 'builtin' inside a tclkit" ; exit 2 }
+source $here/mk4load.tcl
 source $here/vendor/store.tcl
 source [file join [file dirname $here] mkitsql mkitsql.tcl]
 set f [expr {[info exists ::env(TMPDIR)] ? $::env(TMPDIR) : "/tmp"}]/mkitsql_real_[pid].mk ; file delete $f

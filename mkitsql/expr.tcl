@@ -106,7 +106,7 @@ proc ::mkitsql::rt::num {v} {
     if {$b == 0} { ::mkitsql::fail "Division by zero" }
     expr {fmod($a, $b)}
 }
-::mkitsql::defstrict concat {a b} { return $a$b }
+::mkitsql::defstrict cat {a b} { return $a$b }
 
 # ---- comparison ------------------------------------------------------------
 # n = numeric, s = text/blob, m = mixed (text vs number: compare as numbers when
@@ -616,7 +616,7 @@ proc ::mkitsql::cgBin {node ctx} {
         || {
             set ca [cg $a $ctx] ; set cb [cg $b $ctx]
             set wa [textWord $ca] ; set wb [textWord $cb]
-            return [list "\[::mkitsql::rt::concat $wa $wb\]" text]
+            return [list "\[::mkitsql::rt::cat $wa $wb\]" text]
         }
         = - <> - < - <= - > - >= {
             set ca [cg $a $ctx] ; set cb [cg $b $ctx]

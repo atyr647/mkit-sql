@@ -429,7 +429,7 @@ proc ::mkitsql::cfNode {t pushable stVar} {
     error "cfNode: [lindex $t 0]"
 }
 
-proc ::mkitsql::cfLeaf {s pushable stVar} {
+proc ::mkitsql::cfLeaf {s pushable stVar {latmap {}}} {
     upvar 1 $stVar st
     set id [dict get $s id]
     set lay [dict get $st lay $id]
@@ -482,8 +482,13 @@ proc ::mkitsql::cfLeaf {s pushable stVar} {
                 props [dict get $lay props] subs [dict get $lay subs] filter $filter]
         }
         derived {
-            set om [expr {[dict exists $s outerok] && [dict get $s outerok] ? [dict get $st outer] : {}}]
-            set plan [dict create kind derived sub [compileQuery [dict get $s bq] $om] filter $filter]
+            if {[dict exists $s lateralq] && [dict get $s lateralq]} {
+                set plan [dict create kind latderived \
+                    sub [compileQuery [dict get $s bq] [concat [list $latmap] [dict get $st outer]]] filter $filter]
+            } else {
+                set om [expr {[dict exists $s outerok] && [dict get $s outerok] ? [dict get $st outer] : {}}]
+                set plan [dict create kind derived sub [compileQuery [dict get $s bq] $om] filter $filter]
+            }
         }
         wref {
             set plan [dict create kind wref tid [dict get $s tid] filter $filter]
@@ -502,7 +507,12 @@ proc ::mkitsql::cfJoin {t pushable stVar} {
     lassign $t _ type l r on
     set outer [dict get $st outer]
     set lres [cfNode $l [expr {$pushable && $type in {inner cross left}}] st]
-    set rres [cfNode $r [expr {$pushable && $type in {inner cross right}}] st]
+    if {[lindex $r 0] eq "src" && [dict exists [lindex $r 1] lateralq] && [dict get [lindex $r 1] lateralq]} {
+        if {$type in {right full}} { fail "RIGHT / FULL JOIN is not supported with LATERAL" }
+        set rres [cfLeaf [lindex $r 1] [expr {$pushable && $type in {inner cross}}] st [dict get $lres map]]
+    } else {
+        set rres [cfNode $r [expr {$pushable && $type in {inner cross right}}] st]
+    }
     set lsrcs [dict get $lres srcs] ; set rsrcs [dict get $rres srcs]
     set wl [dict get $lres width] ; set wr [dict get $rres width]
     set lmap [dict get $lres map] ; set rmap [dict get $rres map]
@@ -510,9 +520,10 @@ proc ::mkitsql::cfJoin {t pushable stVar} {
     dict for {k v} $rmap { dict set cmap $k [expr {$v + $wl}] }
 
     set rplan [dict get $rres plan]
-    set lateral [expr {[dict get $rplan kind] eq "lateral"}]
+    set latDerived [expr {[dict get $rplan kind] eq "latderived"}]
+    set lateral [expr {[dict get $rplan kind] eq "lateral" || $latDerived}]
     set curPos -1
-    if {$lateral} {
+    if {$lateral && !$latDerived} {
         set parent [dict get $rplan parent]
         set key $parent,[string tolower $curCol]
         if {![dict exists $lmap $key]} { fail "A subview can only be joined to the table that owns it" }
@@ -565,7 +576,7 @@ proc ::mkitsql::cfJoin {t pushable stVar} {
 
     set plan [dict create kind join type $type left [dict get $lres plan] right $rplan \
         wl $wl wr $wr lkey $lkp rkey $rkp resid $residProc post $postProc \
-        lateral $lateral curPos $curPos]
+        lateral $lateral latderived $latDerived curPos $curPos]
     return [dict create plan $plan srcs [concat $lsrcs $rsrcs] width [expr {$wl + $wr}] map $cmap]
 }
 
@@ -821,6 +832,7 @@ proc ::mkitsql::runSrc {node outer stop} {
         }
         join { return [runJoin $node $outer] }
     }
+    if {[dict get $node kind] eq "latderived"} { fail "A LATERAL subquery must come after another FROM item (use JOIN LATERAL or a comma)" }
     error "runSrc: [dict get $node kind]"
 }
 
@@ -898,11 +910,16 @@ proc ::mkitsql::runJoin {node outer} {
 
     if {[dict get $node lateral]} {
         set rn [dict get $node right]
-        set curPos [dict get $node curPos]
-        set sub [dict get $rn sub]
+        set latDerived [dict get $node latderived]
+        if {!$latDerived} { set curPos [dict get $node curPos] ; set sub [dict get $rn sub] }
         foreach l $L {
-            set path [lindex $l $curPos].$sub
-            set R [scanPath $path $rn $outer 0]
+            if {$latDerived} {
+                # LATERAL (subquery): run it once per left row, with that row visible as outer level 1
+                set R [filterRows [runPlan [dict get $rn sub] [linsert $outer 0 $l]] [dict get $rn filter] $outer]
+            } else {
+                set path [lindex $l $curPos].$sub
+                set R [scanPath $path $rn $outer 0]
+            }
             set hit 0
             foreach r $R {
                 set t [list {*}$l {*}$r]

@@ -3,11 +3,7 @@
 # script.txt: one statement per line, prefixed "S " (setup, no output) or "Q " (query, output).
 set here [file dirname [file normalize [info script]]]
 set root [file dirname [file dirname $here]]
-if {[info exists ::env(MKIT_MK4TCL)] && $::env(MKIT_MK4TCL) ne ""} {
-    load $::env(MKIT_MK4TCL) Mk4tcl
-} else {
-    source $root/tests/vendor/mock_mk4tcl.tcl
-}
+source $root/tests/mk4load.tcl
 source $root/tests/vendor/store.tcl
 source $root/mkitsql/mkitsql.tcl
 lassign $argv script out

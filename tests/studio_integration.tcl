@@ -15,20 +15,16 @@ file copy $::env(MKSTUDIO_DIR)/mkstudio.vfs $tmp/mkstudio.vfs
 set fh [open $tmp/mkstudio.vfs/lib/app-mkstudio/loader.tcl w]
 puts $fh "package require Tk 8.5
 set ::mkstudio_lib \[file dirname \[info script\]\]
-foreach f {theme icons widgets store} { source -encoding utf-8 \[file join \$::mkstudio_lib \$f.tcl\] }
+foreach f {theme icons menus widgets store engine} { source -encoding utf-8 \[file join \$::mkstudio_lib \$f.tcl\] }
 source $root/mkitsql/mkitsql.tcl
-source $root/mkitsql/mkql_compat.tcl
+source $root/mkitsql/engine_studio.tcl
 foreach f {grid editor explorer docs app} { source -encoding utf-8 \[file join \$::mkstudio_lib \$f.tcl\] }
 package provide app-mkstudio 1.0"
 close $fh
 
 set ::mkstudio_root $tmp/mkstudio.vfs
-if {[info exists ::env(MKIT_MK4TCL)] && $::env(MKIT_MK4TCL) ne ""} {
-    load $::env(MKIT_MK4TCL) Mk4tcl
-    puts "(using the real Mk4tcl)"
-} else {
-    source $::env(MKSTUDIO_DIR)/tests/mock_mk4tcl.tcl
-}
+source $root/tests/mk4load.tcl
+puts "(Tcl [info patchlevel], $::mk4kind)"
 lappend auto_path $::mkstudio_root/lib
 package require app-mkstudio
 set ::env(HOME) $tmp/home ; file mkdir $::env(HOME)
@@ -78,14 +74,14 @@ set id [run "SELECT 1; SELECT nope FROM employees; SELECT 3"]
 check rterr  $::qdoc::Q($id,nres) 1
 
 # row cap message path
-set ::mkql::maxRows 3
+set ::engine::maxRows 3
 set id [run "SELECT id FROM employees"]
 check capped [::grid::count [gridpath $id 1]] 3
-set ::mkql::maxRows 100000
+set ::engine::maxRows 100000
 
 # editor highlighting / completion tables come from the engine
-check kw [expr {[lsearch -exact $::mkql::keywords SELECT] >= 0}] 1
-check fn [expr {[lsearch -exact $::mkql::functions UPPER] >= 0}] 1
+check kw [expr {[lsearch -exact $::engine::keywords SELECT] >= 0}] 1
+check fn [expr {[lsearch -exact $::engine::functions UPPER] >= 0}] 1
 
 puts "$pass passed, $fail failed"
 file delete -force $tmp

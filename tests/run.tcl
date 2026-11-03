@@ -6,13 +6,8 @@
 
 set here [file dirname [file normalize [info script]]]
 set root [file dirname $here]
-if {[info exists ::env(MKIT_MK4TCL)] && $::env(MKIT_MK4TCL) ne ""} {
-    # run against a real Mk4tcl: MKIT_MK4TCL=/path/to/Mk4tcl.so
-    load $::env(MKIT_MK4TCL) Mk4tcl
-    puts "(using the real Mk4tcl: $::env(MKIT_MK4TCL))"
-} else {
-    source $here/vendor/mock_mk4tcl.tcl
-}
+source $here/mk4load.tcl
+puts "(Tcl [info patchlevel], $::mk4kind)"
 source $here/vendor/store.tcl
 source $root/mkitsql/mkitsql.tcl
 
@@ -432,6 +427,22 @@ check cancel_corr [errmsg "SELECT COUNT(*) FROM cx a WHERE a.n > (SELECT AVG(n) 
 set mkitsql::progressHook {}
 check cancel_reset [one "SELECT COUNT(*) FROM cx WHERE n < 0"] 0
 q "DROP TABLE cx"
+
+# ============================================================================
+#  LATERAL
+# ============================================================================
+check lat_topn   [rows "SELECT d.id, t.id FROM departments d CROSS JOIN LATERAL (SELECT e.id FROM employees e WHERE e.dept = d.id ORDER BY e.id DESC LIMIT 2) t ORDER BY d.id, t.id"] [
+    set o {} ; foreach d {1 2 3 4 5} { set ids {} ; foreach r $emp { if {[lindex $r 3] == $d} { lappend ids [lindex $r 0] } }
+        foreach i [lrange [lsort -integer -decreasing $ids] 0 1] { lappend o [list $d $i] } } ; lsort -index 0 -integer [lsort -index 1 -integer $o]]
+check lat_comma  [rows "SELECT d.id, t.id FROM departments d, LATERAL (SELECT e.id FROM employees e WHERE e.dept = d.id AND e.id <= 3) t ORDER BY d.id"] {{2 3} {3 1} {5 2}}
+check lat_left   [rows "SELECT d.id, t.n FROM departments d LEFT JOIN LATERAL (SELECT COUNT(*) AS n FROM employees e WHERE e.dept = d.id AND e.id > 18) t ON 1 = 1 ORDER BY d.id"] {{1 1} {2 0} {3 0} {4 1} {5 0}}
+check lat_left_null [col0 "SELECT d.id FROM departments d LEFT JOIN LATERAL (SELECT e.id FROM employees e WHERE e.dept = d.id AND e.id > 1000) t ON 1 = 1 WHERE t.id IS NULL ORDER BY d.id"] {1 2 3 4 5}
+check lat_on     [rows "SELECT d.id, t.v FROM departments d JOIN LATERAL (SELECT d.id * 10 AS v) t ON t.v > 20 ORDER BY d.id"] {{3 30} {4 40} {5 50}}
+check lat_same   [rows "SELECT d.id, (SELECT COUNT(*) FROM employees e WHERE e.dept = d.id) FROM departments d ORDER BY d.id"] [rows "SELECT d.id, t.n FROM departments d CROSS JOIN LATERAL (SELECT COUNT(*) AS n FROM employees e WHERE e.dept = d.id) t ORDER BY d.id"]
+check lat_first  [rows "SELECT * FROM LATERAL (SELECT 1 AS x) t"] {1}
+check lat_nested [rows "SELECT d.id, t.m FROM departments d, LATERAL (SELECT MAX(e.id) AS m FROM employees e, LATERAL (SELECT 1 AS one) z WHERE e.dept = d.id) t ORDER BY d.id"] [rows "SELECT d.id, (SELECT MAX(e.id) FROM employees e WHERE e.dept = d.id) FROM departments d ORDER BY d.id"]
+check lat_right  [errmsg "SELECT 1 FROM departments d RIGHT JOIN LATERAL (SELECT 1 AS x) t ON 1 = 1"] {RIGHT / FULL JOIN is not supported with LATERAL}
+check lat_nosub  [expr {[errmsg "SELECT 1 FROM departments d, LATERAL employees e"] ne "(no error)"}] 1
 
 # ============================================================================
 #  MERGE

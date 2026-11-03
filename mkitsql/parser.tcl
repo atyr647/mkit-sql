@@ -36,7 +36,7 @@ namespace eval ::mkitsql {
         ALTER ADD COLUMN RENAME TO IF BEGIN COMMIT ROLLBACK TRANSACTION WORK START TRUNCATE
         NULLS FIRST LAST NEXT ROW ROWS ONLY DEFAULT USE SHOW TABLES DATABASES DESCRIBE
         EXTRACT TRIM SUBSTRING POSITION FOR LEADING TRAILING BOTH TYPE DATA
-        OVER PARTITION ROWS RANGE GROUPS UNBOUNDED PRECEDING FOLLOWING CURRENT FILTER WINDOW RECURSIVE
+        OVER PARTITION ROWS RANGE GROUPS UNBOUNDED PRECEDING FOLLOWING CURRENT FILTER WINDOW RECURSIVE LATERAL
         ANY SOME MERGE USING MATCHED INTERVAL
     }
     variable aggs {COUNT SUM AVG MIN MAX STRING_AGG GROUP_CONCAT}
@@ -966,6 +966,8 @@ proc ::mkitsql::parseJoined {} {
 
 # tableref := name{.name} {[n].sub} [[AS] alias]  |  (query) [AS] alias [(cols)]  |  (joined)
 proc ::mkitsql::parseTableRef {} {
+    set lateral 0
+    if {[isKw [peek] LATERAL] && [isOp [peek 1] (]} { advance ; set lateral 1 }
     if {[isOp [peek] (]} {
         advance
         if {[startsQuery]} {
@@ -979,8 +981,9 @@ proc ::mkitsql::parseTableRef {} {
                 while {[acceptOp ,]} { lappend cols [parseName "column name"] }
                 expectOp )
             }
-            return [list derived $q $alias $cols]
+            return [list derived $q $alias $cols [expr {$lateral ? "lateral" : ""}]]
         }
+        if {$lateral} { err "LATERAL must be followed by a subquery" [peek] }
         set f [parseFrom]
         expectOp )
         return $f

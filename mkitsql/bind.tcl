@@ -251,13 +251,22 @@ proc ::mkitsql::findInTree {t name side} {
 }
 
 proc ::mkitsql::bindSource {node} {
-    variable fromSoFar ; variable ctes ; variable curCol
+    variable fromSoFar ; variable ctes ; variable curCol ; variable scopes
     switch -- [lindex $node 0] {
         derived {
             lassign $node _ q alias cols outerok
+            # LATERAL with nothing to its left is just an ordinary subquery
+            if {$outerok eq "lateral" && ![llength $fromSoFar]} { set outerok "" }
             # a subquery in FROM cannot see its siblings (no LATERAL); only the internal
             # row-IN rewrite is allowed to see the enclosing query
-            if {$outerok eq "outerok"} { set bq [bindQuery $q] } else { set bq [withScopes [list] {bindQuery $q}] }
+            if {$outerok eq "outerok"} {
+                set bq [bindQuery $q]
+            } elseif {$outerok eq "lateral"} {
+                # LATERAL: the subquery sees the FROM items to its left (they become scope level 1)
+                set bq [withScopes [linsert $scopes 0 $fromSoFar] {bindQuery $q}]
+            } else {
+                set bq [withScopes [list] {bindQuery $q}]
+            }
             set outNames [dict get $bq outNames] ; set outTypes [dict get $bq outTypes]
             if {[llength $cols]} {
                 if {[llength $cols] != [llength $outNames]} {
@@ -265,7 +274,7 @@ proc ::mkitsql::bindSource {node} {
                 }
                 set outNames $cols
             }
-            return [newSource derived $alias [derivedCols $outNames $outTypes $bq] bq $bq outerok [expr {$outerok eq "outerok"}]]
+            return [newSource derived $alias [derivedCols $outNames $outTypes $bq] bq $bq outerok [expr {$outerok eq "outerok"}] lateralq [expr {$outerok eq "lateral"}]]
         }
         table {
             lassign $node _ parts subs alias
