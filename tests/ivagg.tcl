@@ -39,7 +39,7 @@ check "MAX is a value of the table" [lindex $got 2] [fmt $mx]
 # AVG
 lassign [sumOf $all] sm ss
 set n [llength $all]
-check "AVG" [lindex [lindex [dict get [q "SELECT AVG($iv) FROM t"] rows] 0] 0] [fmt [list [expr {round($sm / double($n))}] [expr {$ss / double($n)}]]]
+check "AVG (the fractional month becomes days of 30 days)" [lindex [lindex [dict get [q "SELECT AVG($iv) FROM t"] rows] 0] 0] [mkitsql::ivFormat [mkitsql::ivScale [mkitsql::ivMake $sm $ss] [expr {1.0 / $n}]]]
 # grouped
 set byg [dict create]
 foreach r $rows { dict lappend byg [lindex $r 1] [ivOf $r] }
