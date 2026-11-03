@@ -37,6 +37,9 @@ namespace eval ::mkitsql {
     array set likeCache {}
     variable planCorr
     array set planCorr {}
+    variable planMemo
+    array set planMemo {}
+    variable volatileSeen 0        ;# set while compiling: the code being compiled calls RANDOM()
 }
 namespace eval ::mkitsql::rt {}
 
@@ -223,8 +226,68 @@ proc ::mkitsql::likeRegexp {pat esc} {
     set likeCache([list $pat $esc]) "(?s)$re"
     return $likeCache([list $pat $esc])
 }
+# SIMILAR TO: the SQL regular expression (% any string, _ any character, | * + ? {m,n} ( ) [...] as in a regular expression, every other
+# character literal - including . ^ $) as a Tcl regular expression.  The escape character defaults to backslash, as in PostgreSQL.
+proc ::mkitsql::similarRegexp {pat esc} {
+    variable likeCache
+    if {[info exists likeCache([list S $pat $esc])]} { return $likeCache([list S $pat $esc]) }
+    set re "" ; set n [string length $pat] ; set prevQuant 0
+    for {set i 0} {$i < $n} {incr i} {
+        set c [string index $pat $i] ; set quant 0
+        if {$esc ne "" && $c eq $esc} {
+            if {$i + 1 >= $n} { ::mkitsql::fail "Invalid SIMILAR TO pattern: it ends with the escape character" }
+            incr i ; append re [regsub -all {[][\\.^$*+?(){}|]} [string index $pat $i] {\\&}]
+        } elseif {$c eq "\["} {
+            # a bracket expression: copied up to its closing ], escapes inside it made literal
+            set j [expr {$i + 1}] ; set body "\[" 
+            if {[string index $pat $j] eq "^"} { append body "^" ; incr j }
+            if {[string index $pat $j] eq "\]"} { append body "\\\]" ; incr j }
+            set closed 0
+            while {$j < $n} {
+                set d [string index $pat $j]
+                if {$esc ne "" && $d eq $esc && $j + 1 < $n} {
+                    incr j ; append body [regsub -all {[][\\^-]} [string index $pat $j] {\\&}]
+                } elseif {$d eq "\["} {
+                    set k [string first ":\]" $pat $j]
+                    if {[string index $pat [expr {$j + 1}]] eq ":" && $k > 0} {
+                        append body [string range $pat $j [expr {$k + 1}]] ; set j [expr {$k + 1}]
+                    } else { append body "\\\[" }
+                } elseif {$d eq "\]"} {
+                    set closed 1 ; break
+                } elseif {$d eq "\\"} {
+                    append body "\\\\"
+                } else { append body $d }
+                incr j
+            }
+            if {!$closed} { ::mkitsql::fail "Invalid SIMILAR TO pattern: a '\[' has no closing '\]'" }
+            append re $body "\]" ; set i $j
+        } elseif {$c eq "%"} { append re ".*"
+        } elseif {$c eq "_"} { append re "."
+        } elseif {$c eq "("} { append re "(?:"
+        } elseif {$c in {* + ?}} {
+            if {$prevQuant} { ::mkitsql::fail "Invalid SIMILAR TO pattern: '$c' cannot follow another repetition" }
+            append re $c ; set quant 1
+        } elseif {$c eq "\{"} {
+            set k [string first "\}" $pat $i]
+            if {$k < 0 || ![regexp {^\{\d+(,\d*)?\}$} [string range $pat $i $k]]} { ::mkitsql::fail "Invalid SIMILAR TO pattern: bad repetition '{...}'" }
+            if {$prevQuant} { ::mkitsql::fail "Invalid SIMILAR TO pattern: '\{' cannot follow another repetition" }
+            append re [string range $pat $i $k] ; set i $k ; set quant 1
+        } elseif {$c in {| )}} { append re $c
+        } else { append re [regsub -all {[][\\.^$*+?(){}|]} $c {\\&}] }
+        set prevQuant $quant
+    }
+    set re "(?s)^(?:$re)\$"
+    if {[catch {regexp -- $re ""} err]} { ::mkitsql::fail "Invalid SIMILAR TO pattern '$pat': $err" }
+    if {[array size likeCache] > 500} { array unset likeCache }
+    set likeCache([list S $pat $esc]) $re
+    return $re
+}
 proc ::mkitsql::rt::like {v pat esc ci} {
     if {$v eq "\uFDD0NULL" || $pat eq "\uFDD0NULL" || $esc eq "\uFDD0NULL"} { return "\uFDD0NULL" }
+    if {$ci == 2} {
+        # SIMILAR TO: backslash is the escape character unless an ESCAPE clause says otherwise (an empty ESCAPE does not switch it off)
+        return [regexp -- [::mkitsql::similarRegexp $pat [expr {$esc eq "" ? "\\" : $esc}]] $v]
+    }
     set re [::mkitsql::likeRegexp $pat $esc]
     if {$ci} { return [regexp -nocase -- $re $v] }
     return [regexp -- $re $v]
@@ -674,19 +737,19 @@ proc ::mkitsql::cg {node ctx} {
             lassign $node _ e bq neg refs
             set a [cg $e $ctx]
             set id [subPlan $bq $refs $ctx]
-            set code "\[::mkitsql::rt::insub $id [lindex $a 0] \$r0 \$outer\]"
+            set code "\[::mkitsql::rt::insub $id [lindex $a 0] \$r0 \$outer [subKey $refs $ctx]\]"
             if {$neg} { set code "\[::mkitsql::rt::not $code\]" }
             return [list $code bool]
         }
         exists {
             lassign $node _ bq refs
             set id [subPlan $bq $refs $ctx]
-            return [list "\[::mkitsql::rt::exists $id \$r0 \$outer\]" bool]
+            return [list "\[::mkitsql::rt::exists $id \$r0 \$outer [subKey $refs $ctx]\]" bool]
         }
         sub {
             lassign $node _ bq refs ty
             set id [subPlan $bq $refs $ctx]
-            return [list "\[::mkitsql::rt::scalar $id \$r0 \$outer\]" $ty]
+            return [list "\[::mkitsql::rt::scalar $id \$r0 \$outer [subKey $refs $ctx]\]" $ty]
         }
         quant {
             lassign $node _ op kind e bq refs ty
@@ -694,7 +757,7 @@ proc ::mkitsql::cg {node ctx} {
             set id [subPlan $bq $refs $ctx]
             set nm [dict get {= eq <> ne < lt <= le > gt >= ge} $op]
             set ck [cmpKind [lindex $a 1] $ty]
-            return [list "\[::mkitsql::rt::quant $id $nm $kind $ck [lindex $a 0] \$r0 \$outer\]" bool]
+            return [list "\[::mkitsql::rt::quant $id $nm $kind $ck [lindex $a 0] \$r0 \$outer [subKey $refs $ctx]\]" bool]
         }
         case { return [cgCase $node $ctx] }
         cast { return [cgCast $node $ctx] }
@@ -715,11 +778,30 @@ proc ::mkitsql::ctxPos {ctx level src name} {
 
 # Compile a bound subquery appearing inside an expression.  Returns its plan id.
 proc ::mkitsql::subPlan {bq refs ctx} {
-    variable planCorr
+    variable planCorr ; variable planMemo ; variable volatileSeen
     if {[dict exists $ctx dry]} { return 0 }
+    set saved $volatileSeen ; set volatileSeen 0
     set id [compileQuery $bq [dict get $ctx maps]]
     set planCorr($id) [expr {[llength $refs] > 0}]
+    set planMemo($id) [expr {$planCorr($id) && !$volatileSeen}]
+    set volatileSeen [expr {$saved || $volatileSeen}]
     return $id
+}
+# The values of the enclosing query's columns that a correlated subquery reads, as Tcl code that builds a list of them.  The
+# subquery's answer depends on nothing else, so one run per distinct list is enough (rt::memo): a correlated subquery costs
+# (distinct keys) x (its own cost) instead of (outer rows) x (its own cost).  "" when it cannot be decided (not memoised).
+proc ::mkitsql::subKey {refs ctx} {
+    if {[dict exists $ctx dry] || ![llength $refs]} { return "" }
+    set parts {} ; set seen {}
+    foreach r $refs {
+        lassign $r lvl src name
+        set lv [expr {$lvl - 1}]
+        if {[dict exists $seen $lv,$src,$name]} continue
+        dict set seen $lv,$src,$name 1
+        if {[catch {ctxPos $ctx $lv $src $name} pos]} { return "" }
+        lappend parts [expr {$lv == 0 ? "\[lindex \$r0 $pos\]" : "\[lindex \[lindex \$outer [expr {$lv - 1}]\] $pos\]"}]
+    }
+    return "\[list [join $parts { }]\]"
 }
 
 proc ::mkitsql::cmpKind {ta tb} {
@@ -944,6 +1026,7 @@ proc ::mkitsql::cgFunc {node ctx} {
     if {$n < $mn || ($mx >= 0 && $n > $mx)} {
         fail "Function ${name}() takes [expr {$mn == $mx ? $mn : ($mx < 0 ? "at least $mn" : "$mn to $mx")}] argument[expr {$mx == 1 ? {} : {s}}], not $n"
     }
+    if {$name eq "RANDOM"} { variable volatileSeen ; set volatileSeen 1 }
     set cargs {}
     foreach a $args { lappend cargs [cg $a $ctx] }
     set words {} ; set types {}

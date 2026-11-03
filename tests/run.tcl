@@ -306,7 +306,8 @@ check win_e_off   [errmsg "SELECT SUM(x) OVER (ORDER BY x ROWS 1.5 PRECEDING) FR
 check win_e_range [errmsg "SELECT SUM(x) OVER (ORDER BY x, p RANGE 1 PRECEDING) FROM $V"] {A RANGE frame with an offset needs exactly one ORDER BY column}
 check win_e_args  [errmsg "SELECT NTILE() OVER () FROM $V"] {Window function NTILE() takes 1 argument, not 0}
 check win_e_group [string match "Window functions are not allowed in GROUP BY" [errmsg "SELECT 1 FROM $V GROUP BY ROW_NUMBER() OVER ()"]] 1
-check win_e_dist  [string match "*DISTINCT*" [errmsg "SELECT COUNT(DISTINCT x) OVER () FROM $V"]] 1
+check win_e_dist  [string match "*DISTINCT is only allowed in aggregate*" [errmsg "SELECT FIRST_VALUE(DISTINCT x) OVER () FROM $V"]] 1
+check win_distinct [col0 "SELECT COUNT(DISTINCT p) OVER () FROM $V LIMIT 1"] 2
 check win_filter  [rows "SELECT COUNT(*) FILTER (WHERE x > 1), SUM(x) FILTER (WHERE p = 'b'), MAX(x) FILTER (WHERE x < 5) FROM $V"] {{4 14 2}}
 check win_filter_g [rows "SELECT p, COUNT(*) FILTER (WHERE x = 2) FROM $V GROUP BY p ORDER BY p"] {{a 1} {b 1}}
 check win_filter_w [col0 "SELECT SUM(x) FILTER (WHERE x > 1) OVER (ORDER BY x, p) FROM $V ORDER BY x, p"] {NULL 2 4 9 16}
@@ -403,7 +404,7 @@ check dt_e_cmp   [errmsg "SELECT INTERVAL '1' DAY < 5"] {An interval can only be
 check dt_e_bad   [errmsg "SELECT INTERVAL 'abc'"] {Invalid interval 'abc'}
 check dt_e_qual  [errmsg "SELECT INTERVAL '1-2' DAY"] {Invalid interval '1-2': expected a number of days}
 check dt_e_date  [errmsg "SELECT DATE '2026-02-30' + INTERVAL '1' DAY"] {Invalid date '2026-02-30': 2026-02 has no day 30}
-check dt_e_sum   [errmsg "SELECT SUM(x) FROM (SELECT INTERVAL '3' DAY AS x) t"] {SUM() over intervals is not supported}
+check dt_sum   [rows "SELECT SUM(x), MAX(x), MIN(x) FROM (SELECT INTERVAL '3' DAY AS x UNION ALL SELECT INTERVAL '1' DAY) t"] {{{4 days} {3 days} {1 day}}}
 check dt_e_timemonth [errmsg "SELECT TIME '10:00:00' + INTERVAL '1' MONTH"] {A month interval cannot be added to a TIME}
 check dt_e_bareval [string match "'abc' is not a date or time*" [errmsg "SELECT CAST('abc' AS DATE) + INTERVAL '1' DAY"]] 0
 

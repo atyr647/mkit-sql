@@ -155,12 +155,18 @@ proc ::mkitsql::checkDistinctNames {names what} {
     }
 }
 
+# Two columns of a derived table may have the same name (SELECT * FROM (SELECT a.id, b.id FROM a, b) x); only a REFERENCE to that name is
+# an error.  derivedCols renames every column of such a name to  name<U+FDD1>k  (k = 1, 2, ...); visibleName shows it as it was.
+proc ::mkitsql::visibleName {n} { set k [string first "\uFDD1" $n] ; expr {$k > 0 ? [string range $n 0 [expr {$k - 1}]] : $n} }
 proc ::mkitsql::srcColIndex {src name} {
-    set i 0
+    set i 0 ; set dup 0
     foreach c [dict get $src cols] {
-        if {[string equal -nocase [lindex $c 0] $name]} { return $i }
+        set cn [lindex $c 0]
+        if {[string equal -nocase $cn $name]} { return $i }
+        if {[string first "\uFDD1" $cn] > 0 && [string equal -nocase [visibleName $cn] $name]} { set dup 1 }
         incr i
     }
+    if {$dup} { fail "Column reference '$name' is ambiguous: '[dict get $src display]' has more than one column with that name.  Give them different names (AS ...) in the subquery" }
     return -1
 }
 
@@ -297,7 +303,7 @@ proc ::mkitsql::bindSource {node} {
                 }
                 set outNames $cols
             }
-            checkDistinctNames $outNames "Subquery '$alias'"
+            if {[llength $cols]} { checkDistinctNames $outNames "Subquery '$alias'" }
             return [newDerived $alias [derivedCols $outNames $outTypes $bq] $bq outerok [expr {$outerok eq "outerok"}] lateralq [expr {$outerok eq "lateral"}]]
         }
         table {
@@ -333,7 +339,7 @@ proc ::mkitsql::bindSource {node} {
                             }
                             set outNames $ccols
                         }
-                        checkDistinctNames $outNames "CTE '$cname'"
+                        if {[llength $ccols]} { checkDistinctNames $outNames "CTE '$cname'" }
                         return [newDerived [pickName $alias $cname] [derivedCols $outNames [dict get $bq outTypes] $bq] $bq]
                     }
                 }
@@ -441,8 +447,12 @@ proc ::mkitsql::bindRecursiveCte {ci cname ccols cq} {
 }
 
 proc ::mkitsql::derivedCols {names types bq} {
+    set count [dict create] ; set total [dict create]
+    foreach n $names { dict incr total [string tolower $n] }
     set cols {} ; set i 0
     foreach n $names {
+        set l [string tolower $n]
+        if {[dict get $total $l] > 1} { dict incr count $l ; set n "$n\uFDD1[dict get $count $l]" }
         lappend cols [list $n [lindex $types $i] "" 0 {}]
         incr i
     }
@@ -491,7 +501,7 @@ proc ::mkitsql::noteRef {level srcId name} {
 proc ::mkitsql::availableCols {srcs} {
     set l {}
     foreach s $srcs {
-        foreach c [dict get $s cols] { lappend l [lindex $c 0] }
+        foreach c [dict get $s cols] { lappend l [visibleName [lindex $c 0]] }
     }
     return [join $l {, }]
 }
@@ -582,6 +592,7 @@ proc ::mkitsql::bx {node} {
         }
         col { return [bindCol [lindex $node 1] [lindex $node 2]] }
         star { fail "'*' is only allowed in the select list or COUNT(*)" }
+        collate { fail "COLLATE is only supported on the operands of comparisons, IN, BETWEEN and LIKE, in ORDER BY, in GROUP BY and in the select list" }
         un { return [list un [lindex $node 1] [bx [lindex $node 2]]] }
         bin { return [list bin [lindex $node 1] [bx [lindex $node 2]] [bx [lindex $node 3]]] }
         isnull { return [list isnull [bx [lindex $node 1]] [lindex $node 2]] }
@@ -697,10 +708,11 @@ proc ::mkitsql::winType {node} {
     lassign $node _ name distinct args spec
     switch -- $name {
         ROW_NUMBER - RANK - DENSE_RANK - NTILE - COUNT { return int }
-        PERCENT_RANK - CUME_DIST - AVG { return real }
+        PERCENT_RANK - CUME_DIST { return real }
+        AVG { return [expr {[dryType [lindex $args 0]] eq "interval" ? "interval" : "real"}] }
         SUM {
             set t [dryType [lindex $args 0]]
-            return [expr {$t in {int bool} ? "int" : "real"}]
+            return [expr {$t in {int bool} ? "int" : ($t eq "interval" ? "interval" : "real")}]
         }
         STRING_AGG - GROUP_CONCAT { return text }
     }
@@ -724,9 +736,17 @@ proc ::mkitsql::resolveWindowSpec {spec {depth 0}} {
     set out $def
     if {[llength [dict get $spec order]]} { dict set out order [dict get $spec order] }
     if {[llength [dict get $spec frame]]} { dict set out frame [dict get $spec frame] }
+    set ex [specGet $spec exclude ""]
+    if {$ex ne ""} {
+        if {[specGet $def exclude ""] ne ""} { fail "Window '$base' already defines EXCLUDE" }
+        dict set out exclude $ex
+    }
+    dict set out ignorenulls [specGet $spec ignorenulls 0]            ;# belongs to the call, not to the window
     dict set out base ""
     return $out
 }
+
+proc ::mkitsql::specGet {spec key default} { expr {[dict exists $spec $key] ? [dict get $spec $key] : $default} }
 
 proc ::mkitsql::bindFrameBound {b mode} {
     set kind [lindex $b 0]
@@ -746,7 +766,7 @@ proc ::mkitsql::bindFrameBound {b mode} {
 proc ::mkitsql::bindWindow {node} {
     variable aggs ; variable winFuncs
     lassign $node _ name distinct args spec
-    if {$distinct} { fail "DISTINCT is not supported inside window functions" }
+    if {$distinct && $name ni {COUNT SUM AVG MIN MAX STRING_AGG GROUP_CONCAT}} { fail "DISTINCT is only allowed in aggregate window functions" }
     lassign [winArity $name] mn mx
     set na [llength $args]
     if {[lindex $args 0 0] eq "star"} {
@@ -786,7 +806,10 @@ proc ::mkitsql::bindWindow {node} {
         }
         set frame [list $mode $b1 $b2]
     }
-    return [list win $name 0 $ba [dict create base "" partition $part order $ord frame $frame]]
+    set exclude [specGet $spec exclude ""]
+    if {$exclude ne "" && ![llength $frame]} { fail "EXCLUDE needs a frame (ROWS, RANGE or GROUPS ...)" }
+    if {$distinct && [lindex $ba 0 0] eq "star"} { fail "COUNT(DISTINCT *) is not valid" }
+    return [list win $name $distinct $ba [dict create base "" partition $part order $ord frame $frame exclude $exclude ignorenulls [specGet $spec ignorenulls 0]]]
 }
 
 # ---- tree utilities --------------------------------------------------------
@@ -1104,9 +1127,9 @@ proc ::mkitsql::aggType {node} {
         COUNT { return int }
         SUM {
             set t [dryType [lindex $args 0]]
-            return [expr {$t in {int bool} ? "int" : "real"}]
+            return [expr {$t in {int bool} ? "int" : ($t eq "interval" ? "interval" : "real")}]
         }
-        AVG { return real }
+        AVG { return [expr {[dryType [lindex $args 0]] eq "interval" ? "interval" : "real"}] }
         MIN - MAX { return [dryType [lindex $args 0]] }
     }
     return text
@@ -1185,7 +1208,7 @@ proc ::mkitsql::bindSelectExprs2 {sel order srcs bfrom} {
                     if {[lsearch -exact [dict get $s hidden] [string tolower [lindex $c 0]]] >= 0 && $q eq ""} continue
                     noteRef 0 [dict get $s id] [lindex $c 0]
                     lappend items [list ref 0 [dict get $s id] [lindex $c 0] [lindex $c 1]]
-                    lappend names [lindex $c 0]
+                    lappend names [visibleName [lindex $c 0]]
                     lappend types [lindex $c 1]
                     lappend letters [lindex $c 2]
                     lappend drills [drillName $c]

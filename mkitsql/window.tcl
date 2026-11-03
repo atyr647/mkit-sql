@@ -102,12 +102,23 @@ proc ::mkitsql::winPartition {w pok pargs} {
             return $out
         }
         LAG - LEAD {
+            set ign [dict get $w ignorenulls]
             for {set j 0} {$j < $m} {incr j} {
                 set a [lindex $pargs $j]
                 if {[llength $a] > 1} { set off [lindex $a 1] } else { set off 1 }
                 if {[llength $a] > 2} { set def [lindex $a 2] } else { set def $N }
                 if {$off eq $N || ![string is integer -strict $off] || $off < 0} { fail "LAG / LEAD offset must be a non-negative whole number" }
-                set t [expr {$fn eq "LAG" ? $j - $off : $j + $off}]
+                if {$ign} {
+                    # IGNORE NULLS: count only the rows whose value is not NULL
+                    set step [expr {$fn eq "LAG" ? -1 : 1}] ; set t $j ; set left $off
+                    while {$left > 0} {
+                        incr t $step
+                        if {$t < 0 || $t >= $m} break
+                        if {[lindex $pargs $t 0] ne $N} { incr left -1 }
+                    }
+                } else {
+                    set t [expr {$fn eq "LAG" ? $j - $off : $j + $off}]
+                }
                 if {$t >= 0 && $t < $m} { lappend out [lindex $pargs $t 0] } else { lappend out $def }
             }
             return $out
@@ -115,25 +126,49 @@ proc ::mkitsql::winPartition {w pok pargs} {
     }
     # ---- frame based functions
     lassign [frameBounds $w $m $pok $gid $gs $ge] LO HI
+    set excl [dict get $w exclude] ; set ign [dict get $w ignorenulls]
     switch -- $fn {
-        FIRST_VALUE - LAST_VALUE {
+        FIRST_VALUE - LAST_VALUE - NTH_VALUE {
             for {set j 0} {$j < $m} {incr j} {
-                set lo [lindex $LO $j] ; set hi [lindex $HI $j]
-                if {$lo > $hi} { lappend out $N } elseif {$fn eq "FIRST_VALUE"} { lappend out [lindex $pargs $lo 0] } else { lappend out [lindex $pargs $hi 0] }
-            }
-            return $out
-        }
-        NTH_VALUE {
-            for {set j 0} {$j < $m} {incr j} {
-                set nth [lindex $pargs $j 1]
-                if {$nth eq $N || ![string is integer -strict $nth] || $nth < 1} { fail "NTH_VALUE needs a positive whole number" }
-                set t [expr {[lindex $LO $j] + $nth - 1}]
-                if {$t <= [lindex $HI $j]} { lappend out [lindex $pargs $t 0] } else { lappend out $N }
+                if {$fn eq "NTH_VALUE"} {
+                    set nth [lindex $pargs $j 1]
+                    if {$nth eq $N || ![string is integer -strict $nth] || $nth < 1} { fail "NTH_VALUE needs a positive whole number" }
+                } else { set nth 1 }
+                if {$excl eq "" && !$ign} {
+                    # a contiguous frame: positions are lo .. hi
+                    set lo [lindex $LO $j] ; set hi [lindex $HI $j]
+                    if {$fn eq "LAST_VALUE"} { set t $hi } else { set t [expr {$lo + $nth - 1}] }
+                    if {$lo <= $hi && $t >= $lo && $t <= $hi} { lappend out [lindex $pargs $t 0] } else { lappend out $N }
+                    continue
+                }
+                set P {}
+                foreach p [framePositions $excl $j [lindex $LO $j] [lindex $HI $j] $gid $gs $ge] {
+                    if {!$ign || [lindex $pargs $p 0] ne $N} { lappend P $p }
+                }
+                if {$fn eq "LAST_VALUE"} { set t [lindex $P end] } else { set t [lindex $P [expr {$nth - 1}]] }
+                if {$t ne ""} { lappend out [lindex $pargs $t 0] } else { lappend out $N }
             }
             return $out
         }
     }
-    return [winAggregate $w $m $pargs $LO $HI]
+    return [winAggregate $w $m $pargs $LO $HI $gid $gs $ge]
+}
+
+# The rows of a frame once EXCLUDE has been applied: positions lo .. hi without the current row (CURRENT ROW), without its peers
+# (GROUP) or without its peers except itself (TIES).
+proc ::mkitsql::framePositions {excl j lo hi gid gs ge} {
+    if {$lo < 0} { set lo 0 }
+    set g [lindex $gid $j] ; set ga [lindex $gs $g] ; set gb [lindex $ge $g]
+    set out {}
+    for {set p $lo} {$p <= $hi} {incr p} {
+        switch -- $excl {
+            current { if {$p == $j} continue }
+            group   { if {$p >= $ga && $p <= $gb} continue }
+            ties    { if {$p >= $ga && $p <= $gb && $p != $j} continue }
+        }
+        lappend out $p
+    }
+    return $out
 }
 
 # Frame start / end positions (inclusive) for every row of a partition.
@@ -247,26 +282,33 @@ proc ::mkitsql::winInit {fn} {
         default { return {} }
     }
 }
+# sk: "n" numbers, "s" text, "i" intervals (added with iv_add, compared by their length of time)
 proc ::mkitsql::winStep {fn sk st v sep} {
     variable N
     if {$fn eq "COUNT"} { return [expr {$v eq $N ? $st : $st + 1}] }
     if {$v eq $N} { return $st }
     switch -- $fn {
-        SUM - AVG { return [list [expr {[lindex $st 0] + 1}] [expr {[lindex $st 1] + $v}]] }
+        SUM - AVG {
+            if {$sk eq "i"} {
+                set cur [lindex $st 1]
+                return [list [expr {[lindex $st 0] + 1}] [expr {[lindex $st 0] == 0 ? $v : [::mkitsql::rt::iv_add $cur $v]}]]
+            }
+            return [list [expr {[lindex $st 0] + 1}] [expr {[lindex $st 1] + $v}]]
+        }
         MIN {
             if {$st eq $N} { return $v }
-            if {$sk eq "n" ? $v < $st : [string compare $v $st] < 0} { return $v }
+            if {$sk eq "n" ? $v < $st : ($sk eq "i" ? [ivTotal $v] < [ivTotal $st] : [string compare $v $st] < 0)} { return $v }
             return $st
         }
         MAX {
             if {$st eq $N} { return $v }
-            if {$sk eq "n" ? $v > $st : [string compare $v $st] > 0} { return $v }
+            if {$sk eq "n" ? $v > $st : ($sk eq "i" ? [ivTotal $v] > [ivTotal $st] : [string compare $v $st] > 0)} { return $v }
             return $st
         }
         default { lappend st $v ; return $st }
     }
 }
-proc ::mkitsql::winFinal {fn st sep} {
+proc ::mkitsql::winFinal {fn st sep {sk n}} {
     variable N
     switch -- $fn {
         COUNT - MIN - MAX {
@@ -274,22 +316,49 @@ proc ::mkitsql::winFinal {fn st sep} {
             return $st
         }
         SUM { return [expr {[lindex $st 0] == 0 ? $N : [lindex $st 1]}] }
-        AVG { return [expr {[lindex $st 0] == 0 ? $N : double([lindex $st 1]) / [lindex $st 0]}] }
+        AVG {
+            if {[lindex $st 0] == 0} { return $N }
+            if {$sk eq "i"} { return [::mkitsql::rt::iv_div [lindex $st 1] [lindex $st 0]] }
+            return [expr {double([lindex $st 1]) / [lindex $st 0]}]
+        }
         default { if {[llength $st]} { return [join $st $sep] } ; return $N }
     }
 }
 
-proc ::mkitsql::winAggregate {w m pargs LO HI} {
+proc ::mkitsql::winAggregate {w m pargs LO HI gid gs ge} {
     variable N
     set fn [dict get $w fn] ; set sk [dict get $w sortKind] ; set star [dict get $w star]
     if {$fn eq "GROUP_CONCAT"} { set fn STRING_AGG }
     set out {}
+    set excl [dict get $w exclude] ; set distinct [dict get $w distinct]
+    if {$excl ne "" || $distinct} {
+        # EXCLUDE and DISTINCT: the frame is no longer one growing range - compute each row from its own list of rows
+        for {set j 0} {$j < $m} {incr j} {
+            if {[llength [lindex $pargs $j]] > 1} { set sep [lindex $pargs $j 1] } else { set sep "," }
+            set st [winInit $fn] ; set seen [dict create]
+            foreach p [framePositions $excl $j [lindex $LO $j] [lindex $HI $j] $gid $gs $ge] {
+                set v [expr {$star ? 1 : [lindex $pargs $p 0]}]
+                if {$distinct && $v ne $N} {
+                    set key $v
+                    if {$sk eq "n"} {
+                        # 1 and 1.0 are the same value
+                        if {![string is integer -strict $v]} { set key [expr {double($v)}] ; if {$key == int($key) && abs($key) < 1e15} { set key [expr {int($key)}] } }
+                    }
+                    if {[dict exists $seen $key]} continue
+                    dict set seen $key 1
+                }
+                set st [winStep $fn $sk $st $v $sep]
+            }
+            lappend out [winFinal $fn $st $sep $sk]
+        }
+        return $out
+    }
     set plo -1 ; set phi -2 ; set st [winInit $fn]
     for {set j 0} {$j < $m} {incr j} {
         set lo [lindex $LO $j] ; set hi [lindex $HI $j]
         if {[llength [lindex $pargs $j]] > 1} { set sep [lindex $pargs $j 1] } else { set sep "," }
         if {$lo > $hi} {
-            lappend out [winFinal $fn [winInit $fn] $sep]
+            lappend out [winFinal $fn [winInit $fn] $sep $sk]
             continue
         }
         # extend the running state when the frame only grew at the end; otherwise rebuild
@@ -303,7 +372,7 @@ proc ::mkitsql::winAggregate {w m pargs LO HI} {
             set st [winStep $fn $sk $st $v $sep]
         }
         set plo $lo ; set phi $hi
-        lappend out [winFinal $fn $st $sep]
+        lappend out [winFinal $fn $st $sep $sk]
     }
     return $out
 }

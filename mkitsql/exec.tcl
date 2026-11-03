@@ -731,10 +731,10 @@ proc ::mkitsql::aggInitGroup {i gi} {
     upvar #0 ::mkitsql::agg::A${i}::ST ST
     set k 0
     foreach spec [dict get $S($i,a) specs] {
-        lassign $spec kind distinct
+        lassign $spec kind distinct ai sepIdx sortKind
         switch -- $kind {
             cstar - count { set ST($gi,$k) 0 }
-            avg { set ST($gi,$k) 0 ; set ST(c,$gi,$k) 0 }
+            avg { set ST($gi,$k) [expr {$sortKind eq "i" ? $N : 0}] ; set ST(c,$gi,$k) 0 }
             string_agg { set ST($gi,$k) {} }
             default { set ST($gi,$k) $N }
         }
@@ -768,26 +768,35 @@ proc ::mkitsql::aggStepRow {i gi specs av} {
 proc ::mkitsql::aggFold {i gi k kind sortKind v} {
     variable N
     upvar #0 ::mkitsql::agg::A${i}::ST ST
+    # sortKind "i": the values are intervals (added with iv_add, compared by their length of time)
     switch -- $kind {
         count { incr ST($gi,$k) }
-        sum   { if {$ST($gi,$k) eq $N} { set ST($gi,$k) $v } else { set ST($gi,$k) [expr {$ST($gi,$k) + $v}] } }
-        avg   { set ST($gi,$k) [expr {$ST($gi,$k) + $v}] ; incr ST(c,$gi,$k) }
+        sum   {
+            if {$ST($gi,$k) eq $N} { set ST($gi,$k) $v } elseif {$sortKind eq "i"} { set ST($gi,$k) [::mkitsql::rt::iv_add $ST($gi,$k) $v] } else { set ST($gi,$k) [expr {$ST($gi,$k) + $v}] }
+        }
+        avg   {
+            if {$sortKind eq "i"} {
+                if {$ST($gi,$k) eq $N} { set ST($gi,$k) $v } else { set ST($gi,$k) [::mkitsql::rt::iv_add $ST($gi,$k) $v] }
+            } else { set ST($gi,$k) [expr {$ST($gi,$k) + $v}] }
+            incr ST(c,$gi,$k)
+        }
         min {
-            if {$ST($gi,$k) eq $N || ($sortKind eq "n" ? $v < $ST($gi,$k) : [string compare $v $ST($gi,$k)] < 0)} { set ST($gi,$k) $v }
+            if {$ST($gi,$k) eq $N || ($sortKind eq "n" ? $v < $ST($gi,$k) : ($sortKind eq "i" ? [ivTotal $v] < [ivTotal $ST($gi,$k)] : [string compare $v $ST($gi,$k)] < 0))} { set ST($gi,$k) $v }
         }
         max {
-            if {$ST($gi,$k) eq $N || ($sortKind eq "n" ? $v > $ST($gi,$k) : [string compare $v $ST($gi,$k)] > 0)} { set ST($gi,$k) $v }
+            if {$ST($gi,$k) eq $N || ($sortKind eq "n" ? $v > $ST($gi,$k) : ($sortKind eq "i" ? [ivTotal $v] > [ivTotal $ST($gi,$k)] : [string compare $v $ST($gi,$k)] > 0))} { set ST($gi,$k) $v }
         }
         string_agg { lappend ST($gi,$k) $v }
     }
 }
 # the finished value of spec k of group gi
 proc ::mkitsql::aggResult {i gi k kind} {
-    variable N
+    variable N ; variable S
     upvar #0 ::mkitsql::agg::A${i}::ST ST
     switch -- $kind {
         avg {
             if {$ST(c,$gi,$k) == 0} { return $N }
+            if {[lindex [lindex [dict get $S($i,a) specs] $k] 4] eq "i"} { return [::mkitsql::rt::iv_div $ST($gi,$k) $ST(c,$gi,$k)] }
             return [expr {double($ST($gi,$k)) / $ST(c,$gi,$k)}]
         }
         string_agg {
@@ -848,8 +857,14 @@ proc ::mkitsql::aggMerge {i gi parts} {
         } else {
             switch -- $kind {
                 cstar - count { incr ST($gi,$k) $p }
-                sum { if {$p ne $N} { aggFold $i $gi $k sum n $p } }
-                avg { set ST($gi,$k) [expr {$ST($gi,$k) + [lindex $p 0]}] ; incr ST(c,$gi,$k) [lindex $p 1] }
+                sum { if {$p ne $N} { aggFold $i $gi $k sum $sortKind $p } }
+                avg {
+                    set p0 [lindex $p 0]
+                    if {$sortKind eq "i"} {
+                        if {$p0 ne $N} { if {$ST($gi,$k) eq $N} { set ST($gi,$k) $p0 } else { set ST($gi,$k) [::mkitsql::rt::iv_add $ST($gi,$k) $p0] } }
+                    } else { set ST($gi,$k) [expr {$ST($gi,$k) + $p0}] }
+                    incr ST(c,$gi,$k) [lindex $p 1]
+                }
                 min - max { if {$p ne $N} { aggFold $i $gi $k $kind $sortKind $p } }
                 string_agg {
                     lappend ST($gi,$k) {*}[lindex $p 0]

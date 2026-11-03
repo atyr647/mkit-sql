@@ -123,6 +123,15 @@ jobs:
           for k in $T86 $T85; do LOCK_ROUNDS=60 MKIT_MK4TCL=builtin $k tests/lock_crash.tcl; done
       - name: Performance guard - a lost pushdown or an accidental quadratic step fails (generous ceilings), both kits
         run: for k in $T86 $T85; do PERF_SCALE=2 MKIT_MK4TCL=builtin $k tests/perf_guard.tcl; done
+      - name: SQL added in 0.5 - correlated subqueries remembered per key, EXCLUDE / DISTINCT / IGNORE NULLS, interval aggregates, SIMILAR TO, duplicate column names, ROLLUP / CUBE / GROUPING SETS, COLLATE; both kits, tiny budget too
+        run: |
+          for k in $T86 $T85; do
+            for t in decorrelate window_ext ivagg similar dupcols groupsets collate; do echo "== $k / $t"; MKIT_MK4TCL=builtin $k tests/$t.tcl; done
+            for t in ivagg groupsets decorrelate; do MKIT_MEMBYTES=2000 MKIT_CHUNK=11 MKIT_MK4TCL=builtin $k tests/$t.tcl; done
+          done
+          for b in standalone studio; do for t in decorrelate window_ext collate groupsets; do MKIT_BACKEND=$b MKIT_MK4TCL=builtin $T86 tests/$t.tcl; done; done
+      - name: The 2 GiB ceiling of a Metakit file - a commit that would cross it is undone and the file stays usable (real Metakit, needs 2.5 GB of disk)
+        run: MKIT_MK4TCL=builtin $T86 tests/bigfile.tcl
       - name: Big deletes/updates rebuild the table - same result as row by row, tclkit 8.6.3 and 8.5.17
         run: |
           MKIT_MK4TCL=builtin $T86 tests/bulkwrite.tcl 150 4
@@ -270,7 +279,7 @@ jobs:
           "$T9" tests/lint.tcl
           for b in standalone studio; do MKIT_BACKEND=$b "$T9" tests/run.tcl; done
       - name: Injection, NULL forgery, code generation, spill, robustness, review regressions, drop view, pushdown, bulk writes
-        run: for t in doc_examples injection nullforge codegen_audit dropview spillroundtrip robustness review_regress pushdown bulkwrite; do echo "== $t"; "$T9" tests/$t.tcl; done
+        run: for t in doc_examples injection nullforge codegen_audit dropview spillroundtrip robustness review_regress pushdown bulkwrite decorrelate window_ext ivagg similar dupcols groupsets collate; do echo "== $t"; "$T9" tests/$t.tcl; done
       - name: Temp files and locking (file modes are decimal on purpose - Tcl 9 reads 0600 as decimal), lock crash, soak, fuzzer
         run: |
           "$T9" tests/tempsec.tcl
@@ -339,3 +348,53 @@ jobs:
         run: |
           "$TCLSH" tests/tempsec.tcl
           "$TCLSH" tests/locking.tcl
+
+  # REAL Metakit on the other platforms: MK Studio's own tclkit 8.6.3 / 8.5.17 for Windows (x86_64) and macOS (universal), fetched by
+  # SHA1 like the Linux ones.  This is the run that exercises Mk4tcl, the commit record, the flush (PowerShell on Windows) and the lock
+  # on those systems.  Informational until it is green, then it becomes required.
+  real-metakit-portable:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    continue-on-error: true
+    env:
+      MKIT_DURABLE: "0"        # no flush after every commit (a PowerShell start each on Windows); the flush itself is tested by syncdisk.tcl below
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - name: Scratch folder (Windows has no /tmp)
+        if: runner.os == 'Windows'
+        run: echo "TMPDIR=$(cygpath -m "$RUNNER_TEMP")" >> "$GITHUB_ENV"
+      - name: Fetch the tclkit runtimes (SHA1-verified)
+        run: |
+          if [ "$RUNNER_OS" = Windows ]; then sh tests/fetch-tclkit.sh windows; echo "T86=tclkit/tclkit-8.6.3.exe" >> "$GITHUB_ENV"; echo "T85=tclkit/tclkit-8.5.17.exe" >> "$GITHUB_ENV"
+          else sh tests/fetch-tclkit.sh macos; echo "T86=tclkit/tclkit-8.6.3" >> "$GITHUB_ENV"; echo "T85=tclkit/tclkit-8.5.17" >> "$GITHUB_ENV"; fi
+      - name: Which runtime
+        run: |
+          "$T86" <<< 'puts "[info patchlevel] on $tcl_platform(os) $tcl_platform(machine)"; puts "Mk4tcl [package require Mk4tcl]"'
+      - name: Lint
+        run: '"$T86" tests/lint.tcl'
+      - name: Engine and Metakit-specific tests, REAL Metakit, both kits
+        run: |
+          for k in "$T86" "$T85"; do
+            for t in run real_metakit doc_examples injection nullforge review_regress decorrelate window_ext ivagg similar dupcols groupsets collate; do echo "== $k / $t"; MKIT_MK4TCL=builtin "$k" tests/$t.tcl; done
+          done
+      - name: Forcing a file to disk (FlushFileBuffers through PowerShell on Windows, sync on macOS)
+        run: MKIT_MK4TCL=builtin "$T86" tests/syncdisk.tcl
+      - name: Commit records, interrupted commits (synthesised states - no strace here), damaged files, the 2 GiB limit
+        run: |
+          MKIT_MK4TCL=builtin "$T86" tests/damage.tcl
+          MKIT_MK4TCL=builtin "$T86" tests/bigfile.tcl
+      - name: Temp files and locking
+        run: |
+          MKIT_MK4TCL=builtin "$T86" tests/tempsec.tcl
+          MKIT_MK4TCL=builtin "$T86" tests/locking.tcl
+          LOCK_ROUNDS=20 MKIT_MK4TCL=builtin "$T86" tests/lock_crash.tcl
+      - name: Soak and the Tcl list bug battery (healthy Tcl is the stand-in's own interpreter, so only the kits are compared with themselves here)
+        run: |
+          MKIT_MK4TCL=builtin "$T86" tests/soak.tcl 20 1
+          MKIT_MK4TCL=builtin "$T86" tests/listbug_forms.tcl

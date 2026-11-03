@@ -27,13 +27,13 @@ namespace eval ::mkitsql {
 #  Entry point
 # ============================================================================
 proc ::mkitsql::resetStatement {} {
-    variable plans ; variable subCache ; variable planCorr ; variable needed ; variable derivedBq ; variable bindCount
+    variable plans ; variable subCache ; variable planCorr ; variable needed ; variable derivedBq ; variable bindCount ; variable planMemo ; variable memo ; variable memoCount ; variable volatileSeen
     set bindCount 0
     variable scopes ; variable ctes ; variable refLog ; variable fromSoFar ; variable lookupIdx ; variable scanCache ; variable scanRuns
     foreach p [info procs ::mkitsql::cx::*] { rename $p {} }
     array unset lookupIdx ; array set lookupIdx {} ; array unset scanCache ; array set scanCache {} ; array unset scanRuns ; array set scanRuns {}
-    array unset derivedBq ; array set derivedBq {} ; array unset plans ; array unset subCache ; array unset planCorr ; array unset needed
-    array set plans {} ; array set subCache {} ; array set planCorr {} ; array set needed {}
+    array unset derivedBq ; array set derivedBq {} ; array unset plans ; array unset subCache ; array unset planCorr ; array unset needed ; array unset planMemo ; array unset memo
+    array set plans {} ; array set subCache {} ; array set planCorr {} ; array set needed {} ; array set planMemo {} ; array set memo {} ; set memoCount 0 ; set volatileSeen 0
     set scopes {} ; set ctes {} ; set refLog {} ; set fromSoFar {}
 }
 

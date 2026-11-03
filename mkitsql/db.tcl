@@ -272,9 +272,36 @@ proc ::mkitsql::db::commit {tag} {
     variable dirty ; variable file
     set record 0
     if {$dirty($tag) > 0} { set record [beginCommit $file($tag)] }
-    mk::file commit $tag
+    if {[catch {mk::file commit $tag} err]} {
+        if {!$record} { return -code error $err }
+        lassign [commitFailed $tag $err] code msg
+        return -code error -errorcode $code $msg
+    }
     set dirty($tag) 0
     if {$record} { endCommit $file($tag) }
+}
+# Metakit stores a file's size in ONE 32-bit word and stops at 2 GiB: a commit that would cross it fails ("I/O error during
+# commit"), and - measured on real Metakit - may first have appended part of its data and even written the new header, leaving a
+# file that crashes Metakit when it is opened.  The record written before the commit says what to put back.  The file is restored,
+# the handle reopened (the changes since the last commit are gone, as with ROLLBACK), and the error says what happened.
+namespace eval ::mkitsql::db { variable maxFileBytes 2147483647 }
+proc ::mkitsql::db::commitFailed {tag err} {
+    variable file ; variable dirty ; variable ro ; variable maxFileBytes
+    set path $file($tag)
+    set note [repairFile $path]
+    catch {mk::file close $tag}
+    set opts {-nocommit}
+    if {$ro($tag)} { lappend opts -readonly }
+    set reopened [expr {![catch {mk::file open $tag $path {*}$opts}]}]
+    set dirty($tag) 0
+    ::mkitsql::typeForget $tag
+    set size [expr {[::file exists $path] ? [::file size $path] : 0}]
+    set cause "a full disk or a write error"
+    if {$size > $maxFileBytes / 2} { set cause "the size limit of a Metakit file ($maxFileBytes bytes = 2 GiB; this file is $size bytes) or a full disk" }
+    set msg "The commit failed ($err) - most likely $cause. The database file was put back to its last committed state"
+    if {$reopened} { append msg " and the changes made since then were discarded (as ROLLBACK does).\n" } else { append msg ". Close and reopen it.\n" }
+    append msg "Nothing in the file is lost. To get past the size limit, split the data over several database files."
+    return [list [list MKIT COMMITFAILED $size] $msg]
 }
 
 # ---- interrupted commits and power loss -------------------------------------------------------------------------
@@ -292,7 +319,9 @@ proc ::mkitsql::db::commit {tag} {
 #   * without a record, a file longer than its header says (an unfinished append) is cut back to the header's offset.
 # Not covered: a disk that loses data it said was written, or a system with no way to force data out (Windows has no `sync`
 # command: there, kills are covered and power loss is as safe as the operating system's own write ordering).
-namespace eval ::mkitsql::db { variable durable 1 ; variable repaired ; array set repaired {} }   ;# durable 0 turns the sync calls off
+# durable 0 turns the sync calls off (the environment variable MKIT_DURABLE=0 does the same at load time: for test machines where
+# forcing every commit to disk - a PowerShell start on Windows - would only make a long test run longer)
+namespace eval ::mkitsql::db { variable durable [expr {[info exists ::env(MKIT_DURABLE)] && $::env(MKIT_DURABLE) eq "0" ? 0 : 1}] ; variable repaired ; array set repaired {} }
 # force the files (and the folder entry) to disk where the system can:
 #   Linux/BSD  coreutils `sync FILE...`, else a plain `sync`
 #   macOS      `sync` (flushes the OS cache; the drive's own cache is out of reach from Tcl)

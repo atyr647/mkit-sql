@@ -7,6 +7,24 @@ All notable changes to mkit-sql. The versioning and compatibility rules are in
 
 * First-commit record (`empty 0`) and Windows flush follow MK Studio's newest `store.tcl`; `integration/mkstudio.patch` rebased onto its current HEAD (list-bug-safe row reads, footer guard in its `repairFile`).
 
+* Status: this is still one release (0.4.0, not tagged); the items below are the closing pass over the known limits.
+
+### Closing the known limits
+* **Metakit's 2 GiB file limit** (measured: a commit that would cross it fails and, if big, leaves a file that crashes Metakit on open):
+  the commit is undone from its record, the handle reopened, and the error `{MKIT COMMITFAILED size}` names the limit. `tests/bigfile.tcl`.
+* **Correlated subqueries are remembered per distinct outer key** (`::mkitsql::maxMemo`), so a correlated scalar / `EXISTS` / `IN` / `ANY` / `ALL`
+  subquery costs one run per key instead of one per outer row. The 20,000-row / 10-key case: 0.3 s (it was quadratic). `tests/decorrelate.tcl`
+  compares 25 query shapes with the shortcut on and off.
+* **Window functions:** `EXCLUDE CURRENT ROW | GROUP | TIES | NO OTHERS` (1,152 queries agree with SQLite), `DISTINCT` in window aggregates (extension),
+  `IGNORE NULLS` / `RESPECT NULLS` on `LAG LEAD FIRST_VALUE LAST_VALUE NTH_VALUE`. `tests/window_ext.tcl` (brute-force reference).
+* **`GROUP BY ROLLUP / CUBE / GROUPING SETS / ()` and `GROUPING()`**, also combined with plain keys; run as one `GROUP BY` per set joined by `UNION ALL`.
+* **`SIMILAR TO`** (SQL regular expressions), **`COLLATE BINARY | NOCASE`** (comparisons, `IN`, `BETWEEN`, `LIKE`, `ORDER BY`, `GROUP BY`).
+* **`SUM`, `AVG`, `MIN`, `MAX` over intervals**, plain, grouped, `DISTINCT` and windowed (also with spilling aggregation).
+* **Duplicate column names in derived tables and CTEs** (`SELECT * FROM (SELECT a.id, b.id ...)`).
+* `MKIT_DURABLE=0` turns the post-commit flush off (test machines); `tests/syncdisk.tcl` proves the flush works on the system.
+* CI: real-Metakit runs on Windows and macOS (MK Studio's own tclkits, fetched by SHA1), `tests/fetch-tclkit.sh windows|macos`.
+* `tests/bench/big.tcl`: 20,000,000 rows on real Metakit.
+
 ### Breaking
 * **`ALTER TABLE ... ALTER COLUMN ... TYPE` is refused.** Metakit identifies a column by name *and* type; retyping under
   the same name corrupted data on real Metakit (found by `tests/differential/features.py`). The error shows the safe
@@ -18,8 +36,9 @@ All notable changes to mkit-sql. The versioning and compatibility rules are in
   was four) and `::mkitsql::db::lockedBy` returns `pid host role endpoint`.
 * Spill folders are named `mkitsql-<user>-<pid>-<pid namespace>-<random>`; the folder of a running process is never swept
   (the `::mkitsql::staleHours` setting is gone).
-* Names starting with `__mks` are reserved (tables, columns, renames). Two columns of the same name in a derived table,
-  CTE or `VALUES ... AS v(a, a)` are refused (they used to silently return the last column's value for both).
+* Names starting with `__mks` are reserved (tables, columns, renames). Two columns of the same name in a derived table or CTE are
+  allowed, and only a *reference* to that name is an error ("ambiguous"); an explicit column list `t(a, a)` must be distinct. (They used
+  to silently return the last column's value for both.)
 * `REAL` columns (32-bit) refuse values beyond about 3.4e38 instead of storing infinity; whole-number columns refuse
   `1e999`, infinities and values beyond 64 bits; a numeric literal that is not finite (`1e999`) is a syntax error.
 

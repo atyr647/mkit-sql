@@ -181,11 +181,12 @@ mkitsql::db::closeFile $d2 ; file delete $f2
 # ---- S6 / S7 --------------------------------------------------------------------------------------------------------------------
 foreach {name sql} {
     s6_table "CREATE TABLE __mks_tmp_1 (a INT)" s6_column "CREATE TABLE zz (a INT, __MKS_x INT)" s6_add "ALTER TABLE t ADD COLUMN __mks_tmp_5 INT"
-    s6_rename "ALTER TABLE t RENAME COLUMN s TO __mks_q" s7_derived "SELECT * FROM (SELECT 1 AS a, 2 AS a) x" s7_ref "SELECT a FROM (SELECT 1 AS a, 2 AS a) x"
+    s6_rename "ALTER TABLE t RENAME COLUMN s TO __mks_q" s7_ref "SELECT a FROM (SELECT 1 AS a, 2 AS a) x"
     s7_cte "WITH c(a, a) AS (SELECT 1, 2) SELECT * FROM c" s7_alias "SELECT * FROM (SELECT 1, 2) x(p, p)"} {
     check "S_$name" [outcome $sql] clean
 }
 check S7_distinct_ok [rows "SELECT * FROM (SELECT 1 AS a, 2 AS b) x"] {{1 2}}
+check S7_duplicate_names_allowed [rows "SELECT * FROM (SELECT 1 AS a, 2 AS a) x"] {{1 2}}
 
 # ---- S2: nesting depth must not blow up ---------------------------------------------------------------------------------------
 set sql "SELECT 1 AS x"

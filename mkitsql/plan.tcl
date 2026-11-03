@@ -12,6 +12,7 @@ namespace eval ::mkitsql {
     variable planSeq 0
     variable plans
     variable subCache
+    variable memo ; variable memoCount 0 ; variable maxMemo 200000
     variable ticks 0
     variable maxSetRows 5000000
     variable lookupSeq 0
@@ -233,9 +234,7 @@ proc ::mkitsql::compileSelect {bs outerMaps} {
                 lappend argNodes [lindex $args 1]
             }
             set sortKind [expr {[isNumType [expr {$kind in {min max} ? [dryType [lindex $args 0]] : "int"}]] ? "n" : "s"}]
-            if {$kind in {sum avg min max} && [dryType [lindex $args 0]] eq "interval"} {
-                fail "[string toupper $kind]() over intervals is not supported"
-            }
+            if {$kind in {sum avg min max} && [dryType [lindex $args 0]] eq "interval"} { set sortKind i }
             lappend specs [list $kind $distinct $ai $sepIdx $sortKind]
         }
         lassign [compileList $argNodes $preCtx] aargs _
@@ -436,11 +435,13 @@ proc ::mkitsql::compileWindow {w ctx} {
             lset argNodes 0 [list cast [lindex $argNodes 0] double]
         }
         if {[llength $argNodes]} { set sortKind [expr {[isNumType [dryType [lindex $argNodes 0]]] ? "n" : "s"}] }
+        if {$name in {SUM AVG MIN MAX} && [dryType [lindex $argNodes 0]] eq "interval"} { set sortKind i }
     }
     lassign [compileList [concat $exprs $argNodes] $ctx] wp _
     return [dict create fn $name np [llength $part] no [llength $ords] nargs [llength $argNodes] \
         star [expr {[lindex $args 0 0] eq "star"}] proc $wp dirs $dirs nulls $nulls otypes $otypes \
-        frame [dict get $spec frame] sortKind $sortKind]
+        frame [dict get $spec frame] sortKind $sortKind distinct $distinct \
+        exclude [specGet $spec exclude ""] ignorenulls [specGet $spec ignorenulls 0]]
 }
 
 # ---- FROM tree -------------------------------------------------------------
@@ -745,10 +746,26 @@ proc ::mkitsql::tick {} {
         if {$progressHook ne ""} { {*}$progressHook }
     }
 }
-proc ::mkitsql::rt::scalar {id r0 outer} {
+# A correlated subquery's answer depends only on the outer values it reads (`key`, built by subKey): the answer is remembered per key
+# for the statement, so many outer rows with the same key cost one run.  Bounded: past maxMemo remembered keys new ones are computed
+# but not kept.  `key` is "" when the answer cannot be shared (RANDOM() inside, or nothing to key on).
+proc ::mkitsql::rt::memoGet {id key var} {
+    upvar 1 $var v
+    variable ::mkitsql::memo
+    if {[info exists memo($id,$key)]} { set v $memo($id,$key) ; return 1 }
+    return 0
+}
+proc ::mkitsql::rt::memoPut {id key v} {
+    variable ::mkitsql::memo ; variable ::mkitsql::memoCount ; variable ::mkitsql::maxMemo
+    if {$memoCount < $maxMemo} { set memo($id,$key) $v ; incr memoCount }
+    return $v
+}
+proc ::mkitsql::rt::scalar {id r0 outer {key ""}} {
     set corr $::mkitsql::planCorr($id)
     if {$corr} { ::mkitsql::tick }
     if {!$corr && [info exists ::mkitsql::subCache($id)]} { return $::mkitsql::subCache($id) }
+    set m [expr {$key ne "" && $::mkitsql::planMemo($id)}]
+    if {$m && [memoGet $id $key v]} { return $v }
     set rows [::mkitsql::collectPlan $id [linsert $outer 0 $r0] 2]
     switch -- [llength $rows] {
         0 { set v $::mkitsql::N }
@@ -756,14 +773,18 @@ proc ::mkitsql::rt::scalar {id r0 outer} {
         default { ::mkitsql::fail "More than one row returned by a subquery used as an expression" }
     }
     if {!$corr} { set ::mkitsql::subCache($id) $v }
+    if {$m} { memoPut $id $key $v }
     return $v
 }
-proc ::mkitsql::rt::exists {id r0 outer} {
+proc ::mkitsql::rt::exists {id r0 outer {key ""}} {
     set corr $::mkitsql::planCorr($id)
     if {$corr} { ::mkitsql::tick }
     if {!$corr && [info exists ::mkitsql::subCache($id)]} { return $::mkitsql::subCache($id) }
+    set m [expr {$key ne "" && $::mkitsql::planMemo($id)}]
+    if {$m && [memoGet $id $key v]} { return $v }
     set v [expr {[llength [::mkitsql::collectPlan $id [linsert $outer 0 $r0] 1]] > 0}]
     if {!$corr} { set ::mkitsql::subCache($id) $v }
+    if {$m} { memoPut $id $key $v }
     return $v
 }
 # the distinct values of a one-column subquery as {dict hasNull}; refuses sets too big to hold
@@ -787,16 +808,19 @@ proc ::mkitsql::setSink {c chunk} {
     return 0
 }
 # v op ANY / ALL (subquery)
-proc ::mkitsql::rt::quant {id nm kind ck v r0 outer} {
+proc ::mkitsql::rt::quant {id nm kind ck v r0 outer {key ""}} {
     set N $::mkitsql::N
     set corr $::mkitsql::planCorr($id)
     if {$corr} { ::mkitsql::tick }
+    set m [expr {$key ne "" && $::mkitsql::planMemo($id)}]
     if {!$corr && [info exists ::mkitsql::subCache($id)]} {
         set vals $::mkitsql::subCache($id)
+    } elseif {$m && [memoGet $id $key vals]} {
     } else {
         set vals {}
         foreach r [::mkitsql::collectPlan $id [linsert $outer 0 $r0]] { lappend vals [lindex $r 0] }
         if {!$corr} { set ::mkitsql::subCache($id) $vals }
+        if {$m} { memoPut $id $key $vals }
     }
     set cmp ::mkitsql::rt::${nm}_$ck
     set sawNull 0
@@ -809,7 +833,7 @@ proc ::mkitsql::rt::quant {id nm kind ck v r0 outer} {
     return [expr {$kind eq "all"}]
 }
 
-proc ::mkitsql::rt::insub {id v r0 outer} {
+proc ::mkitsql::rt::insub {id v r0 outer {key ""}} {
     set N $::mkitsql::N
     if {$v eq $N} {
         # NULL IN (empty set) is false, otherwise unknown
@@ -818,11 +842,15 @@ proc ::mkitsql::rt::insub {id v r0 outer} {
     }
     set corr $::mkitsql::planCorr($id)
     if {$corr} { ::mkitsql::tick }
+    set m [expr {$key ne "" && $::mkitsql::planMemo($id)}]
     if {!$corr && [info exists ::mkitsql::subCache($id)]} {
         lassign $::mkitsql::subCache($id) set hasNull
+    } elseif {$m && [memoGet $id $key sv]} {
+        lassign $sv set hasNull
     } else {
         lassign [::mkitsql::valueSet $id $r0 $outer] set hasNull
         if {!$corr} { set ::mkitsql::subCache($id) [list $set $hasNull] }
+        if {$m} { memoPut $id $key [list $set $hasNull] }
     }
     if {[dict exists $set $v]} { return 1 }
     # numeric equality such as 2 vs 2.0

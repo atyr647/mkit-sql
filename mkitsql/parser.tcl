@@ -259,7 +259,7 @@ proc ::mkitsql::parsePredicate {} {
         set neg 0
         if {[isKw $t NOT]} {
             set n [peek 1]
-            if {[isKw $n BETWEEN] || [isKw $n IN] || [isKw $n LIKE] || [isKw $n ILIKE]} {
+            if {[isKw $n BETWEEN] || [isKw $n IN] || [isKw $n LIKE] || [isKw $n ILIKE] || ([isKw $n SIMILAR] && [isKw [peek 2] TO])} {
                 advance ; set neg 1 ; set t [peek]
             } else break
         }
@@ -269,7 +269,12 @@ proc ::mkitsql::parsePredicate {} {
             set lo [parseConcat]
             expectKw AND
             set hi [parseConcat]
-            set l [list between $l $lo $hi $neg]
+            if {[isCollate $l] || [isCollate $lo] || [isCollate $hi]} {
+                set both [list bin and [mkCompare >= $l $lo] [mkCompare <= $l $hi]]
+                set l [expr {$neg ? [list un not $both] : $both}]
+            } else {
+                set l [list between $l $lo $hi $neg]
+            }
             continue
         }
         if {[isKw $t IN]} {
@@ -298,16 +303,29 @@ proc ::mkitsql::parsePredicate {} {
                 }
                 expectOp )
                 if {![llength $items]} { err "IN needs at least one value" [peek -1] }
-                set l [list in $l $items $neg]
+                set anyCollate [isCollate $l]
+                foreach it $items { if {[isCollate $it]} { set anyCollate 1 } }
+                if {$anyCollate} {
+                    set or ""
+                    foreach it $items { set eq [mkCompare = $l $it] ; set or [expr {$or eq "" ? $eq : [list bin or $or $eq]}] }
+                    set l [expr {$neg ? [list un not $or] : $or}]
+                } else {
+                    set l [list in $l $items $neg]
+                }
             }
             continue
         }
-        if {[isKw $t LIKE] || [isKw $t ILIKE]} {
+        if {[isKw $t LIKE] || [isKw $t ILIKE] || ([isKw $t SIMILAR] && [isKw [peek 1] TO])} {
             advance
-            set ci [string equal -nocase [lindex $t 1] ILIKE]
+            if {[isKw $t SIMILAR]} { advance ; set ci 2 } else { set ci [string equal -nocase [lindex $t 1] ILIKE] }
             set pat [parseConcat]
             set esc ""
             if {[acceptKw ESCAPE]} { set esc [parseConcat] }
+            if {[isCollate $l] || [isCollate $pat]} {
+                lassign [unCollate $l] l1 k1 ; lassign [unCollate $pat] p1 k2
+                if {$k1 eq "nocase" || $k2 eq "nocase"} { if {$ci != 2} { set ci 1 } }
+                set l $l1 ; set pat $p1
+            }
             set l [list like $l $pat $esc $neg $ci]
             continue
         }
@@ -320,6 +338,7 @@ proc ::mkitsql::parsePredicate {} {
 proc ::mkitsql::rowCols {r} { if {[lindex $r 0] eq "row"} { return [lindex $r 1] } ; return [list $r] }
 
 proc ::mkitsql::mkCompare {op l r} {
+    if {[isCollate $l] || [isCollate $r]} { lassign [collateOperands $l $r] l r }
     if {[lindex $l 0] ne "row" && [lindex $r 0] ne "row"} { return [list bin $op $l $r] }
     if {[lindex $l 0] ne "row" || [lindex $r 0] ne "row"} {
         err "A row value (a, b) can only be compared with another row value of the same size" [peek -1]
@@ -404,7 +423,55 @@ proc ::mkitsql::parseUnary {} {
         return [list un neg $e]
     }
     if {[acceptOp +]} { return [parseUnary] }
-    return [parsePrimary]
+    set e [parsePrimary]
+    while {[acceptKw COLLATE]} {
+        set tok [peek]
+        set e [list collate $e [collationName [parseName "collation name"] $tok]]
+    }
+    return $e
+}
+
+# ---- COLLATE ----------------------------------------------------------------------------------------------------------
+# Supported collations: BINARY (code point order, the default; also C and POSIX) and NOCASE (case-insensitive; also
+# CASE_INSENSITIVE).  A collated operand is handled where it is parsed: comparisons, IN, BETWEEN and LIKE compare LOWER() of both
+# sides, ORDER BY sorts by LOWER(), GROUP BY groups by LOWER() and shows MIN() of the original text, and in a select list it changes
+# nothing.  Anywhere else the binder refuses it.
+proc ::mkitsql::collationName {name tok} {
+    switch -- [string toupper $name] {
+        BINARY - C - POSIX { return binary }
+        NOCASE - CASE_INSENSITIVE { return nocase }
+    }
+    err "Unknown collation '$name' (supported: BINARY, NOCASE)" $tok
+}
+# ORDER BY x COLLATE NOCASE sorts by LOWER(x)
+proc ::mkitsql::orderCollate {e} {
+    if {![isCollate $e]} { return $e }
+    lassign [unCollate $e] e1 k
+    return [expr {$k eq "nocase" ? [lowerOf $e1] : $e1}]
+}
+proc ::mkitsql::isCollate {e} { expr {[lindex $e 0] eq "collate"} }
+# strip a top-level COLLATE; {inner kind} with kind "" when there was none
+proc ::mkitsql::unCollate {e} { if {[isCollate $e]} { return [list [lindex $e 1] [lindex $e 2]] } ; return [list $e ""] }
+proc ::mkitsql::lowerOf {e} { return [list func LOWER 0 [list $e]] }
+# the operands of a comparison, made comparable under their collation
+proc ::mkitsql::collateOperands {l r} {
+    lassign [unCollate $l] l1 k1 ; lassign [unCollate $r] r1 k2
+    if {$k1 ne "" && $k2 ne "" && $k1 ne $k2} { err "The two sides of the comparison have different collations" "" }
+    if {$k1 eq "nocase" || $k2 eq "nocase"} { return [list [lowerOf $l1] [lowerOf $r1]] }
+    return [list $l1 $r1]
+}
+# replace every occurrence of a pattern expression outside aggregates, window calls and subqueries
+proc ::mkitsql::astRepl {n pairs} {
+    variable aggs
+    set tag [lindex $n 0]
+    if {$tag eq "lit"} { return $n }
+    if {$tag in {win sub exists insub quant star}} { return $n }
+    if {$tag eq "func" && [string toupper [lindex $n 1]] in $aggs} { return $n }
+    foreach pr $pairs { if {[sameExpr [lindex $pr 0] $n]} { return [lindex $pr 1] } }
+    if {$tag eq "col" || ([llength $n] <= 1 && [llength [lindex $n 0]] <= 1)} { return $n }
+    set out {}
+    foreach el $n { lappend out [astRepl $el $pairs] }
+    return $out
 }
 
 proc ::mkitsql::startsQuery {} {
@@ -590,10 +657,22 @@ proc ::mkitsql::parseCall {} {
             set args [lreplace $args 0 0 [list case {} [list [list $f [lindex $args 0]]] {lit null {}}]]
         }
     }
+    # IGNORE NULLS / RESPECT NULLS (after the closing parenthesis, before OVER)
+    set ignoreNulls 0
+    if {([isKw [peek] IGNORE] || [isKw [peek] RESPECT]) && [isKw [peek 1] NULLS]} {
+        set ignoreNulls [isKw [peek] IGNORE]
+        advance ; advance
+        if {![isKw [peek] OVER]} { err "IGNORE NULLS / RESPECT NULLS belongs to a window function: it needs an OVER clause" [peek] }
+    }
     if {[isKw [peek] OVER]} {
         if {$name ni $winFuncs && $name ni $aggs} { err "${name}() is not a window function" $nameTok }
         advance
-        return [list win $name $distinct $args [parseWindowSpec]]
+        set spec [parseWindowSpec]
+        if {$ignoreNulls} {
+            if {$name ni {LAG LEAD FIRST_VALUE LAST_VALUE NTH_VALUE}} { err "IGNORE NULLS is only allowed on LAG, LEAD, FIRST_VALUE, LAST_VALUE and NTH_VALUE" $nameTok }
+            dict set spec ignorenulls 1
+        }
+        return [list win $name $distinct $args $spec]
     }
     if {$name in $winFuncs} { err "${name}() is a window function and needs an OVER clause" $nameTok }
     if {$distinct && $name ni {COUNT SUM AVG MIN MAX STRING_AGG GROUP_CONCAT}} {
@@ -604,7 +683,7 @@ proc ::mkitsql::parseCall {} {
 
 # OVER name   |   OVER ( [name] [PARTITION BY ..] [ORDER BY ..] [ROWS|RANGE|GROUPS frame] )
 proc ::mkitsql::parseWindowSpec {} {
-    set spec [dict create base "" partition {} order {} frame {}]
+    set spec [dict create base "" partition {} order {} frame {} exclude "" ignorenulls 0]
     if {![isOp [peek] (]} {
         dict set spec base [parseName "window name"]
         return $spec
@@ -624,7 +703,7 @@ proc ::mkitsql::parseWindowSpec {} {
         expectKw BY
         set l {}
         while 1 {
-            set e [parseExpr]
+            set e [orderCollate [parseExpr]]
             set dir asc
             if {[acceptKw DESC]} { set dir desc } else { acceptKw ASC }
             set nulls ""
@@ -651,7 +730,14 @@ proc ::mkitsql::parseWindowSpec {} {
             break
         }
     }
-    if {[isKw [peek] EXCLUDE]} { err "Window frame EXCLUDE is not supported" [peek] }
+    if {[acceptKw EXCLUDE]} {
+        if {![llength [dict get $spec frame]]} { err "EXCLUDE needs a frame (ROWS, RANGE or GROUPS ...)" [peek -1] }
+        if {[acceptKw CURRENT]} { expectKw ROW ; dict set spec exclude current } \
+        elseif {[acceptKw GROUP]} { dict set spec exclude group } \
+        elseif {[acceptKw TIES]} { dict set spec exclude ties } \
+        elseif {[acceptKw NO]} { expectKw OTHERS ; dict set spec exclude "" } \
+        else { err "Expected CURRENT ROW, GROUP, TIES or NO OTHERS after EXCLUDE" [peek] }
+    }
     expectOp )
     return $spec
 }
@@ -795,7 +881,7 @@ proc ::mkitsql::parseQuery {} {
     if {[acceptKw ORDER]} {
         expectKw BY
         while 1 {
-            set e [parseExpr]
+            set e [orderCollate [parseExpr]]
             set dir asc
             if {[acceptKw DESC]} { set dir desc } else { acceptKw ASC }
             set nulls ""
@@ -891,14 +977,40 @@ proc ::mkitsql::parseSelectCore {} {
     set from {} ; set where {} ; set group {} ; set having {}
     if {[acceptKw FROM]} { set from [parseFrom] }
     if {[acceptKw WHERE]} { set where [parseExpr] }
+    set gsets {{}} ; set special 0
     if {[acceptKw GROUP]} {
         expectKw BY
         while 1 {
-            lappend group [parseExpr]
+            lassign [parseGroupElement] sp esets
+            if {$sp} { set special 1 }
+            # the grouping sets of the whole clause: every set so far combined with every set of this element
+            set next {}
+            foreach a $gsets { foreach b $esets { lappend next [gsUnion $a $b] } }
+            set gsets $next
             if {![acceptOp ,]} break
         }
+        if {!$special} { set group [lindex $gsets 0] }
     }
     if {[acceptKw HAVING]} { set having [parseExpr] }
+    # GROUP BY x COLLATE NOCASE: group by LOWER(x), show MIN(x) wherever the query reads x outside an aggregate
+    set pairs {} ; set group2 {}
+    foreach g $group {
+        if {[isCollate $g]} {
+            lassign [unCollate $g] g1 k
+            if {$k eq "nocase"} { lappend pairs [list $g1 [list func MIN 0 [list $g1]]] ; set g1 [lowerOf $g1] }
+            lappend group2 $g1
+        } else { lappend group2 $g }
+    }
+    if {[llength $pairs]} {
+        set group $group2 ; set items2 {}
+        foreach it $items {
+            lassign $it e alias text
+            if {$alias eq "" && [lindex $e 0] eq "col"} { set alias [lindex $e 2] }
+            lappend items2 [list [astRepl $e $pairs] $alias $text]
+        }
+        set items $items2
+        if {$having ne ""} { set having [astRepl $having $pairs] }
+    } else { set group $group2 }
     set windows [dict create]
     if {[acceptKw WINDOW]} {
         while 1 {
@@ -912,8 +1024,149 @@ proc ::mkitsql::parseSelectCore {} {
             if {![acceptOp ,]} break
         }
     }
+    if {$special} { return [rewriteGroupingSets $items $from $where $gsets $having $windows $distinct] }
     return [dict create type select distinct $distinct items $items from $from \
         where $where group $group having $having windows $windows]
+}
+
+# ---- GROUP BY ROLLUP / CUBE / GROUPING SETS ----------------------------------------------------------------------------
+# A grouping element yields {special sets}: the list of grouping sets (each a list of expressions) it stands for.  The query is then
+# rewritten into one ordinary GROUP BY query per set, joined with UNION ALL: an expression that is not grouped in a set reads NULL
+# there, and GROUPING(e, ...) becomes the constant bit mask for that set.
+proc ::mkitsql::parseGroupElement {} {
+    set t [peek]
+    if {[isKw $t ROLLUP] && [isOp [peek 1] (]} {
+        advance ; advance ; set items [parseGroupItems] ; expectOp )
+        set sets {}
+        for {set i [llength $items]} {$i >= 0} {incr i -1} { lappend sets [gsConcat [lrange $items 0 [expr {$i - 1}]]] }
+        return [list 1 $sets]
+    }
+    if {[isKw $t CUBE] && [isOp [peek 1] (]} {
+        advance ; advance ; set items [parseGroupItems] ; expectOp )
+        set n [llength $items] ; set sets {}
+        if {$n > 12} { err "CUBE of more than 12 expressions would need over 4096 grouping sets" $t }
+        for {set mask [expr {(1 << $n) - 1}]} {$mask >= 0} {incr mask -1} {
+            set pick {}
+            for {set j 0} {$j < $n} {incr j} { if {$mask & (1 << ($n - 1 - $j))} { lappend pick [lindex $items $j] } }
+            lappend sets [gsConcat $pick]
+        }
+        return [list 1 $sets]
+    }
+    if {[isKw $t GROUPING] && [isKw [peek 1] SETS]} {
+        advance ; advance ; expectOp (
+        set sets {}
+        while 1 {
+            lassign [parseGroupElement] sp es
+            foreach x $es { lappend sets $x }
+            if {![acceptOp ,]} break
+        }
+        expectOp )
+        return [list 1 $sets]
+    }
+    if {[isOp $t (] && [isOp [peek 1] )]} { advance ; advance ; return [list 1 [list {}]] }
+    set e [parseExpr]
+    if {[lindex $e 0] eq "row"} { return [list 0 [list [lindex $e 1]]] }       ;# (a, b): both are grouped
+    return [list 0 [list [list $e]]]
+}
+proc ::mkitsql::parseGroupItems {} {
+    set items {}
+    while 1 {
+        set e [parseExpr]
+        lappend items [expr {[lindex $e 0] eq "row" ? [lindex $e 1] : [list $e]}]
+        if {![acceptOp ,]} break
+    }
+    return $items
+}
+proc ::mkitsql::gsConcat {lists} { set out {} ; foreach l $lists { set out [gsUnion $out $l] } ; return $out }
+# a + b without repeating an expression (the same expression twice means the same grouping)
+proc ::mkitsql::gsUnion {a b} {
+    foreach e $b {
+        set have 0
+        foreach x $a { if {[sameExpr $x $e]} { set have 1 ; break } }
+        if {!$have} { lappend a $e }
+    }
+    return $a
+}
+# structural equality of two parsed expressions; a column matches the same name with the same or no qualifier
+proc ::mkitsql::sameExpr {a b} {
+    if {$a eq $b} { return 1 }
+    if {[lindex $a 0] eq "col" && [lindex $b 0] eq "col" && [llength $a] == 3 && [llength $b] == 3} {
+        if {![string equal -nocase [lindex $a 2] [lindex $b 2]]} { return 0 }
+        set qa [lindex $a 1] ; set qb [lindex $b 1]
+        return [expr {$qa eq "" || $qb eq "" || [string equal -nocase $qa $qb]}]
+    }
+    if {[lindex $a 0] eq "lit" || ([llength $a] <= 1 && [llength [lindex $a 0]] <= 1) || [llength $a] != [llength $b]} { return 0 }
+    foreach x $a y $b { if {![sameExpr $x $y]} { return 0 } }
+    return 1
+}
+proc ::mkitsql::gsMember {e list} { foreach x $list { if {[sameExpr $x $e]} { return 1 } } ; return 0 }
+# replace, inside one expression, what a grouping set does not group; aggregates, window calls and subqueries are left alone
+proc ::mkitsql::gsSubst {n set all} {
+    variable aggs
+    set tag [lindex $n 0]
+    if {$tag eq "lit"} { return $n }
+    if {$tag in {win sub exists insub quant star}} { return $n }
+    if {$tag eq "func"} {
+        set name [lindex $n 1]
+        if {[string toupper $name] in $aggs} { return $n }
+        if {[string toupper $name] eq "GROUPING"} {
+            set mask 0
+            foreach a [lindex $n 3] {
+                if {![gsMember $a $all]} { err "GROUPING() takes grouping expressions; [lindex $a 0] is not one of the GROUP BY expressions" "" }
+                set mask [expr {($mask << 1) | ([gsMember $a $set] ? 0 : 1)}]
+            }
+            return [list lit int $mask]
+        }
+    }
+    if {[gsMember $n $set]} { return $n }
+    if {[gsMember $n $all]} { return {lit null {}} }
+    if {$tag eq "col" || ([llength $n] <= 1 && [llength [lindex $n 0]] <= 1)} { return $n }      ;# an atom (a list of one pair is not)
+    set out {}
+    foreach el $n { lappend out [gsSubst $el $set $all] }
+    return $out
+}
+proc ::mkitsql::rewriteGroupingSets {items from where sets having windows distinct} {
+    # item names, and GROUP BY positions / output names resolved to the expressions they stand for
+    set items2 {}
+    foreach it $items {
+        lassign $it e alias text
+        if {[lindex $e 0] eq "star"} { err "SELECT * cannot be used with ROLLUP, CUBE or GROUPING SETS" "" }
+        if {$alias eq ""} { set alias [expr {[lindex $e 0] eq "col" ? [lindex $e 2] : $text}] }
+        lappend items2 [list $e $alias $text]
+    }
+    set sets2 {}
+    foreach S $sets {
+        set S2 {}
+        foreach g $S {
+            if {[lindex $g 0] eq "lit" && [lindex $g 1] eq "int"} {
+                set k [lindex $g 2]
+                if {$k < 1 || $k > [llength $items2]} { err "GROUP BY position $k is out of range" "" }
+                set g [lindex $items2 [expr {$k - 1}] 0]
+            } elseif {[lindex $g 0] eq "col" && [lindex $g 1] eq ""} {
+                foreach it $items2 {
+                    if {[string equal -nocase [lindex $it 1] [lindex $g 2]] && !([lindex $it 0 0] eq "col" && [string equal -nocase [lindex $it 0 2] [lindex $g 2]])} { set g [lindex $it 0] ; break }
+                }
+            }
+            set S2 [gsUnion $S2 [list $g]]
+        }
+        lappend sets2 $S2
+    }
+    set all {}
+    foreach S $sets2 { set all [gsUnion $all $S] }
+    set q ""
+    foreach S $sets2 {
+        set bi {}
+        foreach it $items2 { lassign $it e alias text ; lappend bi [list [gsSubst $e $S $all] $alias $text] }
+        set bh [expr {$having eq "" ? "" : [gsSubst $having $S $all]}]
+        if {![llength $S]} {
+            # the grand total: still ONE row when the table is empty, so it must be an aggregate query
+            set force [list bin >= {func COUNT 0 {{star {}}}} {lit int 0}]
+            set bh [expr {$bh eq "" ? $force : [list bin and $bh $force]}]
+        }
+        set b [dict create type select distinct 0 items $bi from $from where $where group $S having $bh windows $windows]
+        if {$q eq ""} { set q $b } else { set q [dict create type setop op union all [expr {!$distinct}] left $q right $b] }
+    }
+    return $q
 }
 
 # item := * | name.* | expr [[AS] alias]      ->  {expr alias text}
@@ -933,6 +1186,7 @@ proc ::mkitsql::parseSelectItem {} {
             set alias [parseName "alias"]
         }
     }
+    if {[isCollate $e]} { set e [lindex [unCollate $e] 0] }
     return [list $e $alias [srcText $a $b]]
 }
 

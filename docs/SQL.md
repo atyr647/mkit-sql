@@ -52,6 +52,18 @@ FROM source [, ...]
 [LIMIT n [OFFSET m]]  |  [OFFSET m ROWS] [FETCH FIRST n ROWS ONLY]
 ```
 
+`GROUP BY` also takes `ROLLUP (...)`, `CUBE (...)`, `GROUPING SETS (...)` and `()`, combined with plain expressions
+(`GROUP BY a, ROLLUP (b, c)`), and `GROUPING(e, ...)` gives the bit mask of the expressions a row does *not* group:
+
+```sql
+SELECT dept, COUNT(*), SUM(salary), GROUPING(dept) FROM employees GROUP BY ROLLUP (dept);
+SELECT dept, hired, COUNT(*) FROM employees GROUP BY GROUPING SETS ((dept), (hired), ());
+```
+
+The query runs as one ordinary `GROUP BY` per grouping set, joined with `UNION ALL` (a grouping set is scanned once per set).
+Consequences: `ORDER BY` must name output columns or positions, `SELECT *` is refused, and a group expression that is not
+grouped in a row reads NULL there.
+
 Items are `*`, `alias.*` or `expr [[AS] alias]`. Names are case-insensitive; use `"quotes"` for reserved words.
 `SELECT 1 + 2` needs no `FROM`. `ORDER BY` / `GROUP BY` accept output aliases and 1-based positions.
 Only the columns a query uses are read from Metakit.
@@ -85,9 +97,12 @@ derived tables `FROM (SELECT ...) alias [(cols)]`, correlated at any depth, also
 (which may refer to the grouped columns). Row values work too: `(a, b) = (1, 2)`, `(a, b) < (...)`,
 `(a, b) IN ((1, 2), (3, 4))`, `(a, b) IN (SELECT x, y ...)`.
 
-A correlated subquery whose condition has the form `inner.col = <outer expression>` becomes a hash lookup
-built once per statement; other correlated forms re-filter a cached copy of the inner table (so they cost
-rows x rows, as in any engine without indexes).
+A correlated subquery whose condition has the form `inner expression = <outer expression>` becomes a hash lookup
+built once per statement, and **its answer is remembered per distinct value of the outer columns it reads**: many outer
+rows with the same key (`WHERE w > (SELECT AVG(w) FROM t t2 WHERE t2.k = t.k)`) cost one run per key, not one per row (the
+memory is bounded by `::mkitsql::maxMemo`, 200,000 keys; a subquery that calls `RANDOM()` is never shared). What stays
+quadratic: a correlation that is only an inequality (`WHERE t2.d <= t.d`, a running total) with a different key on every row;
+use a window function for those (`SUM(x) OVER (ORDER BY d)`), which is linear.
 
 A subquery may also unnest a subview of the *enclosing* row: `WHERE (SELECT COUNT(*) FROM d.files) > 5`,
 `EXISTS (SELECT 1 FROM e.skills s WHERE s.level = 5)`.
@@ -132,15 +147,35 @@ SELECT id, SUM(salary) OVER w FROM employees WINDOW w AS (PARTITION BY dept ORDE
 Frames: `ROWS`, `RANGE` (offsets need exactly one numeric `ORDER BY` column) and `GROUPS`, with `UNBOUNDED
 PRECEDING/FOLLOWING`, `n PRECEDING/FOLLOWING` and `CURRENT ROW`. The default frame is the standard one (up to
 the last peer row with `ORDER BY`, the whole partition without). Windows may be used in the select list and
-`ORDER BY` only, and may wrap aggregates: `RANK() OVER (ORDER BY SUM(x))`. Not supported: `EXCLUDE`,
-`DISTINCT` inside a window aggregate.
+`ORDER BY` only, and may wrap aggregates: `RANK() OVER (ORDER BY SUM(x))`.
+
+```sql
+SELECT id, SUM(salary) OVER (ORDER BY id ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING EXCLUDE CURRENT ROW) FROM employees;
+SELECT id, COUNT(DISTINCT dept) OVER (ORDER BY id ROWS BETWEEN 2 PRECEDING AND CURRENT ROW) FROM employees;
+SELECT id, LAG(salary) IGNORE NULLS OVER (ORDER BY id) FROM employees;
+```
+
+* `EXCLUDE CURRENT ROW | GROUP | TIES | NO OTHERS` after the frame (it needs a frame). Checked against SQLite on 1,100+ queries.
+* `DISTINCT` inside a window aggregate (`COUNT/SUM/AVG/MIN/MAX/STRING_AGG`) counts each value of the frame once. PostgreSQL and
+  SQLite refuse this; here it is an extension, computed per row from its own frame (cost: frame size per row).
+* `IGNORE NULLS` / `RESPECT NULLS` (the default) on `LAG`, `LEAD`, `FIRST_VALUE`, `LAST_VALUE`, `NTH_VALUE` skip NULL rows.
+* `SUM`, `AVG`, `MIN`, `MAX` also work over intervals (below), as plain and as window aggregates.
 
 ## Expressions and functions
 
 Operators: `+ - * / %`, `||`, `= <> < <= > >=`, `AND OR NOT`, `IS [NOT] NULL | TRUE | FALSE | DISTINCT FROM`,
-`[NOT] BETWEEN`, `[NOT] IN`, `[NOT] LIKE | ILIKE [ESCAPE c]`, `CASE` (both forms), `CAST(x AS type)` (a real cast to an integer type *rounds* to the nearest whole number, halves away from zero, as in PostgreSQL and MySQL; SQLite truncates). There is no negative zero: `-0.0` is `0.0` everywhere (grouping, sorting, joins, storage).
+`[NOT] BETWEEN`, `[NOT] IN`, `[NOT] LIKE | ILIKE [ESCAPE c]`, `[NOT] SIMILAR TO pattern [ESCAPE c]`, `expr COLLATE name`, `CASE` (both forms), `CAST(x AS type)` (a real cast to an integer type *rounds* to the nearest whole number, halves away from zero, as in PostgreSQL and MySQL; SQLite truncates). There is no negative zero: `-0.0` is `0.0` everywhere (grouping, sorting, joins, storage).
 Integer `/` truncates toward zero; `%` takes the sign of the left side; division by zero is an error.
 `AND`/`OR`/`CASE` evaluate lazily, so `WHERE b <> 0 AND a / b > 1` is safe.
+
+`SIMILAR TO` is the SQL regular expression: `%` any string, `_` any character, `|` alternation, `* + ?` and `{m,n}` repetition,
+`( )` grouping and `[a-z]` / `[^0-9]` / `[[:alpha:]]` classes; every other character is literal - including `.`, `^` and `$` (unlike a
+regular expression) - and the backslash escapes unless `ESCAPE` names another character. It is case-sensitive and the whole text
+must match: `'abc' SIMILAR TO '%(b|d)%'` is true.
+
+`COLLATE` supports `BINARY` (the default, code point order; also `C`, `POSIX`) and `NOCASE` (also `CASE_INSENSITIVE`). It works on the
+operands of comparisons, `IN`, `BETWEEN` and `LIKE`, in `ORDER BY` (also inside `OVER`), in `GROUP BY` (groups case-insensitively,
+shows the smallest original text) and in the select list (no effect there). Anywhere else it is an error, not silently ignored.
 
 Functions: ABS, ACOS, ASCII, ASIN, ATAN, ATAN2, CEIL/CEILING, CHAR_LENGTH/CHARACTER_LENGTH, CHR, COALESCE, CONCAT,
 CONCAT_WS, COS, CURRENT_DATE/TIME/TIMESTAMP, DEGREES, EXP, EXTRACT, FLOOR, GREATEST, IFNULL, INITCAP, INSTR, LEAST,
@@ -170,7 +205,9 @@ SELECT EXTRACT(DAY FROM DATE '2026-03-05' - DATE '2026-01-01');  -- 63
 
 `date +/- interval`, `date - date`, `interval +/- interval`, `interval * n`, `interval / n`, interval
 comparison and sorting work. A day counts as 24 hours. Intervals cannot be stored in a column (store
-seconds, or `CAST(iv AS VARCHAR)`), and `SUM`/`AVG`/`MIN`/`MAX` over intervals are not supported. To do date
+seconds, or `CAST(iv AS VARCHAR)`). `SUM`, `AVG`, `MIN` and `MAX` work over intervals: months and seconds are added separately
+(so `SUM` of two `1 mon` is `2 mons`), `MIN`/`MAX` return a value of the data compared by length of time (30-day months), `AVG` is the
+sum divided by the count. To do date
 arithmetic on a text column, cast it first: `CAST(hired AS DATE) + INTERVAL '7' DAY`.
 
 ## Changing data
@@ -261,6 +298,13 @@ Parameters are values, never SQL text, so they cannot inject SQL. To pass NULL, 
 ```
 
 ## Large tables and memory
+
+**A Metakit file cannot be larger than 2 GiB (2,147,483,647 bytes)** - it keeps its size in one 32-bit word (measured on real
+Metakit 2.4.9.7: a commit that would take the file past it fails with "I/O error during commit" and, if it was a large one, leaves
+a file that crashes Metakit when opened). mkit-sql undoes such a commit: the file is put back to its last committed state, the
+handle is reopened (the changes since the last commit are discarded, as `ROLLBACK` does) and the error is
+`{MKIT COMMITFAILED <size>}` with a message that names the limit. What fits: about 55 million rows of three numeric columns
+(20,000,000 such rows are a 762 MB file); a table of long text fills it much sooner. To go beyond, split the data over several files.
 
 A query never has to fit in memory. Scans are read in chunks and every operator that has to hold rows (sort,
 `GROUP BY`, `DISTINCT` and `DISTINCT` aggregates, joins, `UNION/INTERSECT/EXCEPT`, windows over big inputs, and
@@ -469,8 +513,8 @@ failures). A caller never sees a Tcl stack trace as the *only* signal: the messa
 | Savepoints | Metakit can only roll back to the last commit |
 | `SELECT TOP n` | T-SQL only; use `LIMIT` or `FETCH FIRST` |
 | `INSERT ... RETURNING`, `UPDATE ... FROM` | not in the SQL standard |
-| `GROUP BY ROLLUP / CUBE / GROUPING SETS` | not built yet |
-| `COLLATE`, `SIMILAR TO`, `EXCLUDE` in window frames, `IGNORE NULLS` | not built yet |
+| `COLLATE` names other than `BINARY` and `NOCASE` (locale collations) | text sorts by code point; add a lower-cased column or use `NOCASE` |
+| `COLLATE` in `DISTINCT`, `IS DISTINCT FROM`, aggregates | refused with an error |
 | `INTERVAL` columns; exact `DECIMAL` | Metakit has no such types |
-| Two columns of the same name in a derived table or CTE (`SELECT * FROM (SELECT a.id, b.id FROM ...)`) | refused with a clear message (give one an alias); other databases allow it until you refer to the name |
+| A *reference* to a column name that two columns of a derived table share | refused as ambiguous (the duplicate columns themselves are fine: `SELECT * FROM (SELECT a.id, b.id ...)`); an explicit column list `t(p, p)` must be distinct |
 | A statement that expands to more than 4,000 subqueries | a CTE is bound again at every reference, so a chain of CTEs that each use the previous one twice doubles at every level; refused instead of hanging (`::mkitsql::maxBinds`) |
