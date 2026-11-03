@@ -423,6 +423,16 @@ check grp_sub_in [col0 "SELECT dept FROM employees e GROUP BY dept HAVING dept I
 check scan_cache [rows "SELECT d.id, (SELECT COUNT(*) FROM departments x WHERE x.id > d.id) FROM departments d ORDER BY d.id"] {{1 4} {2 3} {3 2} {4 1} {5 0}}
 check scan_cache2 [col0 "SELECT d.id FROM departments d WHERE NOT EXISTS (SELECT 1 FROM departments x WHERE x.id > d.id AND x.name < d.name) ORDER BY d.id"] [col0 "SELECT d.id FROM departments d WHERE d.id NOT IN (SELECT a.id FROM departments a JOIN departments b ON b.id > a.id AND b.name < a.name) ORDER BY d.id"]
 
+# cancelling a long-running correlated query (the UI sets ::mkitsql::cancel from its progress hook)
+q "CREATE TABLE cx (n INT)"
+q "INSERT INTO cx SELECT id FROM employees"
+for {set i 0} {$i < 6} {incr i} { q "INSERT INTO cx SELECT n + $i * 100 FROM cx" }
+set mkitsql::progressHook {set ::mkitsql::cancel 1}
+check cancel_corr [errmsg "SELECT COUNT(*) FROM cx a WHERE a.n > (SELECT AVG(n) FROM cx b WHERE b.n < a.n)"] {Cancelled}
+set mkitsql::progressHook {}
+check cancel_reset [one "SELECT COUNT(*) FROM cx WHERE n < 0"] 0
+q "DROP TABLE cx"
+
 # ============================================================================
 #  MERGE
 # ============================================================================

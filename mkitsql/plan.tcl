@@ -12,6 +12,7 @@ namespace eval ::mkitsql {
     variable planSeq 0
     variable plans
     variable subCache
+    variable ticks 0
     variable lookupSeq 0
     variable scanSeq 0
     variable scanCache
@@ -435,7 +436,7 @@ proc ::mkitsql::cfLeaf {s pushable stVar} {
     set map {} ; set i 0
     foreach n [dict get $lay names] { dict set map $id,$n $i ; incr i }
     set width $i
-    set filter "" ; set lookup {}
+    set filter "" ; set lookup {} ; set sfilter "" ; set dfilter ""
     if {$pushable} {
         set own [takePool st [list $id]]
         if {[dict get $s kind] eq "table"} {
@@ -463,12 +464,18 @@ proc ::mkitsql::cfLeaf {s pushable stVar} {
             }
         }
         set filter [compileFilter $own $map [dict get $st outer]]
+        # conjuncts that do not depend on an enclosing query can be applied once and cached
+        set stat {} ; set dyn {}
+        foreach c $own { if {[hasOuterRef $c]} { lappend dyn $c } else { lappend stat $c } }
+        set sfilter [compileFilter $stat $map [dict get $st outer]]
+        set dfilter [compileFilter $dyn $map [dict get $st outer]]
     }
+    if {!$pushable} { set sfilter "" ; set dfilter "" }
     switch -- [dict get $s kind] {
         table {
             variable scanSeq
             set plan [dict create kind scan path [dict get $s path] props [dict get $lay props] \
-                subs [dict get $lay subs] filter $filter lookup $lookup sid [incr scanSeq]]
+                subs [dict get $lay subs] filter $filter sfilter $sfilter dfilter $dfilter lookup $lookup sid [incr scanSeq]]
         }
         lateral {
             set plan [dict create kind lateral parent [dict get $s parent] sub [dict get $s sub] \
@@ -836,9 +843,9 @@ proc ::mkitsql::scanPath {path node outer stop} {
         if {![info exists scanRuns($sid)]} { set scanRuns($sid) 0 }
         if {[incr scanRuns($sid)] >= 3 && [::store::size $path] <= 300000} {
             if {![info exists scanCache($sid)]} {
-                set scanCache($sid) [scanPath $path [dict replace $node filter "" nocache 1] {} 0]
+                set scanCache($sid) [scanPath $path [dict replace $node filter [dict get $node sfilter] nocache 1] {} 0]
             }
-            return [filterRows $scanCache($sid) $filter $outer]
+            return [filterRows $scanCache($sid) [dict get $node dfilter] $outer]
         }
     }
     if {[dict exists $node lookup] && [dict get $node lookup] ne ""} {
@@ -849,7 +856,7 @@ proc ::mkitsql::scanPath {path node outer stop} {
         if {![info exists lookupIdx($lid)]} {
             set ikey [dict get $lk ikey]
             set idx [dict create]
-            set raw [dict replace $node filter "" lookup {}]
+            set raw [dict replace $node filter [dict get $node sfilter] lookup {} nocache 1]
             foreach t [scanPath $path $raw {} 0] {
                 set k [$ikey $t {}]
                 if {[lsearch -exact $k $N] < 0} { dict lappend idx $k $t }
@@ -857,7 +864,7 @@ proc ::mkitsql::scanPath {path node outer stop} {
             set lookupIdx($lid) $idx
         }
         if {![dict exists $lookupIdx($lid) $okey]} { return {} }
-        return [filterRows [dict get $lookupIdx($lid) $okey] $filter $outer]
+        return [filterRows [dict get $lookupIdx($lid) $okey] [dict get $node dfilter] $outer]
     }
     set n [::store::size $path]
     set out {}
@@ -1082,8 +1089,16 @@ proc ::mkitsql::infoRows {which} {
 # ============================================================================
 #  Subquery runtime
 # ============================================================================
+proc ::mkitsql::tick {} {
+    variable ticks ; variable cancel ; variable progressHook
+    if {[incr ticks] % 100 == 0} {
+        if {$cancel} { fail "Cancelled" }
+        if {$progressHook ne ""} { {*}$progressHook }
+    }
+}
 proc ::mkitsql::rt::scalar {id r0 outer} {
     set corr $::mkitsql::planCorr($id)
+    if {$corr} { ::mkitsql::tick }
     if {!$corr && [info exists ::mkitsql::subCache($id)]} { return $::mkitsql::subCache($id) }
     set rows [::mkitsql::runPlan $id [linsert $outer 0 $r0]]
     switch -- [llength $rows] {
@@ -1096,6 +1111,7 @@ proc ::mkitsql::rt::scalar {id r0 outer} {
 }
 proc ::mkitsql::rt::exists {id r0 outer} {
     set corr $::mkitsql::planCorr($id)
+    if {$corr} { ::mkitsql::tick }
     if {!$corr && [info exists ::mkitsql::subCache($id)]} { return $::mkitsql::subCache($id) }
     set v [expr {[llength [::mkitsql::runPlan $id [linsert $outer 0 $r0]]] > 0}]
     if {!$corr} { set ::mkitsql::subCache($id) $v }
@@ -1105,6 +1121,7 @@ proc ::mkitsql::rt::exists {id r0 outer} {
 proc ::mkitsql::rt::quant {id nm kind ck v r0 outer} {
     set N $::mkitsql::N
     set corr $::mkitsql::planCorr($id)
+    if {$corr} { ::mkitsql::tick }
     if {!$corr && [info exists ::mkitsql::subCache($id)]} {
         set vals $::mkitsql::subCache($id)
     } else {
@@ -1131,6 +1148,7 @@ proc ::mkitsql::rt::insub {id v r0 outer} {
         return [expr {[llength $rows] ? $N : 0}]
     }
     set corr $::mkitsql::planCorr($id)
+    if {$corr} { ::mkitsql::tick }
     if {!$corr && [info exists ::mkitsql::subCache($id)]} {
         lassign $::mkitsql::subCache($id) set hasNull
     } else {
