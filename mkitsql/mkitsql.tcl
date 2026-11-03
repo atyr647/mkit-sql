@@ -53,11 +53,22 @@ proc ::mkitsql::run {text {db ""} {params {}} {nulls {}}} {
 # Insert many rows that are already Tcl values - no SQL text is parsed, which is what dominates a big INSERT ... VALUES (about 150 us a row; this
 # is about 25 us a row).  The same checks, conversions, range errors and all-or-nothing behaviour as INSERT.
 #     ::mkitsql::insertRows $db tablename {id name} {{1 Ada} {2 Grace}}
-# `columns` empty = every column in table order; `table` may be qualified (dbtag.table).  Values equal to `nullToken` (when you pass one) are
-# NULL, which is stored as the column's default like any other NULL.  Returns the same result as INSERT (affected = the row count).
-proc ::mkitsql::insertRows {db table columns rows {nullToken "\uFDD1none"}} {
-    set parts [split $table .]
-    set st [dict create parts $parts cols $columns rows $rows nullToken $nullToken useNull [expr {$nullToken ne "\uFDD1none"}]]
+#     ::mkitsql::insertRows $db {dbtag.t[0].kids} {name} $rows -null NIL        ;# a subview, and a token that means NULL
+# `columns` empty = every column in table order; `table` is written as in SQL (dbtag.table, "quoted names", subview paths t[0].kids).  With
+# -null token, values equal to the token are NULL (stored as the column's default, like any NULL).  Returns what INSERT returns (affected = row count).
+proc ::mkitsql::insertRows {db table columns rows args} {
+    set nullToken "" ; set useNull 0
+    foreach {k v} $args {
+        if {$k ne "-null" || [llength $args] % 2} { fail "insertRows: unknown option '$k' (the only option is -null token)" }
+        set nullToken $v ; set useNull 1
+    }
+    # the table is named with the SQL grammar for a DELETE target: one statement, nothing else in it
+    set parsed [parseScript "DELETE FROM $table"]
+    if {[llength $parsed] != 1 || [lindex $parsed 0 0 0] ne "delete" || [dict get [lindex $parsed 0 0 1] where] ne "" || [dict get [lindex $parsed 0 0 1] alias] ne ""} {
+        fail "insertRows: '[string range $table 0 60]' is not a table name"
+    }
+    set t [lindex $parsed 0 0 1]
+    set st [dict create parts [dict get $t parts] subs [dict get $t subs] cols $columns rows $rows nullToken $nullToken useNull $useNull]
     return [execStatement [list insertrows $st] $db {} {}]
 }
 
@@ -84,6 +95,7 @@ proc ::mkitsql::query {text {db ""} {params {}} {nullValue ""} {nulls {}}} {
     set rc [catch {run $text $db $params $nulls} res opts]
     set nullText $saved
     if {$rc} { return -options $opts $res }
+    if {$res eq "" || ![dict exists $res kind]} { return [dict create cols {} rows {} message {}] }       ;# an empty or comment-only script
     if {[dict get $res kind] ne "rowset"} { return [dict create cols {} rows {} message [dict get $res text]] }
     return [dict create cols [dict get $res cols] rows [dict get $res rows]]
 }

@@ -204,7 +204,7 @@ if {$firstRefused ne ""} {
 
 # ---- kill -9 in the middle of commits ---------------------------------------------------------------------------------------------------
 set me [info nameofexecutable]
-set bad 0 ; set torn 0 ; set stale 0 ; set tn 0
+set bad 0 ; set torn 0 ; set stale 0 ; set tn 0 ; set interrupted 0
 if {$::tcl_platform(platform) ne "windows"} {
     for {set trial 0} {$trial < $trials} {incr trial} {
         set f $area/crash.mk
@@ -223,7 +223,11 @@ if {$::tcl_platform(platform) ne "windows"} {
         set w0 [clock milliseconds]
         while {[mkitsql::pidAlive $cpid] && [clock milliseconds] - $w0 < 3000} { after 5 }
         if {[file exists $f.lock]} { incr stale }
-        if {[mkitsql::dbProblem $f] ne ""} { incr bad ; puts "trial $trial: [mkitsql::dbProblem $f]" ; continue }
+        # a kill between the data and the header of a commit leaves an OLD header and a LONGER file: that is the interrupted commit the open repairs (below),
+        # not damage - every other frame problem is
+        set why [mkitsql::dbProblem $f]
+        if {$why ne "" && ![string match "*a commit was interrupted*" $why]} { incr bad ; puts "trial $trial: $why" ; continue }
+        if {$why ne ""} { incr interrupted }
         set tg [mkitsql::db::openFile $f]            ;# takes over the dead process's lock
         set n [lindex [lindex [dict get [mkitsql::run "SELECT COUNT(*) FROM t" $tg] rows] 0] 0]
         set sum [lindex [lindex [dict get [mkitsql::run "SELECT SUM(id) FROM t" $tg] rows] 0] 0]
@@ -233,6 +237,7 @@ if {$::tcl_platform(platform) ne "windows"} {
     }
     check crash_files_never_damaged $bad 0
     check crash_files_never_torn $torn 0
+    puts "(of $tn killed commits, $interrupted were caught between the data and the header and were put back by the open)"
     check crash_trials_ran [expr {$tn >= $trials - 1}] 1
     check crash_left_stale_locks_that_were_taken_over [expr {$stale > 0 || $trials < 4}] 1
 } else { puts "(crash trials skipped on Windows)" }

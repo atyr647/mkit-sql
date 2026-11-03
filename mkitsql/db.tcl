@@ -231,14 +231,19 @@ proc ::mkitsql::db::openFile {path args} {
         # with the lock held nobody else is in the middle of a commit: put right a commit that was interrupted
         # (not without the lock: then another writer may be in the middle of a commit, and cutting its unfinished append would break it)
         if {$mine ne "" && [::file exists $path] && [catch {repairFile $path} repairNote]} { set repairNote "" }
+        # a repaired file is a good file but no longer byte for byte what the sum recorded (see sumCheck): no proof until the next commit
+        if {$repairNote ne "" && ![string match "Warning*" $repairNote]} { catch {::file delete [sumPath $path]} }
     }
     # a damaged file would open as an empty database (and a later COMMIT would replace the real data); an untrusted one is read
     # completely in a throw-away process first.  Both happen AFTER the repair, so a file that only needed one is not refused.
-    set verdict none ; set vlevel ""
+    set verdict "" ; set vlevel ""
     if {[catch {
         if {!$unchecked} { ::mkitsql::dbRequireIntact $path }
-        if {!$unchecked && [::file exists $path]} {
-            set verdict [sumCheck $path]
+        # (a read-only open without -verify does not read the whole file for a checksum: the state stays "")
+        if {!$unchecked && [::file exists $path] && (!$readonly || $verify)} {
+            set verdict [sumCheck $path [expr {!$readonly}]]
+            # a reader that meets a writer between its commit and its new sum, or reads while the file is being rewritten, must not cry damage
+            if {$verdict eq "damaged" && $readonly && [lockHolder $path] ne ""} { set verdict changed }
             if {$verdict eq "damaged"} {
                 return -code error -errorcode [list MKIT DAMAGED checksum] "This file does not look like what was last saved ([sumPath $path] records its checksum, and it no longer matches although the file's size and time are unchanged): part of it was damaged since.\n$path\nOpen a backup. (Pass -unchecked to open it anyway.)"
             }
@@ -317,6 +322,7 @@ proc ::mkitsql::db::commitFailed {tag err} {
     catch {mk::file close $tag}
     set note "" ; set repairFailed 0
     if {[catch {repairFile $path} note]} { set repairFailed 1 }
+    catch {::file delete [sumPath $path]}                 ;# the restored file is good, but not byte for byte what the sum recorded
     set reopened 0
     if {!$repairFailed && ![string match "Warning*" $note]} {
         set opts {-nocommit}
@@ -406,6 +412,7 @@ proc ::mkitsql::db::beginCommit {path} {
         return 0
     }
     set rec [commitRecord $path]
+    catch {::file delete [sumPath $path]}               ;# a commit rewrites bytes in place: the old sum must not outlive it, whatever happens next
     if {[catch { set h [open $rec w] ; puts -nonewline $h $line ; close $h }]} {
         # no record can be written (a read-only folder, a full disk): the commit would run unprotected.  Remove what is left of a partial
         # record, and let the caller see it (commitUnprotected); it still goes ahead, because a database in a folder that cannot hold
@@ -439,7 +446,6 @@ proc ::mkitsql::db::endCommit {path} {
 # was already damaged when it was written, and a file another program changed has a sum that no longer applies ("changed": no proof).
 # Files over `sumLimit` MB are not covered; `set ::mkitsql::db::sumLimit 0` turns it off.  crc32 catches accidental damage, not tampering.
 namespace eval ::mkitsql::db { variable sumLimit 512 ; variable integrity ; array set integrity {} ; variable level ; array set level {} }
-proc ::mkitsql::db::sumPath {path} { return $path.sum }
 proc ::mkitsql::db::crcFile {path} {
     set crc 0
     set h [open $path rb]
@@ -452,20 +458,34 @@ proc ::mkitsql::db::sumCovered {path} {
     variable sumLimit
     expr {[llength [info commands zlib]] && [::file isfile $path] && [::file size $path] > 0 && [::file size $path] <= $sumLimit * 1048576}
 }
+# Written to a fresh temporary file (never through a link: the name is removed first and created exclusively) and renamed into place.
 proc ::mkitsql::db::sumWrite {path} {
     if {![sumCovered $path]} { catch {::file delete [sumPath $path]} ; return 0 }
     set line "[crcFile $path] [::file size $path] [::file mtime $path]"
     set tmp [sumPath $path].tmp
-    if {[catch { set h [open $tmp w] ; puts -nonewline $h $line ; close $h ; ::file rename -force $tmp [sumPath $path] }]} { catch {::file delete $tmp} ; return 0 }
+    catch {::file delete $tmp}
+    if {[catch { set h [open $tmp {WRONLY CREAT EXCL} 420] ; puts -nonewline $h $line ; close $h ; ::file rename -force $tmp [sumPath $path] }]} { catch {close $h} ; catch {::file delete $tmp} ; return 0 }
     return 1
 }
-# ok | none (no sum, or not covered) | changed (size or time differ: something else wrote the file) | damaged
-proc ::mkitsql::db::sumCheck {path} {
-    if {![sumCovered $path] || ![::file exists [sumPath $path]]} { return none }
-    if {[catch {set h [open [sumPath $path] r] ; set d [string trim [read $h 200]] ; close $h}] || [llength $d] != 3} { return none }
-    lassign $d crc size mtime
+# ok | none (no sum, or not covered) | changed (size or time differ, a commit is unconfirmed, or the difference cannot be told from another
+# program's write in the same second) | damaged (same size and time, different bytes, and the sum was written at least a second after the
+# file's last change - so any later write by anyone would have moved the file's time)
+proc ::mkitsql::db::sumCheck {path {restamp 0}} {
+    if {![sumCovered $path]} { return none }
+    set r [sumRead $path]
+    if {$r eq ""} { return none }
+    lassign $r crc size mtime sumMtime
+    # a commit record means a commit began and was not confirmed: the file is between two states (a commit changes bytes in place, which
+    # putting the header back does not undo), so the sum says nothing about it until the next open has repaired it
+    if {[::file exists [commitRecord $path]]} { return changed }
     if {$size != [::file size $path] || $mtime != [::file mtime $path]} { return changed }
-    return [expr {[crcFile $path] eq $crc ? "ok" : "damaged"}]
+    if {[crcFile $path] eq $crc} {
+        # proven intact now: if the sum was written in the same second as the file's last change, stamp it a second later, so that damage
+        # from here on is unambiguous (a clock that has moved past that second makes this safe)
+        if {$restamp} { sumRestamp $path }
+        return ok
+    }
+    return [expr {$sumMtime > $mtime ? "damaged" : "changed"}]
 }
 # what is known about this open file: {state level}.  state: the verdict of the sum at open (ok none changed); level: "proven" when
 # -verify found the sum intact, "evidence" when -verify read the whole file in a helper process without trouble (no proof: Metakit reads

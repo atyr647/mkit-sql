@@ -10,6 +10,7 @@ set pass 0 ; set fail 0
 proc check {name got want} { global pass fail ; if {$got eq $want} { incr pass } else { incr fail ; puts "FAIL $name\n   got:  [string range $got 0 300]\n   want: [string range $want 0 300]" } }
 proc q {sql} { mkitsql::run $sql $::db }
 proc rows {sql} { dict get [q $sql] rows }
+proc lmap_ {rows} { set o {} ; foreach r $rows { lappend o [lindex $r 1] } ; return $o }
 proc err {sql} { if {[catch {q $sql} e]} { return $e } ; return "" }
 q "CREATE TABLE t (a TEXT, b TEXT, c INT, v INT)"
 q "INSERT INTO t VALUES ('x','p',1,10),('x','q',1,20),('y','p',2,30),('y','p',2,40),('z','q',3,50)"
@@ -45,6 +46,29 @@ check "interval / n and * n" [rows "SELECT INTERVAL '1' MONTH / 3, INTERVAL '1' 
 check "interval where a number is expected" [string match "*interval cannot be used as a number*" [err "SELECT SUM(CASE WHEN v < 30 THEN INTERVAL '1' DAY ELSE 5 END) FROM t"]] 1
 # NATURAL JOIN on a duplicated name
 check "NATURAL JOIN on duplicated names is ambiguous" [string match "*NATURAL JOIN on 'k' is ambiguous*" [err "SELECT * FROM (SELECT a.k, b.k FROM u a JOIN u b ON a.w = b.w) q NATURAL JOIN u"]] 1
+# interval seconds are kept to the microsecond
+check "interval / 7 * 7 is well formed (a microsecond of rounding, never 23:59:60.)" [rows "SELECT INTERVAL '1' DAY / 7 * 7"] [list [list "1 day 00:00:00.000001"]]
+check "0.1 + 0.2 = 0.3 seconds" [rows "SELECT INTERVAL '0.1' SECOND + INTERVAL '0.2' SECOND = INTERVAL '0.3' SECOND"] 1
+check "10 months / 3" [rows "SELECT INTERVAL '10' MONTH / 3"] [list [list "3 mons 10 days"]]
+check "AVG of 1, 2, 2 months" [rows "SELECT AVG(i) FROM (SELECT INTERVAL '1' MONTH AS i UNION ALL SELECT INTERVAL '2' MONTH UNION ALL SELECT INTERVAL '2' MONTH) x"] [list [list "1 mon 20 days"]]
+check "GROUP BY merges the equal ones" [llength [rows "SELECT x, COUNT(*) FROM (SELECT INTERVAL '0.1' SECOND + INTERVAL '0.2' SECOND AS x UNION ALL SELECT INTERVAL '0.3' SECOND) q GROUP BY x"]] 1
+# peers among equal-length intervals, whatever the memory budget
+set L "SELECT INTERVAL '1' MONTH x, 1 n UNION ALL SELECT INTERVAL '30' DAY, 2 UNION ALL SELECT INTERVAL '1' MONTH, 3 UNION ALL SELECT INTERVAL '30' DAY, 4 UNION ALL SELECT INTERVAL '1' MONTH, 5 UNION ALL SELECT INTERVAL '30' DAY, 6"
+set want [rows "SELECT n, DENSE_RANK() OVER (ORDER BY x) FROM ($L) q ORDER BY n"]
+check "DENSE_RANK: equal intervals are peers" [lsort -unique [lmap_ $want]] [lsort -unique [lmap_ $want]]
+check "two distinct ranks, not six" [llength [lsort -unique [lmap_ $want]]] 2
+set ms $::mkitsql::memBytes ; set mc $::mkitsql::chunk
+set ::mkitsql::memBytes 50 ; set ::mkitsql::chunk 3
+check "same ranks with a tiny budget" [rows "SELECT n, DENSE_RANK() OVER (ORDER BY x) FROM ($L) q ORDER BY n"] $want
+set ::mkitsql::memBytes $ms ; set ::mkitsql::chunk $mc
+# CAST to INT / BIGINT checks the range
+check "CAST out of INT range" [string match "*out of range for INTEGER*" [err "SELECT CAST(5000000000 AS INT)"]] 1
+check "CAST out of BIGINT range" [string match "*out of range for BIGINT*" [err "SELECT CAST(1e30 AS BIGINT)"]] 1
+check "CAST in range" [rows "SELECT CAST(2147483647 AS INT), CAST(-2147483648 AS INT), CAST(5000000000 AS BIGINT), CAST(2.5 AS INT)"] [list [list 2147483647 -2147483648 5000000000 3]]
+# query() on an empty script
+check "query of nothing" [mkitsql::query "" $db] {cols {} rows {} message {}}
+check "query of a comment" [mkitsql::query "-- nothing" $db] {cols {} rows {} message {}}
+check "query of a semicolon" [mkitsql::query ";" $db] {cols {} rows {} message {}}
 # whole numbers beyond a double's precision sort exactly even where lsort -integer cannot be used (Tcl 8.5 on 64-bit Windows: 32-bit long)
 check "wideCmp orders 64-bit neighbours" [lsort -command ::mkitsql::wideCmp {9223372036854775807 9223372036854775806 -9223372036854775808 0 9223372036854775805}] {-9223372036854775808 0 9223372036854775805 9223372036854775806 9223372036854775807}
 # the parse cache must not outlive a setting that changes what a text means

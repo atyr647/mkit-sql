@@ -225,8 +225,10 @@ proc ::mkitsql::bindFrom {node} {
                     lappend pairs [list $lref $rref]
                     set eq [list bin = [lindex $lref 0] [lindex $rref 0]]
                     if {$bon eq ""} { set bon $eq } else { set bon [list bin and $bon $eq] }
-                    # hide the right-hand copy from SELECT *
+                    # hide the right-hand copy from SELECT *, and remember that the left one stands for both: with a RIGHT or FULL join the merged
+                    # column is COALESCE(left, right), because a row that exists only on the right has no left value
                     markHidden [lindex $rref 1] $u
+                    markMerged [lindex $lref 1] $u [lindex $rref 1] $type
                 }
             } elseif {$on ne ""} {
                 variable scopes
@@ -256,6 +258,38 @@ proc ::mkitsql::markHidden {srcId u} {
         }
         incr i
     }
+}
+
+# the column `u` of source `srcId` is the merged column of a USING / NATURAL join with source `rid` (join type `type`)
+proc ::mkitsql::markMerged {srcId u rid type} {
+    variable fromSoFar
+    set i 0
+    foreach s $fromSoFar {
+        if {[dict get $s id] == $srcId} {
+            dict lappend s merged [list [string tolower $u] $rid $type]
+            set fromSoFar [lreplace $fromSoFar $i $i $s]
+            return
+        }
+        incr i
+    }
+}
+# {rightSrcId} when column `lname` of source `s` is merged with a right-hand column under a RIGHT / FULL join, else ""
+proc ::mkitsql::mergedWith {s lname} {
+    if {![dict exists $s merged]} { return "" }
+    foreach m [dict get $s merged] {
+        lassign $m n rid type
+        if {$n eq $lname && $type in {right full}} { return $rid }
+    }
+    return ""
+}
+# the expression a merged column stands for: COALESCE(left, right)
+proc ::mkitsql::mergedExpr {srcs s col rid} {
+    set rs [findSrc $srcs $rid]
+    set rci [srcColIndex $rs [lindex $col 0]]
+    set rcol [lindex [dict get $rs cols] $rci]
+    noteRef 0 [dict get $s id] [lindex $col 0]
+    noteRef 0 $rid [lindex $rcol 0]
+    return [list func COALESCE 0 [list [list ref 0 [dict get $s id] [lindex $col 0] [lindex $col 1]] [list ref 0 $rid [lindex $rcol 0] [lindex $rcol 1]]]]
 }
 
 # {srcId name} pairs for all columns under a bound FROM tree
@@ -551,6 +585,17 @@ proc ::mkitsql::bindCol {q name} {
             foreach s $scope {
                 set ci [srcColIndex $s $name]
                 if {$ci >= 0} { lappend hits [list $s [lindex [dict get $s cols] $ci]] }
+            }
+            # the right-hand copy of a USING / NATURAL column is hidden: the name means the merged column
+            if {[llength $hits] > 1} {
+                set vis {}
+                foreach h $hits { if {[lsearch -exact [dict get [lindex $h 0] hidden] $lname] < 0} { lappend vis $h } }
+                if {[llength $vis] == 1} {
+                    lassign [lindex $vis 0] s col
+                    set rid [mergedWith $s $lname]
+                    if {$rid ne "" && $level == 0} { return [mergedExpr $scope $s $col $rid] }
+                    set hits $vis
+                }
             }
             if {[llength $hits] > 1} {
                 set owners {}
@@ -1213,6 +1258,13 @@ proc ::mkitsql::bindSelectExprs2 {sel order srcs bfrom} {
                 set matched 1
                 foreach c [dict get $s cols] {
                     if {[lsearch -exact [dict get $s hidden] [string tolower [lindex $c 0]]] >= 0 && $q eq ""} continue
+                    set rid [expr {$q eq "" ? [mergedWith $s [string tolower [lindex $c 0]]] : ""}]
+                    if {$rid ne ""} {
+                        lappend items [mergedExpr $srcs $s $c $rid]
+                        lappend names [visibleName [lindex $c 0]]
+                        lappend types [lindex $c 1] ; lappend letters "" ; lappend drills 0
+                        continue
+                    }
                     noteRef 0 [dict get $s id] [lindex $c 0]
                     lappend items [list ref 0 [dict get $s id] [lindex $c 0] [lindex $c 1]]
                     lappend names [visibleName [lindex $c 0]]

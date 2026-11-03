@@ -180,10 +180,34 @@ proc ::mkitsql::db::repairUnsafe {path} {
 namespace eval ::mkitsql::db { variable maxFileBytes 2147483647 }
 proc ::mkitsql::db::fileHeadroom {tag} {
     variable maxFileBytes
+    if {$tag ni [tags]} { return -code error -errorcode [list MKIT UNKNOWN $tag] "Unknown database '$tag'. Open databases: [join [tags] {, }]" }
     set p [path $tag]
     expr {$maxFileBytes - ([::file exists $p] ? [::file size $p] : 0)}
 }
 proc ::mkitsql::db::nearLimit {tag {fraction 0.9}} {
     variable maxFileBytes
-    expr {[fileHeadroom $tag] < $maxFileBytes * (1.0 - $fraction)}
+    if {![string is double -strict $fraction] || $fraction < 0 || $fraction > 1} { return -code error "The fraction must be a number from 0 to 1" }
+    expr {[fileHeadroom $tag] <= $maxFileBytes * (1.0 - $fraction)}
+}
+
+# ---- the checksum file (<file>.sum, MK Studio's format), read safely: shared by both storage layers ------------------------------------
+proc ::mkitsql::db::sumPath {path} { return $path.sum }
+# The sum file as {crc size mtime sumMtime}, or "" when it is missing, not a plain small file (a FIFO would block, a huge file would be read
+# whole) or not in the format.
+proc ::mkitsql::db::sumRead {path} {
+    set sp [sumPath $path]
+    if {[catch {::file lstat $sp st}] || $st(type) ne "file" || $st(size) > 4096} { return "" }
+    if {[catch {set h [open $sp r] ; set d [string trim [read $h 200]] ; close $h}]} { return "" }
+    if {[catch {llength $d} n] || $n != 3} { return "" }
+    lassign $d crc size mtime
+    if {![regexp {^[0-9a-fA-F]{8}$} $crc] || ![string is integer -strict $size] || ![string is integer -strict $mtime]} { return "" }
+    return [list [string tolower $crc] $size $mtime $st(mtime)]
+}
+# The sum was written in the same second as the file's last change, so it cannot yet tell another program's write from damage.  Once the file is
+# proven intact in a LATER second, stamp the sum file a second after the file's time: from then on a difference is unambiguous.
+proc ::mkitsql::db::sumRestamp {path} {
+    set r [sumRead $path]
+    if {$r eq ""} return
+    lassign $r crc size mtime sumMtime
+    if {$sumMtime <= $mtime && [clock seconds] > $mtime} { catch {::file mtime [sumPath $path] [expr {$mtime + 1}]} }
 }

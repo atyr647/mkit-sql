@@ -27,8 +27,17 @@ check "result" [dict get [mkitsql::insertRows $db a {id s} {{10 x} {11 y}}] affe
 check "column subset: others get the default" [rows "SELECT id, big, s FROM a WHERE id >= 10 ORDER BY id"] {{10 0 x} {11 0 y}}
 check "qualified table name" [dict get [mkitsql::insertRows $db [lindex [mkitsql::db::tags] 0].a {id} {{12}}] affected] 1
 check "NULL token" [rows "SELECT s FROM a WHERE id = 13"] {}
-mkitsql::insertRows $db a {id s} {{13 NIL}} NIL
+mkitsql::insertRows $db a {id s} {{13 NIL}} -null NIL
 check "NULL is stored as the default" [rows "SELECT s FROM a WHERE id = 13"] [list [list ""]]
+# subview targets and SQL-style names
+q "CREATE TABLE sv (id INT, kids TABLE (name TEXT, n INT))"
+q "INSERT INTO sv (id) VALUES (1), (2)"
+mkitsql::insertRows $db {sv[1].kids} {name n} {{a 1} {b 2}}
+check "subview target" [rows "SELECT name, n FROM sv\[1\].kids ORDER BY n"] {{a 1} {b 2}}
+check "a table name that is not one" [string match "*is not a table name*" [err {mkitsql::insertRows $db {a; DROP TABLE b} {id} {{1}}}]] 1
+check "a table name with a WHERE" [string match "*is not a table name*" [err {mkitsql::insertRows $db {a WHERE 1=1} {id} {{1}}}]] 1
+check "an unknown option" [string match "*unknown option*" [err {mkitsql::insertRows $db a {id} {{1}} -nul x}]] 1
+check "the sentinel as a real null token" [dict get [mkitsql::insertRows $db a {id s} [list [list 90 "x[format %c 64977]none"]] -null "x[format %c 64977]none"] affected] 1
 # errors, all-or-nothing
 set before [rows "SELECT COUNT(*) FROM a"]
 check "range error" [string match "*BIGINT*" [err {mkitsql::insertRows $db a {id} {{20} {99999999999}}}]] 1

@@ -37,15 +37,22 @@ proc ::mkitsql::db::openFile {path args} {
             return -code error -errorcode [list MKIT DAMAGED $why] "This file does not look like an intact Metakit database ($why):\n$real\nIt was not opened, so nothing was changed. Open a backup, or pass -unchecked to open it anyway."
         }
     }
+    set sp [::mkitsql::db::sumPath $real]
+    if {![catch {file lstat $sp st}] && ($st(type) ne "file" || $st(size) > 4096)} { catch {file delete $sp} }
     set tag [::store::openFile $path {*}$fargs]
     # a store that keeps a checksum compares it when it opens a file for writing and REPORTS the verdict instead of refusing
-    if {!$unchecked && [llength [info commands ::store::integrityState]] && [::store::integrityState $tag] eq "damaged"} {
+    set verdict ""
+    if {[llength [info commands ::store::integrityState]]} { set verdict [::store::integrityState $tag] }
+    if {$verdict eq "damaged"} { set verdict [::mkitsql::db::studioVerdict $real damaged] }
+    variable state ; set state($tag) $verdict
+    if {$verdict eq "ok" && "-readonly" ni $args} { ::mkitsql::db::sumRestamp $real }
+    if {!$unchecked && $verdict eq "damaged"} {
         catch {::store::closeFile $tag}
         return -code error -errorcode [list MKIT DAMAGED checksum] "This file does not look like what was last saved (its checksum no longer matches although its size and time are unchanged): part of it was damaged since.\n$real\nOpen a backup. (Pass -unchecked to open it anyway.)"
     }
     if {$repairs && [file exists $real] && [catch {
         if {!$unchecked} { ::mkitsql::dbRequireIntact $real }
-        if {$verify && [file size $real] > 0} { set vlevel [::mkitsql::db::verifyWithSum $real] }
+        if {$verify && [file size $real] > 0} { set vlevel [::mkitsql::db::verifyWithSum $real $verdict [expr {"-readonly" in $args}]] }
     } err opts]} {
         catch {::store::closeFile $tag}
         return -options $opts $err
@@ -59,11 +66,21 @@ proc ::mkitsql::db::openFile {path args} {
     variable level ; set level($tag) $vlevel
     return $tag
 }
+# MK Studio's store calls "damaged" what has the recorded size and time but another checksum; when the sum was written in the same second as the
+# file's last change that cannot be told from another program's write in that second, so it only counts as damage if the sum is a second newer
+proc ::mkitsql::db::studioVerdict {real v} {
+    if {$v ne "damaged"} { return $v }
+    set r [sumRead $real]
+    if {$r eq ""} { return none }
+    return [expr {[lindex $r 3] > [lindex $r 2] ? "damaged" : "changed"}]
+}
 # -verify on MK Studio's store: its own checksum (<file>.sum, written after every commit) is the proof when it is there and intact,
-# otherwise the file is read in a helper process (evidence, not proof).  Returns "proven" or "evidence"; raises MKIT DAMAGED.
-proc ::mkitsql::db::verifyWithSum {real} {
+# otherwise the file is read in a helper process (evidence, not proof).  `verdict` is what the store found when it OPENED the file for writing
+# (before it re-baselines a missing or changed sum - judging afterwards would call every file proven); a read-only open asks now.
+# Returns "proven" or "evidence"; raises MKIT DAMAGED.
+proc ::mkitsql::db::verifyWithSum {real {verdict ""} {readonly 1}} {
     if {[llength [info commands ::store::sumCheck]]} {
-        set v [::store::sumCheck $real]
+        if {$readonly} { if {[catch {::store::sumCheck $real} v]} { set v none } ; set v [studioVerdict $real $v] } else { set v $verdict }
         if {$v eq "damaged"} {
             return -code error -errorcode [list MKIT DAMAGED checksum] "This file does not look like what was last saved (its checksum no longer matches although its size and time are unchanged):\n$real\nOpen a backup."
         }
@@ -72,17 +89,17 @@ proc ::mkitsql::db::verifyWithSum {real} {
     ::mkitsql::dbVerify $real
     return evidence
 }
-namespace eval ::mkitsql::db { variable level ; array set level {} }
+namespace eval ::mkitsql::db { variable level ; array set level {} ; variable state ; array set state {} }
 # {state level} of an open file: level is "proven" (the checksum matched), "evidence" (read in a helper process without trouble: not a proof) or "" (-verify not asked)
 proc ::mkitsql::db::integrityOf {tag} {
     variable level
-    set st ""
-    if {[llength [info commands ::store::integrityState]]} { set st [::store::integrityState $tag] }
+    variable state
+    set st [expr {[info exists state($tag)] ? $state($tag) : ""}]
     list $st [expr {[info exists level($tag)] ? $level($tag) : ""}]
 }
 # what was put right when the file was opened (an interrupted commit), "" if nothing
 proc ::mkitsql::db::repairedNote {tag} { if {[llength [info commands ::store::repairedNote]]} { return [::store::repairedNote $tag] } ; return "" }
-proc ::mkitsql::db::closeFile {tag} { variable level ; unset -nocomplain level($tag) ; ::store::closeFile $tag ; ::mkitsql::typeForget $tag }
+proc ::mkitsql::db::closeFile {tag} { variable level ; variable state ; unset -nocomplain level($tag) state($tag) ; ::store::closeFile $tag ; ::mkitsql::typeForget $tag }
 proc ::mkitsql::db::commit {tag} {
     if {[catch {::store::commit $tag} err opts]} {
         # a failed commit (a full disk, Metakit's 2 GiB limit): put the file right if this store can, discard the pending changes, and
@@ -97,6 +114,7 @@ proc ::mkitsql::db::commit {tag} {
             catch {mk::file open $tag $path {*}$opts}
         }
         catch {::store::rollback $tag}
+        ::mkitsql::typeForget $tag
         set size [expr {[file exists $path] ? [file size $path] : 0}]
         return -code error -errorcode [list MKIT COMMITFAILED $size] "The commit failed ($err) - most likely the size limit of a Metakit file (2 GiB) or a full disk. The database file was put back to its last committed state where possible and the changes made since then were discarded (as ROLLBACK does). $note"
     }
@@ -174,3 +192,6 @@ proc ::mkitsql::db::createView {tag name layout} {
     ::mkitsql::typeRecord $tag $name $layout
     ::store::touch $tag
 }
+
+# MK Studio's store writes its own commit record and says nothing when it cannot: there is no "unprotected" flag to report
+proc ::mkitsql::db::commitUnprotected {tag} { return 0 }

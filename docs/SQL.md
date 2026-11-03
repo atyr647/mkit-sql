@@ -88,6 +88,10 @@ CROSS JOIN LATERAL (SELECT name, salary FROM employees e
                     WHERE e.dept = d.id ORDER BY salary DESC LIMIT 2) t;
 ```
 
+`USING (c)` and `NATURAL` joins merge the common columns: `SELECT *` shows the column once, and an unqualified `c` means the merged column - for `RIGHT` and
+`FULL` joins `COALESCE(left.c, right.c)`, so a row that exists only on the right still has its key (`a.c` and `b.c` still name the original columns, and `a.*` shows `a`'s own).
+Checked against SQLite on 29 query shapes (`tests/differential/using.sql`).
+
 `LEFT JOIN LATERAL (...) ON TRUE` keeps rows with no match. `RIGHT`/`FULL` with `LATERAL` is not supported.
 
 ## Subqueries
@@ -164,7 +168,7 @@ SELECT id, LAG(salary) IGNORE NULLS OVER (ORDER BY id) FROM employees;
 ## Expressions and functions
 
 Operators: `+ - * / %`, `||`, `= <> < <= > >=`, `AND OR NOT`, `IS [NOT] NULL | TRUE | FALSE | DISTINCT FROM`,
-`[NOT] BETWEEN`, `[NOT] IN`, `[NOT] LIKE | ILIKE [ESCAPE c]`, `[NOT] SIMILAR TO pattern [ESCAPE c]`, `expr COLLATE name`, `CASE` (both forms), `CAST(x AS type)` (a real cast to an integer type *rounds* to the nearest whole number, halves away from zero, as in PostgreSQL and MySQL; SQLite truncates). There is no negative zero: `-0.0` is `0.0` everywhere (grouping, sorting, joins, storage).
+`[NOT] BETWEEN`, `[NOT] IN`, `[NOT] LIKE | ILIKE [ESCAPE c]`, `[NOT] SIMILAR TO pattern [ESCAPE c]`, `expr COLLATE name`, `CASE` (both forms), `CAST(x AS type)` (a real cast to an integer type *rounds* to the nearest whole number, halves away from zero, as in PostgreSQL and MySQL; SQLite truncates; a value outside `INT` or `BIGINT` is an error, as in PostgreSQL). There is no negative zero: `-0.0` is `0.0` everywhere (grouping, sorting, joins, storage).
 Integer `/` truncates toward zero; `%` takes the sign of the left side; division by zero is an error.
 `AND`/`OR`/`CASE` evaluate lazily, so `WHERE b <> 0 AND a / b > 1` is safe.
 
@@ -206,7 +210,7 @@ SELECT EXTRACT(DAY FROM DATE '2026-03-05' - DATE '2026-01-01');  -- 63
 `date +/- interval`, `date - date`, `interval +/- interval`, `interval * n`, `interval / n`, interval
 comparison and sorting work. A day counts as 24 hours. Intervals cannot be stored in a column (store
 seconds, or `CAST(iv AS VARCHAR)`). `SUM`, `AVG`, `MIN` and `MAX` work over intervals: months and seconds are added separately
-(so `SUM` of two `1 mon` is `2 mons`; a fractional month from `AVG`, `/` or `*` becomes days of 30 days: `AVG` of `1 mon` and `2 mons` is `1 mon 15 days`), **equality is exact** (`1 mon` is not `30 days`, in `=`, `IN`, joins, `DISTINCT` and `GROUP BY` alike) while ordering compares the length of time with 30-day months, `MIN`/`MAX` return a value of the data compared by length of time (30-day months), `AVG` is the
+(so `SUM` of two `1 mon` is `2 mons`; a fractional month from `AVG`, `/` or `*` becomes days of 30 days: `AVG` of `1 mon` and `2 mons` is `1 mon 15 days`), **equality is exact** (`1 mon` is not `30 days`, in `=`, `IN`, joins, `DISTINCT` and `GROUP BY` alike) while ordering compares the length of time with 30-day months (equal lengths, by months, so `1 mon` and `30 days` are never interleaved - in memory or spilled); seconds are kept to the microsecond, `MIN`/`MAX` return a value of the data compared by length of time (30-day months), `AVG` is the
 sum divided by the count. To do date
 arithmetic on a text column, cast it first: `CAST(hired AS DATE) + INTERVAL '7' DAY`.
 
@@ -308,7 +312,7 @@ engine is 5-10 us (`SUM/AVG` over 20,000 rows 160 ms, a `LIKE` prefix scan 100 m
   `::mkitsql::ignoreConstraints`), and generated code that passed the safety check once is not checked again. So a statement that
   repeats with **parameters** (`INSERT INTO t VALUES (?, ?, ?, ?)` with a list each time) costs 105 us instead of 265 us, and `SELECT 1` 43 us instead of 108 us.
   A statement whose text is different every time (values pasted into the SQL) gets no help.
-* **Loading many rows: use `::mkitsql::insertRows $db table {columns} $rows`.** Parsing the SQL text of a big `INSERT ... VALUES (...),(...)`
+* **Loading many rows: use `::mkitsql::insertRows $db table {columns} $rows ?-null token?`** (the table is written as in SQL, subview paths included: `sv[1].kids`). Parsing the SQL text of a big `INSERT ... VALUES (...),(...)`
   is most of its cost. The tokenizer is one capture-free regular expression with the kind decided from the first character (3.3x faster, identical
   on 41,000 test texts) and a lone literal skips the operator-precedence climb: a 1,000-row `INSERT ... VALUES` text went from 190 us a row to 85 us
   (22 ms to tokenize, 38 ms to parse, 25 ms to run). `insertRows` takes the rows as Tcl lists, does the same checks and conversions
@@ -439,7 +443,7 @@ Metakit has no locking of its own. What mkit-sql guarantees, and what it does no
 process opens a given file for writing** (a second interpreter or thread of the same process has the same pid, so it is taken for the
 holder itself and gets the lock too); a **wall-clock step** larger than 2 s forward (a manual `date -s`) can make a live holder look
 like a recycled pid, because the check compares its start time with the lock's modification time (MK Studio's protocol has the same
-property); file names are compared as spelled, so on Windows and macOS (case-insensitive) always open a file under one spelling.
+property); file names are compared as spelled, so on Windows and macOS (case-insensitive) always open a file under one spelling; mkit-sql resolves symbolic links before it names the lock, MK Studio's store does not, so **open a database through the same real path from both programs** or they will not exclude each other.
 A file in a folder where no lock file can be created opens unlocked (see `requireLock`) and is then **not repaired** (another writer
 may be mid-commit); likewise a commit whose record cannot be written still runs, and `::mkitsql::db::commitUnprotected $tag` says so.
 * **Readers are not locked.** `openFile -readonly` always works, notes who holds the write lock
@@ -505,8 +509,12 @@ for tools that repair files).
 
 **`-verify` is a proof when the file has its checksum, and says so.** After every commit mkit-sql writes `<file>.sum`
 (`<crc32> <size> <mtime>` of the finished file - the format MK Studio's store writes too, and the two read each other's;
-files over `::mkitsql::db::sumLimit` MB, default 512, are not covered; `0` turns it off). Opening a file for writing compares it, and a file whose size and time
-still match but whose checksum does not is **proven damaged** and refused (`{MKIT DAMAGED checksum}`). `-verify` returns the
+files over `::mkitsql::db::sumLimit` MB, default 512, are not covered; `0` turns it off). Opening a file for writing (or any open with `-verify`; a plain read-only open does not read the whole file) compares it, and a file whose size and time
+still match but whose checksum does not is **proven damaged** and refused (`{MKIT DAMAGED checksum}`). Two refinements keep it honest:
+file times have a resolution of one second, so a sum written in the same second as the file's last change cannot tell another program's write from
+damage - it reports `changed` (no proof, no alarm) until some later open finds the file intact and stamps the sum a second newer, from which point a difference
+is unambiguous; and the sum is removed when a commit starts (a commit rewrites bytes in place) and written again when it finishes, so a commit that is cut off leaves no
+sum that vouches for the old bytes. A `<file>.sum` that is not a small plain file (a FIFO, a huge file) is ignored. `-verify` returns the
 level in `::mkitsql::db::integrityOf $tag` (`{state level}`):
 
 | level | meaning |

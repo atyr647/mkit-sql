@@ -1306,11 +1306,11 @@ proc ::mkitsql::sortRecs {recs spec} {
             if {[lindex $r $k] eq $N} { lappend nullRecs $r } else { lappend valRecs $r }
         }
         if {$type eq "interval"} {
-            # sort by length of time, not by the internal text form
+            # sort by length of time (then months), not by the internal text form: a string key that orders correctly as text
             set tmp {}
-            foreach r $valRecs { lset r $k [ivTotal [lindex $r $k]] ; lappend tmp $r }
+            foreach r $valRecs { lset r $k [ivSortKey [lindex $r $k]] ; lappend tmp $r }
             set valRecs $tmp
-            set type real
+            set type text
         }
         set mode [expr {$type in {int} ? "-integer" : ($type in {real bool} ? "-real" : "-ascii")}]
         set dirflag [expr {$dir eq "desc" ? "-decreasing" : "-increasing"}]

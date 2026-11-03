@@ -430,7 +430,7 @@ proc ::mkitsql::execInsert {st} {
 # INSERT of rows that are already Tcl values (::mkitsql::insertRows): no SQL text to parse or bind, the same checks and conversions as INSERT.
 proc ::mkitsql::execInsertRows {st} {
     variable N ; variable M
-    lassign [resolveTarget [dict get $st parts] {}] tag view path layout label
+    lassign [resolveTarget [dict get $st parts] [dict get $st subs]] tag view path layout label
     set cols [dict get $st cols]
     if {![llength $cols]} { foreach c $layout { if {[lindex $c 1] ne "V"} { lappend cols [lindex $c 0] } } }
     set targets {} ; set seen {}

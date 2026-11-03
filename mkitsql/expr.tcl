@@ -314,10 +314,12 @@ proc ::mkitsql::rt::inlist {v list kind hasNull} {
 }
 
 # ---- CASTs -----------------------------------------------------------------
-::mkitsql::defstrict cast_int {v} {
+# CAST(x AS INT) / CAST(x AS BIGINT): a value outside the type is an error (as in PostgreSQL), not a number the column could not hold
+::mkitsql::defstrict cast_int {v {lo -9223372036854775808} {hi 9223372036854775807}} {
     set v [::mkitsql::rt::num $v]
-    if {[string is integer -strict $v] || [string is wideinteger -strict $v]} { return $v }
-    expr {round($v)}
+    if {![string is integer -strict $v] && ![string is wideinteger -strict $v]} { set v [expr {round($v)}] }
+    if {$v < $lo || $v > $hi} { ::mkitsql::fail "The value $v is out of range for [expr {$hi == 2147483647 ? {INTEGER} : {BIGINT}}]" }
+    return $v
 }
 ::mkitsql::defstrict cast_real {v} { set r [expr {double([::mkitsql::rt::num $v])}] ; if {$r eq "-0.0"} { return 0.0 } ; return $r }
 ::mkitsql::defstrict cast_text {v} { return $v }
@@ -977,6 +979,7 @@ proc ::mkitsql::cgCast {node ctx} {
         if {$kind eq "interval"} { return $ca }
         fail "An interval can only be cast to text"
     }
+    if {$kind eq "int" && $letter eq "I" && $st eq "int"} { return [list "\[::mkitsql::rt::cast_int $w -2147483648 2147483647\]" $st] }
     return [list "\[::mkitsql::rt::cast_$kind $w\]" $st]
 }
 

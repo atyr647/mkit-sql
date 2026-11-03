@@ -12,10 +12,20 @@ namespace eval ::mkitsql {
     variable ivUnitSecs {second 1 minute 60 hour 3600 day 86400 week 604800}
 }
 
+# Seconds are kept to the microsecond (as PostgreSQL does): float noise from dividing or scaling must not make two equal intervals different
+# strings (equality, GROUP BY, DISTINCT and joins see the string) or print as 59.9999999.
 proc ::mkitsql::ivMake {m s} {
     set m [expr {entier($m)}]
+    if {![string is integer -strict $s]} { set s [expr {round($s * 1e6) / 1e6}] }
     if {$s == entier($s) && abs($s) < 1e15} { set s [expr {entier($s)}] } else { set s [expr {double($s)}] }
     return $::mkitsql::IV$m:$s
+}
+# A string that sorts (as text) in the order of the intervals' length of time with 30-day months, equal lengths by months: equal intervals are
+# adjacent however the sort is run (in memory, or in runs merged from files), which a bare total would not give.
+proc ::mkitsql::ivSortKey {v} {
+    if {![isIv $v]} { return $v }                          ;# already converted (a spilled run is sorted again)
+    lassign [ivSplit $v] m s
+    format %031d%019d [expr {$m * 2592000000000 + round($s * 1000000) + 1000000000000000000000000000000}] [expr {$m + 1000000000000000000}]
 }
 proc ::mkitsql::ivSplit {v} {
     if {![::mkitsql::isIv $v] || ![regexp {^.....(-?\d+):(-?[0-9.eE+-]+)$} $v -> m s]} {
