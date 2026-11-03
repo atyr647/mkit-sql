@@ -157,10 +157,8 @@ jobs:
           python3 tests/differential/diff.py --kind window --n 1500 --seed 7
 
   # An extra check against a Mk4tcl compiled from the current Metakit sources (system Tcl 8.6).
-  # Not the target runtime, so it is informational only.
-  metakit-from-source:
+    metakit-from-source:
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - name: Install tools
@@ -177,30 +175,87 @@ jobs:
           tclsh8.6 tests/robustness.tcl
           tclsh8.6 tests/bulkwrite.tcl
 
-  # Reads (never writes) the mkstudio repository; kept separate so the engine job never depends on it.
+  # Reads (never writes) the mkstudio repository.  If that repository cannot be read by this workflow (it is
+  # private: add a read-only token as the secret MKSTUDIO_READ_TOKEN) the steps are skipped and a visible
+  # warning is printed - a skipped job is never reported as a pass.  If it can be read, a failure is a failure.
   mkstudio:
     runs-on: ubuntu-latest
-    continue-on-error: true
     env:
       T86: tclkit/tclkit-8.6.3
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/checkout@v4
+      - name: Check out MK Studio (read-only)
+        id: ms
+        continue-on-error: true
+        uses: actions/checkout@v4
         with:
           repository: atyr647/mkstudio
           ref: ${{ vars.MKSTUDIO_REF || 'main' }}
           path: mkstudio
+          token: ${{ secrets.MKSTUDIO_READ_TOKEN || github.token }}
+      - name: MK Studio could not be checked out - interoperability tests SKIPPED
+        if: steps.ms.outcome != 'success'
+        run: echo "::warning title=mkstudio job skipped::the atyr647/mkstudio repository is not readable by this workflow. Add a read-only token as the secret MKSTUDIO_READ_TOKEN to run the MK Studio contract, UI and locking-interoperability tests."
       - name: Install tools
+        if: steps.ms.outcome == 'success'
         run: sudo apt-get update && sudo apt-get install -y xvfb
       - name: Fetch the tclkit runtimes (SHA1-verified)
+        if: steps.ms.outcome == 'success'
         run: tests/fetch-tclkit.sh
       - name: mkstudio's own engine contract, tclkit 8.6.3, real Metakit
+        if: steps.ms.outcome == 'success'
         run: MKIT_MK4TCL=builtin MKSTUDIO_DIR=$PWD/mkstudio $T86 tests/studio_contract.tcl
       - name: The real MK Studio UI with mkit-sql behind it, tclkit 8.6.3, real Metakit
+        if: steps.ms.outcome == 'success'
         run: MKIT_MK4TCL=builtin MKSTUDIO_DIR=$PWD/mkstudio xvfb-run -a $T86 tests/studio_integration.tcl
       - name: Locking interoperates with MK Studio's own store.tcl (separate processes, both directions)
+        if: steps.ms.outcome == 'success'
         run: MKIT_MK4TCL=builtin MKSTUDIO_DIR=$PWD/mkstudio $T86 tests/locking.tcl
       - name: The installer and patch apply to a fresh mkstudio checkout
+        if: steps.ms.outcome == 'success'
         run: |
           cp -r mkstudio mkstudio-fresh
           integration/install-into-mkstudio.sh "$PWD/mkstudio-fresh"
+
+  # Other platforms.  The pure-Tcl stand-in needs only a Tcl 8.5+ shell; the real-Metakit run builds Mk4tcl from
+  # source where it can.  Informational until each one is green, then it becomes required.
+  portable:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    continue-on-error: true
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tcl (macOS)
+        if: runner.os == 'macOS'
+        run: brew install tcl-tk && echo "TCLSH=$(brew --prefix tcl-tk)/bin/tclsh8.6" >> "$GITHUB_ENV"
+      - name: Tcl (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          choco install magicsplat-tcl-tk --no-progress -y || true
+          T=$(ls -d /c/Program\ Files/Tcl*/bin/tclsh*.exe /c/Tcl*/bin/tclsh*.exe 2>/dev/null | head -1)
+          echo "TCLSH=$T" >> "$GITHUB_ENV"
+      - name: Which Tcl
+        run: |
+          echo "using: $TCLSH"; "$TCLSH" <<< 'puts [info patchlevel]; puts $tcl_platform(os)'
+      - name: Lint
+        run: '"$TCLSH" tests/lint.tcl'
+      - name: Engine tests on the stand-in, both storage layers
+        run: |
+          "$TCLSH" tests/run.tcl
+          MKIT_BACKEND=standalone "$TCLSH" tests/run.tcl
+      - name: Spill, robustness, injection, nullforge
+        run: |
+          "$TCLSH" tests/spillroundtrip.tcl
+          "$TCLSH" tests/robustness.tcl
+          "$TCLSH" tests/injection.tcl
+          "$TCLSH" tests/nullforge.tcl
+      - name: Temp files and locking (Unix semantics; skipped on Windows)
+        run: |
+          "$TCLSH" tests/tempsec.tcl
+          "$TCLSH" tests/locking.tcl
