@@ -342,6 +342,84 @@ proc ::mkitsql::applyInsert {path props chunk} {
     return 0
 }
 
+# ---- bulk writes -----------------------------------------------------------------------------------
+# Metakit shifts every later row for each row removed, and every later string for each string whose
+# length changes, so scattered deletes and string updates over many rows are QUADRATIC (200,000 rows:
+# tens of seconds).  Past `bulkMin` such changes the view is rebuilt instead - copied row by row into a
+# scratch view with the changes applied, emptied, and copied back - which is linear.
+namespace eval ::mkitsql { variable bulkMin 20000 }
+
+# delete the rows with the given indices
+proc ::mkitsql::deleteRowsSmart {path layout idx} {
+    variable bulkMin
+    set idx [lsort -integer -unique $idx]
+    if {![llength $idx]} return
+    set runs {} ; set start [lindex $idx 0] ; set cnt 0 ; set prev [expr {$start - 2}]
+    foreach i $idx {
+        if {$i == $prev + 1} { incr cnt } else {
+            if {$cnt} { lappend runs [list $start $cnt] }
+            set start $i ; set cnt 1
+        }
+        set prev $i
+    }
+    lappend runs [list $start $cnt]
+    if {[llength $runs] >= $bulkMin} {
+        rewriteView $path $layout $idx "" {}
+        return
+    }
+    for {set k [expr {[llength $runs] - 1}]} {$k >= 0} {incr k -1} {
+        lassign [lindex $runs $k] first n
+        ::mkitsql::db::deleteRange $path $first $n
+    }
+}
+
+# Rebuild view `path`: rows in `deletes` (ascending) are dropped; for the rows in the spool `updates`
+# ({rowid values} per record, targets = {{column letter}...}) those columns are replaced.
+proc ::mkitsql::rewriteView {path layout deletes updates targets} {
+    set tag [lindex [split $path .] 0]
+    set tmpName __mkitsql_tmp_[newId]
+    set tmp $tag.$tmpName
+    set props {} ; set subs {}
+    foreach c $layout { if {[lindex $c 1] eq "V"} { lappend subs $c } else { lappend props [lindex $c 0] } }
+    set tpos {}
+    foreach t $targets { lappend tpos [lsearch -exact $props [lindex $t 0]] }
+    set n [::mkitsql::db::size $path]
+    ::mkitsql::db::createView $tag $tmpName $layout
+    set sr "" ; set rd "" ; set g {}
+    if {$updates ne ""} {
+        set sr [sorterNew {{key 0 asc "" int}}]
+        spoolEach $updates [list ::mkitsql::rewriteSortSink $sr]
+        set rd [sorterReader $sr] ; set g [readerGroup $rd]
+    }
+    set di 0 ; set nd [llength $deletes]
+    for {set first 0} {$first < $n} {incr first 2000} {
+        set rid $first
+        foreach vals [::mkitsql::db::rows $path $props $first 2000] {
+            if {$di < $nd && [lindex $deletes $di] == $rid} {
+                incr di ; incr rid ; continue
+            }
+            if {[llength $g] && [lindex $g 0] == $rid} {
+                foreach p $tpos v [lindex $g 1 0 1 1] { lset vals $p $v }
+                set g [readerGroup $rd]
+            }
+            set j [::mkitsql::db::appendRow $tmp $props $vals]
+            foreach sc $subs { copyRows $path!$rid.[lindex $sc 0] $tmp!$j.[lindex $sc 0] [lindex $sc 2] }
+            incr rid
+        }
+    }
+    if {$rd ne ""} { readerFree $rd }
+    if {$sr ne ""} { sorterFree $sr }
+    ::mkitsql::db::clearView $path
+    copyRows $tmp $path $layout
+    ::mkitsql::db::dropView $tag $tmpName
+}
+proc ::mkitsql::rewriteSortSink {sr chunk} {
+    set recs {}
+    foreach r $chunk { lappend recs [list [lindex $r 0] $r] }
+    sorterAdd $sr $recs
+    return 0
+}
+
 # tiny map helper (Tcl 8.5 has no lmap)
 proc ::mkitsql::lmap2 {list spec} {
     lassign $spec var body
@@ -381,7 +459,14 @@ proc ::mkitsql::execUpdate {st} {
     set sp [spoolNew]
     streamPlan $id {} [list ::mkitsql::convSink $sp [list ::mkitsql::convUpdate $targets]]
     assertClean
-    spoolEach $sp [list ::mkitsql::applyUpdate $path $targets]
+    variable bulkMin
+    set varLen 0
+    foreach t $targets { if {[lindex $t 1] in {S B}} { set varLen 1 } }
+    if {$varLen && [spoolCount $sp] >= $bulkMin} {
+        rewriteView $path $layout {} $sp $targets
+    } else {
+        spoolEach $sp [list ::mkitsql::applyUpdate $path $targets]
+    }
     set n [spoolCount $sp]
     spoolFree $sp
     return [dict create kind message text "[plural $n row] updated in '$label'." affected $n tag $tag]
@@ -396,7 +481,7 @@ proc ::mkitsql::execDelete {st} {
     set idx {}
     foreach r $rows { lappend idx [lindex $r 0] }
     assertClean
-    if {[llength $idx]} { ::mkitsql::db::deleteRows $path $idx }
+    deleteRowsSmart $path $layout $idx
     set n [llength $idx]
     return [dict create kind message text "[plural $n row] deleted from '$label'." affected $n tag $tag]
 }
@@ -479,7 +564,7 @@ proc ::mkitsql::execMerge {st} {
     assertClean
     spoolEach $S($mg,sU) [list ::mkitsql::mergeApplyUpdate $path]
     set deletes $S($mg,del)
-    if {[llength $deletes]} { ::mkitsql::db::deleteRows $path $deletes }
+    deleteRowsSmart $path $layout $deletes
     spoolEach $S($mg,sI) [list ::mkitsql::mergeApplyInsert $path]
     set nu [spoolCount $S($mg,sU)] ; set nd [llength $deletes] ; set ni [spoolCount $S($mg,sI)]
     spoolFree $S($mg,sU) ; spoolFree $S($mg,sI) ; sorterFree $S($mg,touch)

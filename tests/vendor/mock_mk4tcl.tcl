@@ -211,7 +211,8 @@ proc ::mkmock::cmd_row {cmd path args} {
         }
         delete {
             lassign [_resolve $path] id idx
-            dict set vo($id) rows [lreplace [dict get $vo($id) rows] $idx $idx]
+            set cnt [expr {[llength $args] ? [lindex $args 0] : 1}]
+            dict set vo($id) rows [lreplace [dict get $vo($id) rows] $idx [expr {$idx + $cnt - 1}]]
             return
         }
     }

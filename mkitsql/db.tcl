@@ -165,6 +165,17 @@ proc ::mkitsql::db::deleteRows {path indices} {
     touchPath $path
 }
 
+# `count` consecutive rows from `first` in one call (cheaper than one call per row)
+proc ::mkitsql::db::deleteRange {path first count} {
+    mk::row delete $path!$first $count
+    touchPath $path
+}
+# remove every row of a view (and of its subviews), keeping the layout
+proc ::mkitsql::db::clearView {path} {
+    mk::view size $path 0
+    touchPath $path
+}
+
 # ---- changing structure ---------------------------------------------------------------------
 proc ::mkitsql::db::createView {tag name layout} {
     if {[hasView $tag $name]} { error "View '$name' already exists in '$tag'." }

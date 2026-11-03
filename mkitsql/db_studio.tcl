@@ -32,6 +32,15 @@ proc ::mkitsql::db::rebuildColumn {path oldName newName newType} { ::store::rebu
 proc ::mkitsql::db::parseLayout {spec} { ::store::parseLayout $spec }
 proc ::mkitsql::db::formatLayout {layout} { ::store::formatLayout $layout }
 
+proc ::mkitsql::db::deleteRange {path first count} {
+    mk::row delete $path!$first $count
+    ::store::touchPath $path
+}
+proc ::mkitsql::db::clearView {path} {
+    mk::view size $path 0
+    ::store::touchPath $path
+}
+
 proc ::mkitsql::db::views {tag} {
     if {[llength [info commands ::store::hasLayout]]} { return [::store::views $tag] }
     set out {}

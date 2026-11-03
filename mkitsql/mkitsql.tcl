@@ -20,7 +20,7 @@
 package require Tcl 8.5
 
 namespace eval ::mkitsql {
-    variable version 0.2.0
+    variable version 0.3.0
     variable dir [file dirname [file normalize [info script]]]
 }
 foreach f {parser expr datetime verify bind plan spill exec window stmt} { source -encoding utf-8 [file join $::mkitsql::dir $f.tcl] }

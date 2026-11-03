@@ -271,6 +271,10 @@ proc onRows {rows} { foreach r $rows { ... } ; return 0 }          ;# return 1 t
 (a single partition larger than memory), the value set of an `IN (SELECT ...)` (capped at 5,000,000 values with a
 clear error), the row ids of a `DELETE`, and the final text of `STRING_AGG`.
 
+Metakit shifts every later row when a row is deleted and every later string when a string changes length, so
+scattered deletes and string updates are quadratic there. A `DELETE` or a string `UPDATE` touching
+`::mkitsql::bulkMin` (20,000) or more rows therefore rebuilds the table through a scratch view instead (linear).
+
 ## Storage layer
 
 The engine reaches Metakit only through `::mkitsql::db` (`mkitsql/db.tcl`, directly on Mk4tcl, no MK Studio

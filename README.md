@@ -100,8 +100,11 @@ external merge sort, hash tables that dump partial results, a sort-merge join wh
 `UNION/INTERSECT/EXCEPT`, windows, `COUNT(DISTINCT id)` and 200,000-row `UPDATE`/`INSERT ... SELECT`/`CREATE TABLE
 AS` each adding a few MB. Honest limits: one *partition* of a window function must fit in memory; the value set of an
 `IN (SELECT ...)` is capped at 5,000,000 values (clear error beyond that); `DELETE` keeps one integer per deleted
-row; `query`/`run` return the whole (capped) result. Metakit itself is quadratic for scattered deletes and for
-changing the length of many strings in place (200,000 rows: tens of seconds), which is outside the engine.
+row; `query`/`run` return the whole (capped) result. Metakit is quadratic for scattered deletes and for changing
+the length of many strings in place (every later row or string is shifted each time), so a `DELETE` or a string
+`UPDATE` that touches 20,000 or more rows rebuilds the table through a scratch view instead (linear; `tests/bulkwrite.tcl`
+checks that both strategies give identical files): on 200,000 rows a scattered `DELETE` of half went from 65 s to
+2.3 s and a string `UPDATE` of every row from 56 s to 7 s.
 
 ## Safety: NULL, intervals and generated code
 
@@ -128,7 +131,7 @@ against **both storage layers**, and also on a Mk4tcl built from source and on t
 
 | | result |
 | --- | --- |
-| Engine suite (`tests/run.tcl`), 530 checks | pass on both kits, both storage layers, real Metakit; also on the stand-in |
+| Engine suite (`tests/run.tcl`), 530 checks | pass on both kits, both storage layers, real Metakit; also on the stand-in; also with `MKIT_BULKMIN=1` (every big delete/update rebuilds the table) |
 | Same suite with tiny memory budgets (`MKIT_MEMBYTES=1..2000 MKIT_CHUNK=1..11`) | pass: every sort, group, join, distinct and DML spills, thousands of spill files, none left behind |
 | Metakit-only checks (`tests/real_metakit.tcl`, 22) | pass: persistence across close/reopen, 64-bit values, binary, Unicode, nested subviews, every `ALTER`, drop/recreate |
 | **Differential test against SQLite** (`tests/differential`) | more than 60,000 generated queries (about 10,000 window queries), 0 mismatches; repeated with a 50-byte memory budget |
@@ -162,6 +165,7 @@ python3 tests/differential/diff.py --file tests/differential/recursive.sql
 tclsh tests/injection.tcl                 # hostile strings must stay inert
 tclsh tests/nullforge.tcl                 # NULL / interval cannot be forged
 tclsh tests/codegen_audit.tcl             # generated code verifier + mutation test
+tclsh tests/bulkwrite.tcl                 # big deletes/updates: rebuild strategy == row-by-row
 tclsh tests/fuzz.tcl 40000 1              # mutated SQL must fail cleanly
 MKIT_MK4TCL=builtin tclkit/tclkit-8.6.3 tests/realworld.tcl tclkit/tclkit-8.5.17    # a Metakit file we did not create
 
