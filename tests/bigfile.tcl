@@ -11,6 +11,7 @@ proc ok {name cond {info ""}} { global pass fail ; if {$cond} { incr pass } else
 set dir [expr {[info exists ::env(TMPDIR)] ? $::env(TMPDIR) : "/tmp"}]
 set f $dir/mkitsql_bigfile_[pid].mk ; file delete $f
 if {[mkitsql::db::available] eq "0"} { puts "no Metakit" ; exit 2 }
+if {[mkitsql::db::wideCapable]} { puts "bigfile: this Mk4tcl has no 2 GiB ceiling (see tests/widebig.tcl); skipped" ; exit 0 }
 set db [mkitsql::db::openFile $f -create]
 mkitsql::db::createView $db t {{k I {}} {b B {}}}
 set blob [string repeat x 1048576]

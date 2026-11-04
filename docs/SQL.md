@@ -332,18 +332,50 @@ engine is 5-10 us (`SUM/AVG` over 20,000 rows 160 ms, a `LIKE` prefix scan 100 m
 
 ## Large tables and memory
 
-**Can the 2 GiB limit be lifted? Not inside the Metakit format.** Metakit's source stores every file position as a signed 32-bit
-integer (`t4_i32` in `mk4.h`, `DataRead(t4_i32, ...)`), and its change log says "make commit fail on > 2 Gb" (2006). A build with 64-bit
-offsets would write files that MK Studio, every tclkit and every other Metakit tool cannot read, so it is not offered. What works: split the
-data over several files (any number can be open at once and their tables are addressed `dbtag.table`), and watch
-`::mkitsql::db::fileHeadroom $tag` / `::mkitsql::db::nearLimit $tag 0.9` to archive or split before a commit has to be undone.
+**Can the 2 GiB limit be lifted? Yes - with a Metakit built for it; not with the Metakit inside today's MK Studio and tclkits.**
+Stock Metakit stores every file position as a signed 32-bit integer (`t4_i32`), so a database file cannot pass 2 GiB. The Metakit fork
+at https://github.com/atyr647/metakit (the branch with the 64-bit file positions) removes that: files below 2 GiB are byte for byte what
+they always were, and a file that outgrows 2 GiB gets "wide" tails (24 bytes, 64-bit positions) and a flagged header. mkit-sql supports it:
 
-**A Metakit file cannot be larger than 2 GiB (2,147,483,647 bytes)** - it keeps its size in one 32-bit word (measured on real
+| | stock Mk4tcl (MK Studio, tclkits) | Mk4tcl built from the fork |
+|---|---|---|
+| file below 2 GiB | works, unchanged | works, byte for byte the same |
+| file past 2 GiB | **a commit that would cross is undone**, error `{MKIT COMMITFAILED size}` | commits, reopens, repairs, verifies |
+| a wide file (made by the fork) is opened | **refused**, `{MKIT WIDEFILE}` (the stock library would show an EMPTY database, and saving would hide the data) | works |
+| `fileHeadroom` / `nearLimit` measure against | 2,147,483,647 bytes | 2^56 - 64 bytes |
+| one column (all values of one column of one table) | the file limit comes first | **still 2^31-1 bytes**: refused with `{MKIT COLUMNFULL view column}` |
+
+How the engine knows which Metakit it has: `::mkitsql::db::wideCapable` builds a tiny wide file with the loaded library (an ordinary file
+turned into the wide format) and sees whether the library finds its row - a behaviour test, not a version number; the result is kept for the process.
+`MKIT_WIDE=0` in the environment forces "cannot" (to test the refusal). A wrong "cannot" can only refuse a file or keep the 2 GiB headroom: it never
+risks data. Opening a file for writing also puts right an interrupted commit on a wide file (the commit record and the 24-byte frame check are wide-aware),
+and `-verify` reads the whole file in a helper process (it loads the same Mk4tcl as the caller).
+
+**The column limit.** In the 64-bit Metakit one column (and one memo) is still limited to 2^31-1 bytes whatever the size of the file, and
+when an edit grows a column past it Metakit **ends the program** (there is no way to report an error from the middle of an edit). With the file limit gone
+nothing else stops a big table first, so `INSERT` and `UPDATE` check the column before they write: the check costs nothing until the file plus
+what has been written since the last commit nears 2 GiB; then the column is counted once (fixed width: rows x width; text and blobs: one pass over the
+column, about a second per million rows) and kept up to date for the session (deletes are not subtracted, so the count only errs on the safe side; it is
+reset by `ROLLBACK`, a reopen and a layout change). When a column would pass the limit the statement fails with `{MKIT COLUMNFULL view column}` and
+the file is untouched. The remedy is the same as ever: split the table (by year, say) or keep large values outside the database.
+
+**On stock Metakit a file cannot be larger than 2 GiB (2,147,483,647 bytes)** - it keeps its size in one 32-bit word (measured on real
 Metakit 2.4.9.7: a commit that would take the file past it fails with "I/O error during commit" and, if it was a large one, leaves
 a file that crashes Metakit when opened). mkit-sql undoes such a commit: the file is put back to its last committed state, the
 handle is reopened (the changes since the last commit are discarded, as `ROLLBACK` does) and the error is
 `{MKIT COMMITFAILED <size>}` with a message that names the limit. What fits: about 55 million rows of three numeric columns
-(20,000,000 such rows are a 762 MB file); a table of long text fills it much sooner. To go beyond, split the data over several files.
+(20,000,000 such rows are a 762 MB file); a table of long text fills it much sooner. To go beyond, split the data over several files - any number
+can be open at once and their tables are addressed `dbtag.table` - and watch `::mkitsql::db::fileHeadroom $tag` / `::mkitsql::db::nearLimit $tag 0.9`
+to archive or split before a commit has to be undone.
+
+**Do not mix the two Metakits on one wide file.** A program with a stock Mk4tcl that is not mkit-sql (MK Studio's own store, `tclkit`, a script) sees a wide file as
+empty, and a commit from it would put a new, small database behind the existing bytes. mkit-sql refuses such a file under a stock Mk4tcl; other programs
+do not know. Keep wide files for programs that load the 64-bit Mk4tcl, and keep MK Studio's `integration/` patch for files under 2 GiB until MK Studio itself
+ships the 64-bit Metakit (a file only becomes wide when it outgrows 2 GiB: a small file is readable by everything).
+
+Build the library: `tests/build_mk4tcl_wide.sh <dir>` (a pinned commit of the fork; needs `g++`, `make`, `tcl8.6-dev`). CI job `metakit-wide` runs the engine
+suites on it, `tests/widefile.tcl` (small files, any Mk4tcl) and `tests/widebig.tcl` (a 3.5 GB database: commits across 2 GiB, every blob intact,
+one column refused at 2 GiB, five commits killed in the middle).
 
 A query never has to fit in memory. Scans are read in chunks and every operator that has to hold rows (sort,
 `GROUP BY`, `DISTINCT` and `DISTINCT` aggregates, joins, `UNION/INTERSECT/EXCEPT`, windows over big inputs, and

@@ -127,7 +127,7 @@ jobs:
       - name: SQL added in 0.5 - correlated subqueries remembered per key, EXCLUDE / DISTINCT / IGNORE NULLS, interval aggregates, SIMILAR TO, duplicate column names, ROLLUP / CUBE / GROUPING SETS, COLLATE; both kits, tiny budget too
         run: |
           for k in $T86 $T85; do
-            for t in decorrelate window_ext ivagg similar dupcols groupsets collate review2 insertrows aggfast tokenizer likepush attest; do echo "== $k / $t"; MKIT_MK4TCL=builtin $k tests/$t.tcl; done
+            for t in decorrelate window_ext ivagg similar dupcols groupsets collate review2 insertrows aggfast tokenizer likepush attest widefile; do echo "== $k / $t"; MKIT_MK4TCL=builtin $k tests/$t.tcl; done
             for t in ivagg groupsets decorrelate; do MKIT_MEMBYTES=2000 MKIT_CHUNK=11 MKIT_MK4TCL=builtin $k tests/$t.tcl; done
           done
           for b in standalone studio; do for t in decorrelate window_ext collate groupsets; do MKIT_BACKEND=$b MKIT_MK4TCL=builtin $T86 tests/$t.tcl; done; done
@@ -213,6 +213,41 @@ jobs:
           tclsh8.6 tests/dropview.tcl
           tclsh8.6 tests/robustness.tcl
           tclsh8.6 tests/bulkwrite.tcl
+          EXPECT_WIDE=0 tclsh8.6 tests/widefile.tcl
+
+  # Metakit with 64-bit file positions (no 2 GiB ceiling): https://github.com/atyr647/metakit, a pinned commit of its branch.  Everything
+  # that has to hold on real Metakit still has to, and the engine must now read, change, repair and verify a file over 2 GiB (tests/widebig.tcl,
+  # 3.5 GB of disk), refuse one column past 2 GiB cleanly (Metakit would end the program), and refuse a wide file under a Metakit that cannot read it.
+  metakit-wide:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install tools
+        run: sudo apt-get update && sudo apt-get install -y tcl8.6 tcl8.6-dev g++ make python3
+      - name: Build Mk4tcl with 64-bit file positions
+        run: tests/build_mk4tcl_wide.sh "$RUNNER_TEMP/mk4wide"
+      - name: Engine and Metakit-specific tests
+        run: |
+          export MKIT_MK4TCL="$RUNNER_TEMP/mk4wide/build/Mk4tclS.so"
+          tclsh8.6 tests/run.tcl
+          tclsh8.6 tests/real_metakit.tcl
+          tclsh8.6 tests/dropview.tcl
+          tclsh8.6 tests/robustness.tcl
+          tclsh8.6 tests/bulkwrite.tcl
+          MKIT_BACKEND=standalone tclsh8.6 tests/attest.tcl
+          tclsh8.6 tests/power_loss.tcl
+          tclsh8.6 tests/locking.tcl
+          MKIT_BACKEND=studio tclsh8.6 tests/run.tcl
+      - name: Wide files - recognised, read, changed, repaired, verified, refused by a Metakit that cannot read them
+        run: |
+          export MKIT_MK4TCL="$RUNNER_TEMP/mk4wide/build/Mk4tclS.so"
+          EXPECT_WIDE=1 tclsh8.6 tests/widefile.tcl
+          EXPECT_WIDE=1 MKIT_BACKEND=studio tclsh8.6 tests/widefile.tcl
+      - name: A database file of 3.5 GB - commits across 2 GiB, every blob intact, one column refused at 2 GiB, commits killed in the middle
+        run: MKIT_MK4TCL="$RUNNER_TEMP/mk4wide/build/Mk4tclS.so" tclsh8.6 tests/widebig.tcl
+      - name: The 2 GiB-ceiling test knows this Metakit has none
+        run: MKIT_MK4TCL="$RUNNER_TEMP/mk4wide/build/Mk4tclS.so" tclsh8.6 tests/bigfile.tcl
 
   # Reads (never writes) the mkstudio repository.  If that repository cannot be read by this workflow (it is
   # private: add a read-only token as the secret MKSTUDIO_READ_TOKEN) the steps are skipped and a visible
@@ -388,7 +423,7 @@ jobs:
       - name: Engine and Metakit-specific tests, REAL Metakit, both kits
         run: |
           for k in "$T86" "$T85"; do
-            for t in run real_metakit doc_examples injection nullforge review_regress decorrelate window_ext ivagg similar dupcols groupsets collate review2 insertrows aggfast tokenizer likepush attest; do echo "== $k / $t"; MKIT_MK4TCL=builtin "$k" tests/$t.tcl; done
+            for t in run real_metakit doc_examples injection nullforge review_regress decorrelate window_ext ivagg similar dupcols groupsets collate review2 insertrows aggfast tokenizer likepush attest widefile; do echo "== $k / $t"; MKIT_MK4TCL=builtin "$k" tests/$t.tcl; done
           done
       - name: Forcing a file to disk (FlushFileBuffers through PowerShell on Windows, sync on macOS)
         run: MKIT_MK4TCL=builtin "$T86" tests/syncdisk.tcl

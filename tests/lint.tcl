@@ -45,7 +45,7 @@ set boundaries [list \
     [list expr.tcl    {^\s*proc [^ \{]*\$}   4 "defstrict (names from this file) and the three cx::pN procs, verified by verify.tcl"] \
     [list db.tcl      {catch \{open }          1 "the lock file, created exclusively (O_EXCL) - the protocol of MK Studio's docs/CONCURRENCY.md"] \
     [list db.tcl      {(^|\[)open }            13 "the checksum file (write, the whole-file read for the crc), the lock file (create, bounded read), its takeover guard (O_EXCL), /proc/<pid>/stat and /proc/stat; the commit record (write, read, empty it) and the database file (rewritten header / cut back to undo an interrupted commit)"] \
-    [list dbcommon.tcl {(^|\[)open }           4 "reads the checksum file (a plain small file only), the 8-byte header and 16-byte footer of a database file and the commit record, to decide whether a repair of an interrupted commit is safe"] \
+    [list dbcommon.tcl {(^|\[)open }           8 "reads the checksum file (a plain small file only), the 8-byte header and the 16- or 24-byte footer of a database file and the commit record, to decide whether a repair of an interrupted commit is safe; and, in the wide-format probe, creates (exclusively, mode 0600) and reads two tiny files in the temporary folder"] \
     [list db.tcl      {\{exec }                2 "`sync` (coreutils) and, on Windows, PowerShell FlushFileBuffers force the database file and its commit record to disk around a commit; fixed commands, file names go in through the environment"] \
     [list db.tcl      {catch \{exec }          2 "the same two flush calls"] \
     [list db.tcl      {(^|\[)after }           1 "waits 40 ms for another process's takeover guard, as the lock protocol says (no event loop is entered)"] \

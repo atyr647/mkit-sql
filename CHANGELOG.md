@@ -10,6 +10,14 @@ All notable changes to mkit-sql. The versioning and compatibility rules are in
 * Verified at release: 138 local suites (both tclkits, both backends, memory-pressure configs, differential vs SQLite, 20M-row run on real Metakit) and all 8 CI jobs, including real Metakit on Windows and macOS and MK Studio's own interop checks.
 * What this release does not claim: a real power-cut test (commits are tested by killing the process and by simulated torn writes, not by cutting power), Windows multi-user stress testing, and anything beyond Metakit's own limits (2 GiB file, no persistent indexes) - see docs/SQL.md.
 
+### Ready for the 64-bit Metakit (files over 2 GiB)
+* **`::mkitsql::db::wideCapable`** finds out whether the loaded Mk4tcl reads files over 2 GiB by trying a tiny wide file it builds itself (a behaviour test, no version number); `MKIT_WIDE=0` forces "no". `fileLimit`, `fileHeadroom` and `nearLimit` follow it.
+* **A wide file under a Mk4tcl that cannot read it is refused** (`{MKIT WIDEFILE}`, both storage layers, every open mode): stock Metakit would show an empty database and a commit would hide the data.
+* **Wide-aware frame checks:** `headerInfo`, `footerOkAt` (24-byte footer), the open-time frame check, the commit-record repair and its safety check all understand the wide format.
+* **Column guard:** in the 64-bit Metakit one column is still limited to 2^31-1 bytes and Metakit ends the program when an edit grows past it; `INSERT` / `UPDATE` check first and fail with `{MKIT COLUMNFULL view column}` (costs nothing until the file nears 2 GiB).
+* The `-verify` helper process loads the same Mk4tcl as its caller (it used to need `package require Mk4tcl`, which a Mk4tcl loaded by path does not provide).
+* Tests: `tests/widefile.tcl` (any Mk4tcl, small files), `tests/widebig.tcl` (2.9 GB, commits across 2 GiB, a column refused at 2 GiB, six commits killed mid-write), `tests/build_mk4tcl_wide.sh`; CI job `metakit-wide`. `tests/bigfile.tcl` (the stock ceiling) skips itself on the 64-bit Metakit.
+
 ### Closing the known limits
 * **Metakit's 2 GiB file limit** (measured: a commit that would cross it fails and, if big, leaves a file that crashes Metakit on open):
   the commit is undone from its record, the handle reopened, and the error `{MKIT COMMITFAILED size}` names the limit. `tests/bigfile.tcl`.

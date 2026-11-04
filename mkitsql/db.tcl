@@ -224,6 +224,9 @@ proc ::mkitsql::db::openFile {path args} {
     set path [realPath $path]
     foreach t $tags { if {$file($t) eq $path} { error "File is already open as '$t': $path" } }
     if {!$create && ![::file exists $path]} { error "File not found: $path" }
+    # a file over 2 GiB (wide format) that this Mk4tcl cannot read would look EMPTY: refuse before anything touches it
+    set why [wideRefusal $path]
+    if {$why ne ""} { return -code error -errorcode [list MKIT WIDEFILE] $why }
     set mine "" ; set repairNote ""
     if {!$readonly} {
         set mine [takeLock $path]                       ;# before anything touches the file, so a refusal touches nothing
@@ -281,6 +284,7 @@ proc ::mkitsql::db::openFile {path args} {
     set integrity($tag) $verdict ; set level($tag) $vlevel
     if {$repairNote ne ""} { variable repaired ; set repaired($tag) $repairNote }
     set file($tag) $path ; set ro($tag) $readonly ; set dirty($tag) 0
+    wideCapable ; guardReset $tag 1                   ;# the library is probed here, never in the middle of a statement
     if {$readonly} {
         if {$holder ne ""} { set lockedBy($tag) $holder }
     } elseif {$mine ne ""} {
@@ -297,6 +301,7 @@ proc ::mkitsql::db::closeFile {tag} {
     if {$i >= 0} { set tags [lreplace $tags $i $i] }
     unset -nocomplain file($tag) ro($tag) dirty($tag) ::mkitsql::db::repaired($tag) ::mkitsql::db::integrity($tag) ::mkitsql::db::level($tag)
     ::mkitsql::typeForget $tag                       ;# what Metakit remembers about column types dies with the open file
+    guardForget $tag
 }
 proc ::mkitsql::db::commit {tag} {
     variable dirty ; variable file
@@ -308,6 +313,7 @@ proc ::mkitsql::db::commit {tag} {
         return -code error -errorcode $code $msg
     }
     set dirty($tag) 0
+    guardReset $tag
     if {$record} { endCommit $file($tag) ; catch {sumWrite $file($tag)} }
 }
 # Metakit stores a file's size in ONE 32-bit word and stops at 2 GiB: a commit that would cross it fails ("I/O error during
@@ -331,12 +337,13 @@ proc ::mkitsql::db::commitFailed {tag err} {
     }
     set dirty($tag) 0
     ::mkitsql::typeForget $tag
+    guardReset $tag 1
     set size [expr {[::file exists $path] ? [::file size $path] : 0}]
     set cause "a full disk or a write error"
-    if {$size > $maxFileBytes / 2} { set cause "the size limit of a Metakit file ($maxFileBytes bytes = 2 GiB; this file is $size bytes) or a full disk" }
+    if {![wideCapable] && $size > $maxFileBytes / 2} { set cause "the size limit of a Metakit file ($maxFileBytes bytes = 2 GiB; this file is $size bytes) or a full disk" }
     set msg "The commit failed ($err) - most likely $cause. "
     if {$reopened} {
-        append msg "The database file was put back to its last committed state and the changes made since then were discarded (as ROLLBACK does).\nNothing in the file is lost. To get past the size limit, split the data over several database files."
+        append msg "The database file was put back to its last committed state and the changes made since then were discarded (as ROLLBACK does).\nNothing in the file is lost.[expr {[wideCapable] ? {} : { To get past the size limit, split the data over several database files, or use a Mk4tcl built for big files (see docs/SQL.md).}}]"
     } else {
         append msg "The file could NOT be put back automatically ([expr {$repairFailed ? $note : $note}]). This handle is closed; do not commit again. Open the file again: a pending commit record is applied when it is opened for writing."
     }
@@ -505,7 +512,7 @@ proc ::mkitsql::db::repairFile {path} {
         if {$hex eq "empty" && $size == 0} {
             # the first commit of a new database was interrupted: it is a new, empty database again - unless the file already has a
             # complete frame (the commit finished and only its record was left behind): then it is a database, keep it
-            if {$info ne "" && [dict get $info size] == [dict get $info offset] && [footerOkAt $path [dict get $info size]]} {
+            if {$info ne "" && [dict get $info size] == [dict get $info offset] && [footerOkAt $path [dict get $info size] [dict get $info wide]]} {
                 ::file delete $rec
                 return ""
             }
@@ -523,7 +530,7 @@ proc ::mkitsql::db::repairFile {path} {
                 ::file delete $rec                                       ;# the commit never wrote anything
                 return ""
             }
-            if {[::file size $path] >= $size && ![footerOkAt $path $size]} {
+            if {[::file size $path] >= $size && ![footerOkAt $path $size [wideHex $hex]]} {
                 return "Warning: an interrupted commit was found, but the file does not end in a valid footer where it should; nothing was changed."
             }
             if {[::file size $path] >= $size} {
@@ -559,6 +566,7 @@ proc ::mkitsql::db::rollback {tag} {
         mk::file open $tag $file($tag) {*}$opts
     }
     set dirty($tag) 0
+    guardReset $tag 1
 }
 
 # Close and reopen the file (same tag, same lock): resets Metakit's memory of column types.  Only with nothing pending.
@@ -570,6 +578,7 @@ proc ::mkitsql::db::reopen {tag} {
     if {$ro($tag)} { lappend opts -readonly }
     mk::file open $tag $file($tag) {*}$opts
     ::mkitsql::typeForget $tag
+    guardReset $tag 1
 }
 # Before a view gets a layout: remember what it has now, and refuse (or reopen first) if the new layout would change the
 # type of a column that has already existed under that name (see dbcheck.tcl).
@@ -649,6 +658,8 @@ proc ::mkitsql::db::select {path conds} {
 }
 # ---- writing rows ---------------------------------------------------------------------------
 proc ::mkitsql::db::appendRow {path props values} {
+    variable wideCap
+    if {$wideCap eq "1"} { guardWrite $path $props $values }
     set args {}
     foreach p $props v $values { lappend args $p $v }
     set cur [mk::row append $path {*}$args]
@@ -656,6 +667,8 @@ proc ::mkitsql::db::appendRow {path props values} {
     return [lindex [split $cur !] end]
 }
 proc ::mkitsql::db::setCell {path idx prop value} {
+    variable wideCap
+    if {$wideCap eq "1"} { guardWrite $path [list $prop] [list $value] }
     mk::set $path!$idx $prop $value
     touchPath $path
 }
@@ -700,6 +713,6 @@ proc ::mkitsql::db::dropView {tag name} {
 proc ::mkitsql::db::restructure {path layout} {
     if {[string first ! $path] < 0} { lassign [split $path .] tag view ; typeGuard $tag $view $layout }
     mk::view layout $path [formatLayout $layout]
-    if {[string first ! $path] < 0} { ::mkitsql::typeRecord $tag $view $layout }
+    if {[string first ! $path] < 0} { ::mkitsql::typeRecord $tag $view $layout ; guardReset $tag 1 }
     touchPath $path
 }
