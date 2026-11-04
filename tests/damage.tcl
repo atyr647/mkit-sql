@@ -165,6 +165,29 @@ if {[file exists $exe] && [catch {slurp $exe} exeData] == 0 && [string range $ex
 check verify_good_file [mkitsql::verifyProblem $good] ""
 set tv [mkitsql::db::openFile $good -readonly -verify] ; mkitsql::db::closeFile $tv
 check open_verify_good_file 1 1
+# run damage_read_child.tcl on a file: {ok ""}, or {died|hung|failed <why>}; a child that has not answered in `limit` seconds is killed
+# (Metakit can loop for ever on damaged data as well as crash)
+proc readChild {f limit} {
+    global here
+    if {[catch {open [list | [info nameofexecutable] $here/damage_read_child.tcl $f 2>@1] r} ch]} { return [list failed "could not start the reader: $ch"] }
+    fconfigure $ch -blocking 0
+    set pid [pid $ch] ; set out "" ; set t0 [clock seconds]
+    while {1} {
+        append out [read $ch]
+        if {[eof $ch]} break
+        if {[clock seconds] - $t0 > $limit} {
+            if {$::tcl_platform(platform) eq "windows"} { catch {exec taskkill /F /PID $pid} } else { catch {exec kill -9 $pid} }
+            catch {close $ch}
+            return [list hung "the reader did not finish in $limit s"]
+        }
+        after 50
+    }
+    fconfigure $ch -blocking 1
+    set rc [catch {close $ch} err opts]
+    if {$rc && [lindex [dict get $opts -errorcode] 0] eq "CHILDKILLED"} { return [list died "the reader died ([lindex [dict get $opts -errorcode] 2])"] }
+    if {[string match "*OK" [string trim $out]]} { return [list ok ""] }
+    return [list failed [string range [string trim $out] 0 80]]
+}
 set firstRefused "" ; set survived 0 ; set refused 0 ; set readable 0 ; set unreadable 0
 expr {srand(20260101)}
 set ntrial [expr {$trials > 20 ? 20 : $trials}]
@@ -182,12 +205,15 @@ for {set k 0} {$k < $ntrial} {incr k} {
         if {$::tcl_platform(os) eq "Linux" || $verdict eq {MKIT DAMAGED}} { check "fuzzed file $k: refused by open -verify" $verdict {MKIT DAMAGED} } else { puts "NOTE: fuzzed file $k was refused by the first check and opened by the second (non-deterministic Metakit read on $::tcl_platform(os))" }
     } else {
         # the helper read everything without trouble: reading it here must be safe too
+        # ... in a child process: Metakit can crash whatever reads damaged data, and that must be the child, not this test (it used to be this
+        # process: one CI run in four died with a segmentation fault).  A child that dies is retried twice - the read is non-deterministic.
         incr survived
-        if {[catch {
-            set tg [mkitsql::db::openFile $f -readonly -verify]
-            foreach v [mkitsql::db::views $tg] { mkitsql::db::rows $tg.$v [lmap_ [lsearch -all -inline -not -index 1 -exact [mkitsql::db::layout $tg.$v] V] {c {lindex $c 0}}] 0 100000 }
-            mkitsql::db::closeFile $tg
-        } msg]} { incr unreadable ; puts "file $k verified OK but failed to read: [string range $msg 0 80]" } else { incr readable }
+        set msg "" ; set okRead 0
+        for {set attempt 1} {$attempt <= 3 && !$okRead} {incr attempt} {
+            lassign [readChild $f 90] how out
+            if {$how eq "ok"} { set okRead 1 } else { set msg $out }
+        }
+        if {$okRead} { incr readable } else { incr unreadable ; puts "file $k verified OK but failed to read: $msg" }
     }
     rmfile $f
 }

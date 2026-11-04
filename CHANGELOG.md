@@ -16,6 +16,13 @@ All notable changes to mkit-sql. The versioning and compatibility rules are in
 * **The Windows flush runs** when the host is a GUI program (a wish-based tclkit): PowerShell started straight from a program without a console does nothing at all
   (status 0, no output, no effect); it is now started through `cmd /c` with `-EncodedCommand`, which also carries accented file names intact. `tests/syncdisk.tcl` now requires that a script really wrote a file.
 * `integration/install-into-mkstudio.sh` says so and exits 0 when the MK Studio it is given already carries mkit-sql.
+* **The checksum file is flushed after it is rewritten** (`sumWrite`), as MK Studio's store does: with the commit record and the removal of the old sum at the start of a commit
+  (already done here) a power cut now leaves either this file's own checksum or none - found by MK Studio's block-level crash test, where an old checksum next to a newer good
+  file of the same size and modification second was called "damaged".
+* `tests/damage.tcl` reads a file the verifier passed **in a child process** (retried twice; killed after 90 s): Metakit can crash or loop on damaged data, and one CI run in four
+  used to lose the whole suite to a segmentation fault in the test process.
+* `ORDER BY ... LIMIT n` over hundreds of thousands of rows is measured, not guessed: 300,000 rows take 2.3 s here, and Metakit's own `mk::select -sort` takes 2.2 s for the same
+  rows (and its `-count` limits the selection *before* sorting, so it cannot give a top-N) - there is nothing cheaper to push down; docs/SQL.md has the numbers.
 * Added the `LICENSE` file (MIT); removed a stray empty file and a compiled Python cache that had been committed.
 * Tests: `tests/lock_takeover.tcl` (29: claimStale step by step, three starved-process scenarios, two reapers of one guard; `tests/lock_stall_child.tcl`),
   `tests/lock_crash.tcl` gained the kill after moving the lock aside. Verified with both tclkits, `kill -9` chaos (0 violations), and MK Studio's own lock tests in both directions.

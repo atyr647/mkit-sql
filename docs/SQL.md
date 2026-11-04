@@ -443,6 +443,11 @@ row-id list per indexed column, valid only while the main file's `<crc32> <size>
 otherwise - but it pays off only for read-mostly files above about a million rows, and every commit invalidates it. Build it when a real
 workload needs it; the checksum machinery it depends on is now in place.
 
+**`ORDER BY ... LIMIT` cannot be made much faster by Metakit either** (measured with real Metakit, 300,000 rows of four columns): `ORDER BY val DESC, id LIMIT 10` 2.3 s
+here, a text key 2.5 s; Metakit's own `mk::select <view> -rsort val -sort id` over the same rows takes 2.2 s, and `mk::select -count N` limits the rows *selected* before it
+sorts (it returns the first N rows of the table, sorted - not the top N), so there is no top-N to push down. What the 2.3 s is made of: reading the sort columns
+(1.3 s for one column) plus keeping the best 10. Only a persistent index (above) would change this.
+
 **There are no persistent secondary indexes** (`CREATE INDEX` is refused). Mk4tcl has no hash or ordered view
 that could serve as one, so an index would have to be an ordinary view that *every* program writing the file keeps in
 step, and MK Studio (and any other Metakit tool) edits tables directly. An index that goes stale is worse than a
