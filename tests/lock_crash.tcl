@@ -47,6 +47,7 @@ foreach {name step preseed expectFiles} {
     killed_after_creating_the_lock     created 0 {lock}
     killed_after_writing_the_lock      written 0 {lock}
     killed_holding_the_takeover_guard  mutex   1 {lock mutex}
+    killed_after_moving_the_lock_aside claimed 1 {mutex aside}
     killed_between_delete_and_create   deleted 1 {mutex}
     killed_after_a_normal_release      released 0 {}
 } {
@@ -55,6 +56,7 @@ foreach {name step preseed expectFiles} {
     set have {}
     if {[file exists $db.lock]} { lappend have lock }
     if {[file exists $db.lock.guard]} { lappend have mutex }
+    if {[llength [mkitsql::db::takeovers $db.lock]]} { lappend have aside }
     check "$name: what it left behind" $have $expectFiles
     lassign [acquireWithin 8] mine ms
     ok "$name: another process can still take the database (took $ms ms)" [expr {$mine ne "" && $ms < 6000}] "no lock within 8 s; files: [glob -nocomplain $db.*]"
@@ -62,8 +64,9 @@ foreach {name step preseed expectFiles} {
         ok "$name: the new owner is recorded" [string match "[pid] *" [rawread]]
         mkitsql::db::releaseLock $db $mine
         set left [lsort [glob -nocomplain $db.lock*]]
-        if {[llength $left] == 1 && [file tail [lindex $left 0]] eq "[file tail $db].lock.guard"} {       ;# (compare names: a TMPDIR with a trailing slash gives a different spelling)
-            after 3600                       ;# an abandoned guard is harmless: it ages out (the age is in whole seconds)
+        set litter 1 ; foreach f $left { if {[file tail $f] ne "[file tail $db].lock.guard" && [lsearch -exact [mkitsql::db::takeovers $db.lock] $f] < 0} { set litter 0 } }
+        if {[llength $left] && $litter} {       ;# (compare names: a TMPDIR with a trailing slash gives a different spelling)
+            after 3600                       ;# an abandoned guard (or a lock moved aside by a killed takeover) is harmless: it ages out (the age is in whole seconds)
             set m2 [lindex [acquireWithin 8] 0]
             ok "$name: a leftover guard does not block the next owner" [expr {$m2 ne ""}]
             if {$m2 ne ""} { mkitsql::db::releaseLock $db $m2 }

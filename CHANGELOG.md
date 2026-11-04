@@ -3,6 +3,23 @@
 All notable changes to mkit-sql. The versioning and compatibility rules are in
 [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md). Dates are omitted on purpose: the version is the identity.
 
+## 0.4.1 - lock takeover, unreadable locks, Windows flush
+
+* **The takeover of a stale lock no longer deletes it by name.** A killed process leaves the takeover guard behind; every waiter
+  deletes it once it is 10 s old, by name, and one of them can delete the *fresh* guard another has just made, so two processes were
+  inside the takeover together - and the second then destroyed the first one's brand-new lock (found by MK Studio's lock soak on a macOS runner, reproduced on
+  demand by `tests/lock_takeover.tcl`). The lock is now moved aside with one atomic rename and the file that was *moved* is judged; a live lock is put back with a hard link
+  and the process gives up. A wrongly removed guard can no longer hurt. Moved-aside files a killed process leaves are named `<file>.lock.take.<second>.<pid>.<n>` and tidied after 10 s.
+* **After writing its pid into a new lock a process checks the file under the name still holds it.** A process held up between creating the file and writing it
+  (taken for dead and overtaken) used to "acquire" while the other owned the database; it now notices and starts again.
+* **A lock file that exists but cannot be read counts as held** (it used to count as free: another user's lock under a strict umask was taken over).
+* **The Windows flush runs** when the host is a GUI program (a wish-based tclkit): PowerShell started straight from a program without a console does nothing at all
+  (status 0, no output, no effect); it is now started through `cmd /c` with `-EncodedCommand`, which also carries accented file names intact. `tests/syncdisk.tcl` now requires that a script really wrote a file.
+* `integration/install-into-mkstudio.sh` says so and exits 0 when the MK Studio it is given already carries mkit-sql.
+* Added the `LICENSE` file (MIT); removed a stray empty file and a compiled Python cache that had been committed.
+* Tests: `tests/lock_takeover.tcl` (29: claimStale step by step, three starved-process scenarios, two reapers of one guard; `tests/lock_stall_child.tcl`),
+  `tests/lock_crash.tcl` gained the kill after moving the lock aside. Verified with both tclkits, `kill -9` chaos (0 violations), and MK Studio's own lock tests in both directions.
+
 ## 0.4.0 - production-readiness pass
 
 * First-commit record (`empty 0`) and Windows flush follow MK Studio's newest `store.tcl`; `integration/mkstudio.patch` rebased onto its current HEAD (list-bug-safe row reads, footer guard in its `repairFile`).

@@ -1,6 +1,7 @@
 # Takes the write lock and is killed (SIGKILL) at one named step.   tclkit tests/lock_crash_child.tcl <db> <step> <done-file>
 # steps: created (lock file exists, still empty) | written (lock complete) | mutex (holds the takeover guard)
-#        | deleted (guard held, stale lock removed, new one not yet created) | released (after a normal close)
+#        | claimed (guard held, stale lock moved aside, not yet judged) | deleted (guard held, stale lock gone, new one not yet created)
+#        | released (after a normal close)
 set here [file dirname [file normalize [info script]]]
 set ::env(MKIT_BACKEND) standalone
 source $here/mk4load.tcl

@@ -122,6 +122,8 @@ jobs:
       - name: Lock under crashes - kill at every step, a deterministic vanished-lock race, 60 races for a stale lock, chaos (both kits)
         run: |
           for k in $T86 $T85; do LOCK_ROUNDS=60 MKIT_MK4TCL=builtin $k tests/lock_crash.tcl; done
+      - name: Lock takeover - the stale lock is moved aside and judged (not deleted by name); starved and wrongly judging processes; two reapers of one abandoned guard (both kits)
+        run: for k in $T86 $T85; do MKIT_MK4TCL=builtin $k tests/lock_takeover.tcl; done
       - name: Performance guard - a lost pushdown or an accidental quadratic step fails (generous ceilings), both kits
         run: for k in $T86 $T85; do PERF_SCALE=2 MKIT_MK4TCL=builtin $k tests/perf_guard.tcl; done
       - name: SQL added in 0.5 - correlated subqueries remembered per key, EXCLUDE / DISTINCT / IGNORE NULLS, interval aggregates, SIMILAR TO, duplicate column names, ROLLUP / CUBE / GROUPING SETS, COLLATE; both kits, tiny budget too
@@ -289,7 +291,7 @@ jobs:
         if: steps.ms.outcome == 'success'
         working-directory: mkstudio
         run: MKITSQL_DIR="$GITHUB_WORKSPACE" REAL_MK=1 MKS_RACE_ROUNDS=10 MKIT_MK4TCL=builtin "$GITHUB_WORKSPACE/tclkit/tclkit-8.6.3" tests/run.tcl tests/test_lock_protocol.tcl
-      - name: The installer and patch apply to a fresh mkstudio checkout
+      - name: The installer script is a no-op against a MK Studio that already carries mkit-sql (it says so and succeeds)
         if: steps.ms.outcome == 'success'
         run: |
           cp -r mkstudio mkstudio-fresh
@@ -439,6 +441,7 @@ jobs:
           MKIT_MK4TCL=builtin "$T86" tests/tempsec.tcl
           MKIT_MK4TCL=builtin "$T86" tests/locking.tcl
           LOCK_ROUNDS=20 MKIT_MK4TCL=builtin "$T86" tests/lock_crash.tcl
+          MKIT_MK4TCL=builtin "$T86" tests/lock_takeover.tcl
       - name: Soak - thousands of mixed statements in one process
         run: |
           MKIT_MK4TCL=builtin "$T86" tests/soak.tcl 20 1

@@ -86,7 +86,7 @@ engine contract and its 41 UI-logic checks all pass.
 ## Concurrency and temporary files
 
 * **Locking.** A file opened for writing gets `<file>.lock` with the protocol of MK Studio's `docs/CONCURRENCY.md`, so the two exclude each
-  other; stale locks (dead process, recycled pid) are taken over race-free under `<file>.lock.guard`, readers are never blocked but may see a
+  other; stale locks (dead process, recycled pid) are taken over race-free under `<file>.lock.guard` (moved aside and judged, never deleted by name), readers are never blocked but may see a
   half-written state while a writer commits (a Metakit limitation, documented), statements cannot nest, and a server can
   set `::mkitsql::session` so that one client's open transaction is not silently joined by another. Standalone mkit-sql
   does **not** inherit any locking from MK Studio: it has its own, compatible one. Details and limits in
@@ -190,6 +190,7 @@ against **both storage layers**, and also on a Mk4tcl built from source and on t
 | A Metakit file we did not create (`tests/realworld.tcl`) | a tclkit's own boot database: nested tables, binary columns, joins, windows, subqueries |
 | MK Studio's engine contract (38) and UI tests (16 + 41) | pass on both kits, real Metakit, on a freshly patched checkout |
 | Lock under crashes (`tests/lock_crash.tcl`, 34) | killed at every step of acquiring / taking over / releasing, a deterministic regression for the vanished-lock race, 60 six-process races for a stale lock (exactly one winner every time), chaos with random kills (no two inside at once); plus MK Studio's own `test_lock_protocol.tcl` (mixed races between the two implementations, 302 checks) |
+| Lock takeover (`tests/lock_takeover.tcl`, 29) | the stale lock is moved aside and the moved file judged (a live lock is put back unchanged); a process starved between creating the lock and writing it, one starved inside the takeover past a shortened guard limit, one starved right after moving the lock aside, and two processes reaping one abandoned guard: never two owners |
 | Locking (`tests/locking.tcl`, 69; 75 with MK Studio) | the lock protocol of MK Studio's `docs/CONCURRENCY.md` checked the way another implementation would write it (role/endpoint, stale, empty, abandoned guard, foreign locks left alone), real processes race for one file (12 rounds x 6 processes, exactly one winner each time), die with `kill -9`, recycled pids, planted links/fifos/huge lock files, and MK Studio's own current `store.tcl` in both directions; sessions and transaction ownership |
 | Temporary files (`tests/tempsec.tcl`, 43) | private folder, 0700 / 0600, random names, planted symbolic links and files refused, safe sweep of abandoned folders (never links, never other files) |
 | Pushdown (`tests/pushdown.tcl`, ~1,500 per run) | ~1,000 random predicates over every column type with edge values (int32/int64 limits, doubles, text), with and without Metakit-side narrowing: identical results; found a real bug (`IN` lists compared whole numbers as doubles) |
@@ -282,3 +283,7 @@ docs/SQL.md               the SQL reference
 ```
 
 Only `db.tcl` and `db_studio.tcl` talk to Mk4tcl / `::store`.
+
+## License
+
+MIT - see [LICENSE](LICENSE). Copyright (c) 2026 Adam Tyrone.

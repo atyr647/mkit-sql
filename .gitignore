@@ -1,3 +1,5 @@
 *.mk
 *.tmp
 tclkit/
+__pycache__/
+*.pyc

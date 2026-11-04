@@ -96,14 +96,19 @@ proc ::mkitsql::db::procStartTime {pid} {
     return [expr {$btime + $ticks / 100}]
 }
 # The lock file as a dict: state free|ours|stale|held, and pid host role endpoint when there is one.
-proc ::mkitsql::db::lockInfo {path} {
-    set lf [lockPath $path]
+proc ::mkitsql::db::lockInfo {path} { return [lockInfoFile [lockPath $path]] }
+# (the same for any file that is, or was, a lock file: a takeover judges the file it has moved aside, not only the one in place)
+proc ::mkitsql::db::lockInfoFile {lf} {
     if {[catch {::file lstat $lf st}]} { return [dict create state free] }
     if {$st(type) ne "file"} {
         return -code error -errorcode [list MKIT BADLOCK $lf] "The lock path is not a regular file ($st(type)); refusing to use it:\n$lf"
     }
     # a bounded read of a regular file: a hostile or damaged lock file cannot make us read for ever
-    if {[catch {set h [open $lf r] ; set d [string trim [read $h 512]] ; close $h}]} { return [dict create state free] }   ;# vanished meanwhile
+    if {[catch {set h [open $lf r] ; set d [string trim [read $h 512]] ; close $h}]} {
+        # vanished meanwhile = free; still there but unreadable (another user's file under a strict umask) = held by an owner we cannot name
+        if {[catch {::file lstat $lf st2}]} { return [dict create state free] }
+        return [dict create state held pid 0 host unknown role "" endpoint ""]
+    }
     lassign [split $d " "] pid host role endpoint
     set info [dict create pid $pid host $host role [expr {$role eq "-" ? "" : $role}] endpoint $endpoint]
     set state held
@@ -157,10 +162,56 @@ proc ::mkitsql::db::createLock {lf mine} {
         return [list blocked]
     }
     lockStep written
+    # A process held up between creating the lock file and writing it (starved, suspended) can have been taken for dead and
+    # overtaken meanwhile: what it wrote went into a file that is no longer under the name.  It must notice, not carry on.
+    if {![stillMine $lf $mine]} { lockStep overtaken ; return [list exists] }
     # tidy up a takeover guard abandoned by a crashed process (it is harmless but would otherwise stay for ever)
     variable mutexStale
-    if {![catch {::file mtime $lf.guard} mt] && [clock seconds] - $mt > $mutexStale} { catch {::file delete $lf.guard} }
+    if {![catch {::file mtime $lf.guard} mt] && [clock seconds] - $mt > $mutexStale} { lockStep guard-aged ; catch {::file delete $lf.guard} }
+    tidyTakeovers $lf
     return [list created $mine]
+}
+# Is the file under the lock's name the one just written (its text is ours)?  A file that exists but cannot be read at this moment
+# (a virus scanner has it) proves nothing against us; a file that is gone, or holds somebody else's text, is not ours any more.
+proc ::mkitsql::db::stillMine {lf mine} {
+    if {[catch {set h [open $lf r] ; set d [read $h 512] ; close $h}]} { return [::file exists $lf] }
+    return [expr {$d eq $mine}]
+}
+# Take a lock file that was judged stale out of the way.  Returns
+#   claimed   it was moved aside, judged again - still stale (or ours, or empty and old) - and deleted: the name is free
+#   gone      there was nothing under the name any more: the name is free
+#   alive     what was moved turned out to be a live owner's lock (somebody got in under a guard that was wrongly removed): it has
+#             been put back, and is not ours to take
+#   busy      the file could not be moved now (Windows: another program has it open): nothing was changed
+# The rename is the one atomic step: whatever file is under the name at that instant is the file that is moved, and it is judged
+# AFTER it has been moved, so a lock that was replaced between the verdict and the move is recognised instead of destroyed.
+# (A delete by name cannot tell the stale lock it judged from a fresh one made under the same name since.)
+namespace eval ::mkitsql::db { variable claimSeq 0 }
+proc ::mkitsql::db::claimStale {lf} {
+    variable claimSeq
+    set aside $lf.take.[clock seconds].[pid].[incr claimSeq]
+    if {[catch {::file rename $lf $aside}]} { return [expr {[::file exists $lf] ? "busy" : "gone"}] }
+    lockStep claimed                                             ;# (test hook: the lock is out of the way, not yet judged)
+    if {[catch {lockInfoFile $aside} info]} { set state held } else { set state [dict get $info state] }   ;# (not a plain file: never ignored)
+    if {$state ne "held"} { catch {::file delete $aside} ; return claimed }
+    # Put it back - with a hard link, which fails instead of replacing when the name is taken again meanwhile (a rename would
+    # replace it, on Unix).  Where hard links do not exist (FAT, some network shares) the name is checked and the file renamed back.
+    if {[catch {::file link -hard $lf $aside}] && ![::file exists $lf]} { catch {::file rename $aside $lf} }
+    catch {::file delete $aside}
+    return alive
+}
+# Files a takeover moved aside and a killed process never deleted.  The name carries the second it was moved; a live takeover
+# deletes its own within moments, so anything older than the guard limit is litter.
+proc ::mkitsql::db::takeovers {lf} {
+    # (a file name may contain glob characters: they are matched literally)
+    set tail [string map [list \\ \\\\ * \\* ? \\? \[ \\\[ \] \\\] \{ \\\{ \} \\\}] [::file tail $lf]]
+    return [glob -nocomplain -directory [::file dirname $lf] -- $tail.take.*]
+}
+proc ::mkitsql::db::tidyTakeovers {lf} {
+    variable mutexStale
+    foreach f [takeovers $lf] {
+        if {[regexp {\.take\.(\d+)\.\d+\.\d+$} $f -> at] && [clock seconds] - $at > $mutexStale} { catch {::file delete $f} }
+    }
 }
 # test hook: a script prefix called with the name of each step of taking a lock (tests kill the process or race it there)
 namespace eval ::mkitsql::db { variable lockHook "" ; variable emptyStale 5 ; variable mutexStale 10 }
@@ -183,7 +234,10 @@ proc ::mkitsql::db::takeLock {path} {
         if {[catch {set gh [open $guard {WRONLY CREAT EXCL} 420] ; close $gh}]} {
             # somebody else is replacing the lock: a guard older than mutexStale was abandoned by a crash, otherwise give them a
             # moment (about 2.4 s over all attempts, as the protocol says) and look again
-            if {![catch {::file mtime $guard} mt] && [clock seconds] - $mt > $mutexStale} { catch {::file delete $guard} ; continue }
+            if {![catch {::file mtime $guard} mt] && [clock seconds] - $mt > $mutexStale} {
+                lockStep guard-aged                                          ;# (test hook: the guard has been judged abandoned, nothing is deleted yet)
+                catch {::file delete $guard} ; continue
+            }
             after 40
             continue
         }
@@ -191,9 +245,12 @@ proc ::mkitsql::db::takeLock {path} {
         set again [lockHolder $path]                                           ;# look again now that nobody else is replacing it
         set undeletable 0
         if {$again eq "" && [dict get [lockInfo $path] state] in {stale ours}} {
-            catch {::file delete $lf} ; lockStep deleted
-            # a stale lock that cannot be removed (another user's file in a sticky folder, a read-only folder) will never go away by retrying
-            if {![catch {::file lstat $lf st}]} { set undeletable 1 }
+            lockStep checked                                                   ;# (test hook: the stale verdict is in, nothing is changed yet)
+            # Move the lock aside and judge the file that was moved, instead of deleting by name: the guard can be removed wrongly
+            # (docs/CONCURRENCY.md), and a delete by name would then destroy another process's brand-new lock.
+            set claim [claimStale $lf] ; lockStep deleted
+            # a stale lock that cannot be moved (another user's file in a sticky folder, a read-only folder) will never go away by retrying
+            if {$claim eq "busy"} { set undeletable 1 }
         }
         catch {::file delete $guard}
         if {$again ne ""} { return [lockedError $again $path] }
@@ -383,27 +440,50 @@ proc ::mkitsql::db::syncDisk {args} {
     return 1
 }
 namespace eval ::mkitsql::db { variable psOk -1 }
+# A Windows program by its full path in the system folder (a bare name is searched for in the program's folder and the current
+# folder first: a planted powershell.exe there would run).
+proc ::mkitsql::db::winTool {name} {
+    set root [expr {[info exists ::env(SystemRoot)] ? $::env(SystemRoot) : {C:/Windows}}]
+    foreach f [list $root/System32/$name.exe $root/System32/WindowsPowerShell/v1.0/$name.exe $root/Sysnative/$name.exe] {
+        if {[::file isfile $f]} { return $f }
+    }
+    return ""
+}
+proc ::mkitsql::db::base64 {bytes} {
+    set tbl ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/
+    set out "" ; set n [string length $bytes]
+    for {set i 0} {$i < $n} {incr i 3} {
+        binary scan [string range $bytes $i [expr {$i + 2}]] c* v
+        set a [expr {[lindex $v 0] & 255}] ; set b [expr {[llength $v] > 1 ? [lindex $v 1] & 255 : 0}] ; set c [expr {[llength $v] > 2 ? [lindex $v 2] & 255 : 0}]
+        set x [expr {($a << 16) | ($b << 8) | $c}]
+        append out [string index $tbl [expr {($x >> 18) & 63}]] [string index $tbl [expr {($x >> 12) & 63}]]
+        append out [expr {[llength $v] > 1 ? [string index $tbl [expr {($x >> 6) & 63}]] : "="}] [expr {[llength $v] > 2 ? [string index $tbl [expr {$x & 63}]] : "="}]
+    }
+    return $out
+}
+# PowerShell started straight from a Windows GUI program (a wish-based tclkit) does NOTHING: exit status 0, no output, no effect
+# (measured on real runners) - Tcl starts console programs without a console for a program that has none.  cmd.exe makes itself
+# one and the PowerShell it starts runs.  The script goes as -EncodedCommand (UTF-16 in base64): no quoting, any file name intact.
+# {ran ok output}: ran 0 = PowerShell could not be started at all; ok 1 = the script finished without error.
+proc ::mkitsql::db::psRun {script} {
+    set ps [winTool powershell] ; set cmd [winTool cmd]
+    if {$ps eq "" || $cmd eq ""} { return [list 0 0 "PowerShell was not found"] }
+    set argv [list $cmd /c [::file nativename $ps] -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -EncodedCommand [base64 [encoding convertto unicode $script]]]
+    set rc [catch {exec {*}$argv 2>@1} out opts]
+    if {$rc && [lindex [dict get $opts -errorcode] 0] ne "CHILDSTATUS"} { return [list 0 0 $out] }
+    return [list 1 [expr {!$rc}] $out]
+}
 proc ::mkitsql::db::syncWindows {args} {
     variable psOk
     if {$psOk == 0} { return 0 }
     set files {}
     foreach p $args { if {[::file isfile $p]} { lappend files [::file nativename $p] } }
     if {![llength $files]} { return 1 }
-    # file names go in through the environment, not the command line: no quoting problems
-    set ::env(MKS_FLUSH) [join $files "|"]
-    set script {foreach($f in $env:MKS_FLUSH.Split('|')){ $s=[IO.File]::Open($f,'Open','ReadWrite','ReadWrite'); try{ $s.Flush($true) } finally{ $s.Dispose() } }}
-    set ok 0 ; set started 0
-    foreach exe {powershell pwsh} {
-        if {[catch {exec $exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command $script 2>@1} out opts]} {
-            # "couldn't execute": no such program (try the next, and remember if neither exists); a program that ran and
-            # failed (a file another program keeps locked) only fails THIS flush
-            if {[lindex [dict get $opts -errorcode] 0] eq "CHILDSTATUS"} { set started 1 }
-            continue
-        }
-        set ok 1 ; set started 1 ; break
-    }
-    unset -nocomplain ::env(MKS_FLUSH)
-    if {!$started} { set psOk 0 } else { set psOk 1 }
+    set quoted {}
+    foreach f $files { lappend quoted '[string map {' ''} $f]' }
+    set script "foreach(\$f in @([join $quoted ,])){ \$s=\[IO.File\]::Open(\$f,'Open','ReadWrite','ReadWrite'); try{ \$s.Flush(\$true) } finally{ \$s.Dispose() } }"
+    lassign [psRun $script] ran ok out
+    set psOk $ran
     return $ok
 }
 # Called before mk::file commit: remember the state we can fall back to.

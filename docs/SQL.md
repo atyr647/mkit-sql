@@ -461,7 +461,8 @@ Metakit has no locking of its own. What mkit-sql guarantees, and what it does no
   is alive on this host or it names another host (a network share: always respected), *stale* when the process is gone
   or the file is empty/garbled and older than 5 seconds, and *ours* when it names this process; stale and ours are
   taken over under `<file>.lock.guard` (created exclusively, abandoned after 10 seconds, the lock classified again with
-  the guard held), so two processes finding the same stale lock cannot both win, and closing never removes a lock that
+  the guard held, then moved aside by one atomic rename and the *moved* file judged - a live lock is put back - never deleted by name),
+  so two processes finding the same stale lock cannot both win even when the guard is wrongly removed, and closing never removes a lock that
   is no longer ours; a lock file that vanishes between our failed create and our look at it (a competitor released or replaced it) means *try again*, and only a folder that refuses to hold a file means "run unlocked" (this race let two processes both own the database in both implementations until it was found by MK Studio's tests). Beyond the letter of the protocol, and only ever stricter: a lock path that is not a regular file
   (a link, a folder, a fifo) is refused and never followed or read, a lock file is read with a bound, a recycled pid
   counts as dead when that process is younger than the lock file (Linux), and the database path is resolved through
