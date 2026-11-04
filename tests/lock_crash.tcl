@@ -18,7 +18,7 @@ set kit [info nameofexecutable] ; set host [info hostname]
 set area [expr {[info exists ::env(TMPDIR)] ? $::env(TMPDIR) : "/tmp"}]/mkitsql_lockcrash_[pid]
 file delete -force $area ; file mkdir $area
 set db $area/lc.mk
-set ::mkitsql::db::emptyStale 1 ; set ::mkitsql::db::mutexStale 1          ;# abandonment timers shortened, here and in every child
+set ::mkitsql::db::emptyStale 1 ; set ::mkitsql::db::mutexStale 1 ; set ::mkitsql::db::takeStale 1          ;# abandonment timers shortened, here and in every child (takeStale: this process only)
 proc fresh {} { global db ; foreach f [glob -nocomplain $db*] { file delete $f } ; set h [open $db w] ; close $h }
 proc rawlock {text} { global db ; set h [open $db.lock w] ; puts -nonewline $h $text ; close $h }
 proc rawread {} { global db ; set h [open $db.lock r] ; set d [read $h] ; close $h ; return $d }
@@ -47,6 +47,7 @@ foreach {name step preseed expectFiles} {
     killed_after_creating_the_lock     created 0 {lock}
     killed_after_writing_the_lock      written 0 {lock}
     killed_holding_the_takeover_guard  mutex   1 {lock mutex}
+    killed_after_looking_at_the_lock   looked  1 {lock mutex aside}
     killed_after_moving_the_lock_aside claimed 1 {mutex aside}
     killed_between_delete_and_create   deleted 1 {mutex}
     killed_after_a_normal_release      released 0 {}

@@ -19,7 +19,7 @@ set kit [info nameofexecutable] ; set host [info hostname]
 set area [expr {[info exists ::env(TMPDIR)] ? $::env(TMPDIR) : "/tmp"}]/mkitsql_takeover_[pid]
 file delete -force $area ; file mkdir $area
 set db $area/to.mk
-set ::mkitsql::db::emptyStale 1 ; set ::mkitsql::db::mutexStale 1
+set ::mkitsql::db::emptyStale 1 ; set ::mkitsql::db::mutexStale 1 ; set ::mkitsql::db::takeStale 1     ;# (this process only: the children keep the real minute)
 proc fresh {} { global db ; foreach f [glob -nocomplain $db*] { file delete $f } ; set h [open $db w] ; close $h }
 proc rawlock {text} { global db ; set h [open $db.lock w] ; puts -nonewline $h $text ; close $h }
 proc rawread {f} { set h [open $f r] ; set d [read $h] ; close $h ; return $d }
@@ -29,22 +29,34 @@ proc seenIn {log pat} { set s "" ; catch {set h [open $log r] ; set s [read $h] 
 fresh
 set lf [mkitsql::db::lockPath $db]
 rawlock "999999 $host"
-check "a dead owner's lock is moved aside, judged stale and deleted" [mkitsql::db::claimStale $lf] claimed
+check "a dead owner's lock is looked at, judged stale, moved aside and deleted" [mkitsql::db::claimStale $lf] claimed
 ok "... and the name is free, nothing left" [expr {![file exists $lf] && ![llength [mkitsql::db::takeovers $lf]]}]
 check "nothing under the name" [mkitsql::db::claimStale $lf] gone
 rawlock "4242 some-other-machine"                                ;# another host: always held - what a wrongly judged takeover would find
-set before [list [file mtime $lf] [file size $lf]]
-check "a live (foreign) lock found under the name is put back" [mkitsql::db::claimStale $lf] alive
+set before [list [file mtime $lf] [file size $lf]] ; file stat $lf st0
+check "a live (foreign) lock found under the name is left alone" [mkitsql::db::claimStale $lf] alive
 check "... with its text" [rawread $lf] "4242 some-other-machine"
 check "... and its time and size" [list [file mtime $lf] [file size $lf]] $before
+file stat $lf st1
+ok "... and it is the very same file (it was never moved)" [expr {$st1(ino) == $st0(ino) && $st1(dev) == $st0(dev)}]
 ok "... and no copy left" [expr {![llength [mkitsql::db::takeovers $lf]]}]
 file delete $lf
 set h [open $lf w] ; close $h                                    ;# an EMPTY lock that is brand new is not stale: the creator may be about to write
-check "a brand-new empty lock is put back" [mkitsql::db::claimStale $lf] alive
+check "a brand-new empty lock is left alone" [mkitsql::db::claimStale $lf] alive
 file delete $lf
-file mkdir $lf                                                   ;# not a plain file: never taken, never ignored
+file mkdir $lf                                                   ;# not a plain file: never taken, never ignored (no hard link of a folder: the move-first path)
 check "a folder under the name is put back" [mkitsql::db::claimStale $lf] alive
 ok "... still a folder" [file isdirectory $lf]
+file delete $lf
+# the lock is REPLACED while it is being judged: judged stale, then a live one under the name - it must not be taken
+rawlock "999999 $host"
+set ::replaced 0 ; set ::replLf $lf
+set ::mkitsql::db::lockHook [list apply {{name} { if {$name eq "looked" && !$::replaced} { incr ::replaced ; file delete $::replLf ; set h [open $::replLf w] ; puts -nonewline $h "4242 some-other-machine" ; close $h } }}]
+set r [mkitsql::db::claimStale $lf]
+set ::mkitsql::db::lockHook ""
+check "a lock replaced while it was judged is not taken" $r busy
+check "... the live lock is still there" [rawread $lf] "4242 some-other-machine"
+ok "... and no copy left" [expr {![llength [mkitsql::db::takeovers $lf]]}]
 file delete $lf
 set odd [file join $area "lock \[abc\] *?x.mk"]
 set olf [mkitsql::db::lockPath $odd]
@@ -52,10 +64,10 @@ set h [open $olf w] ; puts -nonewline $h "4242 some-other-machine" ; close $h
 check "odd file name: a live lock is put back" [mkitsql::db::claimStale $olf] alive
 ok "... and the file is there" [file exists $olf]
 set old [expr {[clock seconds] - 100}] ; set new [clock seconds]
-foreach n [list $olf.take.$old.1.1 $olf.take.$new.1.2] { set h [open $n w] ; close $h }
+foreach n [list $olf.take.$old.999999.1 $olf.take.$old.1.2 $olf.take.$new.999999.3] { set h [open $n w] ; close $h }
 mkitsql::db::tidyTakeovers $olf
 set rest {} ; foreach f [mkitsql::db::takeovers $olf] { lappend rest [file tail $f] }
-check "tidy: the old copy goes, the recent one stays" [lsort $rest] [list [file tail $olf].take.$new.1.2]
+check "tidy: only a file that is old AND whose process is gone goes (not an old one of a live process, not a recent one)" [lsort $rest] [lsort [list [file tail $olf].take.$old.1.2 [file tail $olf].take.$new.999999.3]]
 foreach f [glob -nocomplain $area/*] { file delete -force $f }
 file mkdir $area ; set h [open $db w] ; close $h
 ok "stillMine: ours" [expr {[rawlock "1 a"] eq "" && [mkitsql::db::stillMine $lf "1 a"]}]
@@ -82,7 +94,7 @@ proc parse {log} {
 proc stallRun {emptyStale step mutexStale} {
     global db kit here host area
     fresh
-    if {$step in {checked claimed}} { rawlock "999999 $host" }
+    if {$step in {checked looked claimed}} { rawlock "999999 $host" }
     set log $area/stall.log ; file delete $log $log.release
     setLimits $emptyStale $mutexStale
     set a [exec $kit $here/lock_stall_child.tcl $db 20000 800 $log $step 0 &]
@@ -111,6 +123,12 @@ puts "  stall after moving the lock aside: [join $lines {; }]"
 ok "aside-stall: nobody held the lock at the same time as somebody else" [expr {![overlapped $ev]}] $lines
 ok "aside-stall: the newcomer got the lock, the woken process was refused" [expr {[dict exists $ev $b ACQUIRED] && [dict exists $ev $a REFUSED]}] $lines
 check "aside-stall: no litter" [lsort [glob -nocomplain $db.lock.take.*]] {}
+# 4b. held up while looking at the stale lock (it has not been moved)
+lassign [stallRun 60 looked 60] a b ev lines
+puts "  stall while looking at the lock: [join $lines {; }]"
+ok "look-stall: nobody held the lock at the same time as somebody else" [expr {![overlapped $ev]}] $lines
+ok "look-stall: the woken process took the lock (nothing had changed)" [dict exists $ev $a ACQUIRED] $lines
+check "look-stall: no litter" [lsort [glob -nocomplain $db.lock.take.*]] {}
 # 5. two processes reap the same abandoned guard
 proc reaperRace {} {
     global db kit here host area

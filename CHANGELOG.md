@@ -8,8 +8,10 @@ All notable changes to mkit-sql. The versioning and compatibility rules are in
 * **The takeover of a stale lock no longer deletes it by name.** A killed process leaves the takeover guard behind; every waiter
   deletes it once it is 10 s old, by name, and one of them can delete the *fresh* guard another has just made, so two processes were
   inside the takeover together - and the second then destroyed the first one's brand-new lock (found by MK Studio's lock soak on a macOS runner, reproduced on
-  demand by `tests/lock_takeover.tcl`). The lock is now moved aside with one atomic rename and the file that was *moved* is judged; a live lock is put back with a hard link
-  and the process gives up. A wrongly removed guard can no longer hurt. Moved-aside files a killed process leaves are named `<file>.lock.take.<second>.<pid>.<n>` and tidied after 10 s.
+  demand by `tests/lock_takeover.tcl`). The lock is now *looked at without moving it* (a hard link gives the file under the name a second name; the slow judgement - is its process
+  alive? how old? - happens while the lock keeps its place, and a live lock is simply left alone); only a stale one is moved, by one atomic rename, after checking that the name still
+  names the file that was judged and checking again what was moved (a lock replaced in the last instant is put back). A wrongly removed guard can no longer hurt. Files a killed process
+  leaves are named `<file>.lock.take.<second>.<pid>.<n>` and tidied once older than a minute and their process is gone.
 * **After writing its pid into a new lock a process checks the file under the name still holds it.** A process held up between creating the file and writing it
   (taken for dead and overtaken) used to "acquire" while the other owned the database; it now notices and starts again.
 * **A lock file that exists but cannot be read counts as held** (it used to count as free: another user's lock under a strict umask was taken over).
