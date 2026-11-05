@@ -131,13 +131,55 @@ ok "the message names the column" [string match "*Column s*" $m] $m
 set rc [catch {mkitsql::db::setCell $db.t 0 s [string repeat y 999]} m2 opts2]
 ok "setCell checked" [expr {$rc && [lrange [dict get $opts2 -errorcode] 0 1] eq {MKIT COLUMNFULL}}] $m2
 ok "other columns are unaffected" [expr {![catch {mkitsql::db::setCell $db.t 0 b small}]}]
-# the count survives a commit and is dropped with a rollback
+# the count survives a commit (the small values that were committed are in the column, so at most a row or two more fit) and is dropped with a rollback
 mkitsql::db::commit $db
-ok "still refused after a commit" [catch {mkitsql::db::appendRow $db.t {k s} [list 99 $blob]}]
+set more 0 ; set cc ""
+for {set i 0} {$i < 5} {incr i} { if {[catch {mkitsql::db::appendRow $db.t {k s} [list 99 $blob]} m5 o5]} { set cc [dict get $o5 -errorcode] ; break } ; incr more }
+ok "still refused after a commit (after $more more rows)" [expr {[lrange $cc 0 1] eq {MKIT COLUMNFULL} && $more <= 2}] "$cc / $more"
 mkitsql::db::rollback $db
 mkitsql::db::closeFile $db
 set ::mkitsql::db::maxColumnBytes 2147483647 ; set ::mkitsql::db::guardSlack 4194304
 set ::mkitsql::db::wideCap $cap
+
+# ---- the error the fork gives for a column past its limit (its "size errors", 2e2e482): turned into a COLUMNFULL refusal, and the storage can only be
+# ---- rolled back.  A stand-in for mk::row / mk::set that fails the way Mk4tcl does, so this runs with any Mk4tcl (tests/widebig.tcl gets the real error).
+# (the error code starts with MKIT in the standalone layer and with STORE in the studio layer, which writes through MK Studio's store)
+if {$::mkitsql::backend eq "studio" && [info commands ::store::sizeFault] eq ""} {
+    puts "  (this store.tcl does not turn Metakit's size error into a refusal: that part is skipped; MKIT_STORE=<MK Studio's current store.tcl> runs it)"
+} else {
+set sizeMsg "a column would grow to 2147483700 bytes, more than the limit of 2147483647 bytes for a column: nothing can be committed until mk::file rollback has discarded the changes made since the last commit"
+set g2 $dir/fault.mk
+set db [mkitsql::db::openFile $g2 -create]
+mkitsql::db::createView $db t {{k I {}} {s S {}}}
+mkitsql::db::appendRow $db.t {k s} {1 one}
+mkitsql::db::commit $db
+set before [slurp $g2]
+mkitsql::db::appendRow $db.t {k s} {2 two}                ;# a pending change made before the refused one
+foreach {what call} [list appendRow [list mkitsql::db::appendRow $db.t {k s} {3 three}] setCell [list mkitsql::db::setCell $db.t 0 s x]] {
+    if {$what eq "appendRow"} { rename ::mk::row ::mk::row_real ; proc ::mk::row args "error {$sizeMsg}" } else { rename ::mk::set ::mk::set_real ; proc ::mk::set args "error {$sizeMsg}" }
+    set rc [catch $call m opts]
+    if {$what eq "appendRow"} { rename ::mk::row {} ; rename ::mk::row_real ::mk::row } else { rename ::mk::set {} ; rename ::mk::set_real ::mk::set }
+    ok "$what: the size error is a COLUMNFULL error" [expr {$rc && [lindex [dict get $opts -errorcode] 1] eq "COLUMNFULL"}] "$rc [dict get $opts -errorcode] $m"
+    ok "$what: the message does not talk of Mk4tcl commands" [expr {![string match "*mk::file*" $m]}] $m
+    set rc [catch {mkitsql::db::commit $db} m2 opts2]
+    ok "$what: a commit is refused at once (TAINTED)" [expr {$rc && [lindex [dict get $opts2 -errorcode] 1] eq "TAINTED"}] "$rc [dict get $opts2 -errorcode] $m2"
+    ok "$what: ... without touching the file or writing a commit record" [expr {[slurp $g2] eq $before && ![file exists $g2.commit]}]
+}
+mkitsql::db::rollback $db
+rename ::mk::set ::mk::set_real ; proc ::mk::set args {error "some other failure"}
+set rc [catch {mkitsql::db::setCell $db.t 0 s x} m opts]
+rename ::mk::set {} ; rename ::mk::set_real ::mk::set
+ok "another error is passed on as it is" [expr {$rc && $m eq "some other failure" && [dict get $opts -errorcode] eq "NONE"}] "$m / [dict get $opts -errorcode]"
+mkitsql::db::appendRow $db.t {k s} {2 two}
+ok "...and does not stop a commit" [expr {![catch {mkitsql::db::commit $db} m]}] $m
+rename ::mk::row ::mk::row_real ; proc ::mk::row args "error {$sizeMsg}"
+catch {mkitsql::db::appendRow $db.t {k s} {9 nine}}
+rename ::mk::row {} ; rename ::mk::row_real ::mk::row
+ok "tainted again" [catch {mkitsql::db::commit $db}]
+mkitsql::db::rollback $db
+ok "after a rollback the file saves again, with exactly the rows that were committed" [expr {![catch {mkitsql::db::appendRow $db.t {k s} {3 three}} m] && ![catch {mkitsql::db::commit $db} m2] && [mkitsql::db::size $db.t] == 3}] "$m $m2 [mkitsql::db::size $db.t]"
+mkitsql::db::closeFile $db
+}
 
 file delete -force $dir
 puts "widefile: $pass passed, $fail failed"

@@ -1,8 +1,8 @@
-# A database file past 2 GiB, on the Metakit with 64-bit file positions (https://github.com/atyr647/metakit).  Needs about 4.5 GB of free
-# disk and a few minutes; skipped (exit 0) with a Mk4tcl that cannot hold such a file.
+# A database file past 2 GiB, on the Metakit with 64-bit file positions (https://github.com/atyr647/metakit).  Needs about 5 GB of free
+# disk, 2 GB of memory and a few minutes; skipped (exit 0) with a Mk4tcl that cannot hold such a file.
 #   MKIT_MK4TCL=/path/Mk4tcl.so tclsh tests/widebig.tcl
 # What it shows: commits cross 2 GiB, the file stays readable and writable, every value is still the one written, the engine says the
-# headroom is huge, one COLUMN still cannot pass 2 GiB and is refused cleanly (Metakit would end the program), a process killed in the middle
+# headroom is huge, ONE blob column holds more than 2 GiB (Metakit moves each big value out of the shared column when it is committed), about 2 GiB of uncommitted values in one column are refused cleanly, a process killed in the middle
 # of a commit leaves a file that opens as one commit or the other, and the helper that reads the whole file in -verify copes.
 set here [file dirname [file normalize [info script]]]
 set ::env(MKIT_BACKEND) standalone
@@ -59,23 +59,45 @@ puts "-verify of [format %.2f [expr {$size / double($GiB)}]] GiB: [expr {[clock 
 ok "-verify gives a level" [expr {[lindex [mkitsql::db::integrityOf $db] 1] in {proven evidence}}]
 mkitsql::db::closeFile $db
 
-# ---- one column cannot pass 2 GiB: b1 holds about 1.5 GiB, so about 500 more MiB fit ----
+# ---- ONE blob column holds more than 2 GiB: at every commit Metakit moves each big value into a column of its own, so only what was written
+# ---- since the last commit has to fit into the shared column.  b1 has 1500 MiB; 600 more, committed every 50 rows, take it past 2^31 bytes.
 set db [mkitsql::db::openFile $f]
 set mkitsql::db::durable 0
-set added 0 ; set code ""
-for {set i 0} {$i < 900} {incr i} {
-    if {[catch {mkitsql::db::appendRow $db.t {k b1} [list [expr {200000 + $i}] [format %08d [expr {200000 + $i}]]$pad]} m opts]} { set code [dict get $opts -errorcode] ; break }
-    incr added
-    if {$added % 50 == 0} { mkitsql::db::commit $db }
+set refused 0 ; set code ""
+for {set i 0} {$i < 600} {incr i} {
+    if {[catch {mkitsql::db::appendRow $db.t {k b1} [list [expr {200000 + $i}] [format %08d [expr {200000 + $i}]]$pad]} m opts]} { incr refused ; set code [dict get $opts -errorcode] ; break }
+    if {($i + 1) % 50 == 0} { mkitsql::db::commit $db }
 }
-ok "the column was refused before Metakit could end the program (COLUMNFULL after $added MiB)" [expr {[lrange $code 0 1] eq {MKIT COLUMNFULL}}] $code
-ok "the refusal is near 2 GiB" [expr {$added > 400 && $added < 560}] $added
-ok "the other column is fine" [expr {![catch {mkitsql::db::appendRow $db.t {k b2} [list 1 small]}]}]
 mkitsql::db::commit $db
+ok "one blob column takes more than 2 GiB when it is committed now and then (refused after $i MiB: $code)" [expr {!$refused}] $code
+set rows [mkitsql::db::size $db.t]
+ok "its rows are all there ($rows)" [expr {$rows == 2100}] $rows
+ok "b1 holds more than 2^31 bytes" [expr {$rows * 1048576 > 2147483647}]
+set bad 0
+foreach i {0 700 1499 1500 1501 1799 2099} {
+    set v [mk::get $db.t!$i b1] ; set want [expr {$i < 1500 ? $i : 200000 + $i - 1500}]
+    if {[string range $v 0 7] ne [format %08d $want] || [string length $v] != 1048576} { incr bad ; puts "row $i: [string range $v 0 7] [string length $v]" }
+}
+ok "rows on both sides of the 2 GiB mark are intact" [expr {$bad == 0}] $bad
+
+# ---- what has NOT been committed all lives in the shared column, so about 2 GiB of uncommitted values in one column are refused (by the guard,
+# ---- before anything is changed); the other columns are not affected
+set pending 0 ; set code ""
+for {set i 0} {$i < 2100} {incr i} {
+    if {[catch {mkitsql::db::appendRow $db.t {k b3} [list [expr {400000 + $i}] [format %08d [expr {400000 + $i}]]$pad]} m opts]} { set code [dict get $opts -errorcode] ; break }
+    incr pending
+}
+ok "the column guard refuses about 2 GiB of uncommitted values in one column (COLUMNFULL after $pending MiB)" [expr {[lrange $code 0 1] eq {MKIT COLUMNFULL}}] $code
+ok "...near 2 GiB ($pending MiB)" [expr {$pending > 2030 && $pending < 2048}] $pending
+ok "...with a message that says to save" [string match "*SAVE (commit)*" $m] [string range $m 0 200]
+ok "the other column is fine" [expr {![catch {mkitsql::db::appendRow $db.t {k b2} [list 1 small]}]}]
+mkitsql::db::rollback $db
+ok "after a rollback the table is as it was committed" [expr {[mkitsql::db::size $db.t] == $rows}] "[mkitsql::db::size $db.t] vs $rows"
+ok "...and new rows can be committed again" [expr {![catch {mkitsql::db::appendRow $db.t {k b2} [list 2 again]}] && ![catch {mkitsql::db::commit $db} m]}] $m
 set rows [mkitsql::db::size $db.t]
 mkitsql::db::closeFile $db
 set db [mkitsql::db::openFile $f -readonly]
-ok "after the refusal the file reopens with every row" [expr {[mkitsql::db::size $db.t] == $rows}] "[mkitsql::db::size $db.t] vs $rows"
+ok "after all that the file reopens with every row" [expr {[mkitsql::db::size $db.t] == $rows}] "[mkitsql::db::size $db.t] vs $rows"
 mkitsql::db::closeFile $db
 
 # ---- a process killed in the middle of a commit (Unix only) ----

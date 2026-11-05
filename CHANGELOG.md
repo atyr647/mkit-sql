@@ -3,6 +3,23 @@
 All notable changes to mkit-sql. The versioning and compatibility rules are in
 [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md). Dates are omitted on purpose: the version is the identity.
 
+## 0.4.2 - the column guard counts what Metakit really keeps in a column; the 64-bit Metakit's size errors
+
+* **A blob or text column can hold far more than 2 GiB** (the 64-bit Metakit). The column guard added in 0.4.0 counted every value of a column against
+  the 2^31-1 byte limit, so a table of big blobs was refused at 2 GiB although Metakit can hold it. Read from Metakit's `format.cpp` and checked on a real
+  database: all values of a text or blob property live in one shared column, **except** that each commit moves every value over 10,000 bytes (and, in
+  tables of very many rows, smaller ones) into a column of its own, which has the limit alone. The shared column therefore holds what has been written
+  since the last commit (all of it) plus the committed values of at most 10,000 bytes - and that is what the guard counts now (per column: the bytes
+  written since the commit, the part of them in big values that leaves at the commit, and the committed small values, found by one pass over the column
+  the first time it matters and kept up to date after). `tests/widebig.tcl` writes 2.1 GiB into ONE blob column (committing every 50 rows) and reads it back;
+  about 2 GiB of uncommitted values in one column are still refused, with a message that says to commit.
+* **The 64-bit Metakit's "size errors"** (commit `2e2e482` of the fork): an edit that would still pass the limit no longer ends the program; Mk4tcl returns an
+  error and marks the storage, which can then only be rolled back (every commit fails until it is). `appendRow`, `setCell` and the column copy of `ALTER ... TYPE` turn that
+  into `{MKIT COLUMNFULL view column}` (the studio layer: `{STORE COLUMNFULL ...}` from MK Studio's store), the handle remembers the mark and a commit
+  is refused at once - nothing written, no commit record, the checksum kept - with `{MKIT TAINTED}`; `ROLLBACK` lifts it. `ALTER ... TYPE` also runs its copy through the guard now.
+* `tests/build_mk4tcl_wide.sh` pins the fork at `2e2e482`. Tests: `tests/widefile.tcl` (the stand-in for Mk4tcl's error, both layers; the studio layer only with a store.tcl that has
+  the handling: `MKIT_STORE=<MK Studio's current store.tcl>`), `tests/widebig.tcl` (one blob column past 2 GiB; 2 GiB uncommitted refused; Metakit's real error with the guard off).
+
 ## 0.4.1 - lock takeover, unreadable locks, Windows flush
 
 * **The takeover of a stale lock no longer deletes it by name.** A killed process leaves the takeover guard behind; every waiter

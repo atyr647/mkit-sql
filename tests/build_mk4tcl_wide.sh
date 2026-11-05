@@ -9,7 +9,7 @@
 set -e
 DIR=${1:?usage: $0 <empty build directory>}
 REPO=${METAKIT_WIDE_REPO:-https://github.com/atyr647/metakit}
-REF=${METAKIT_WIDE_REF:-9ffa269e70bd105d6195840bccb5759ed9a51991}
+REF=${METAKIT_WIDE_REF:-2e2e482d65e7b881c845cddd19917e7988cdebec}
 TCLINC=${TCL_INCLUDE:-/usr/include/tcl8.6}
 TCLLIB=${TCL_LIBDIR:-/usr/lib/x86_64-linux-gnu}
 mkdir -p "$DIR" && cd "$DIR"

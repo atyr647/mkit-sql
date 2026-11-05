@@ -219,7 +219,7 @@ jobs:
 
   # Metakit with 64-bit file positions (no 2 GiB ceiling): https://github.com/atyr647/metakit, a pinned commit of its branch.  Everything
   # that has to hold on real Metakit still has to, and the engine must now read, change, repair and verify a file over 2 GiB (tests/widebig.tcl,
-  # 3.5 GB of disk), refuse one column past 2 GiB cleanly (Metakit would end the program), and refuse a wide file under a Metakit that cannot read it.
+  # 5 GB of disk, 2 GB of memory), hold one blob column past 2 GiB, refuse 2 GiB of uncommitted values in one column cleanly, and refuse a wide file under a Metakit that cannot read it.
   metakit-wide:
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -246,7 +246,7 @@ jobs:
           export MKIT_MK4TCL="$RUNNER_TEMP/mk4wide/build/Mk4tclS.so"
           EXPECT_WIDE=1 tclsh8.6 tests/widefile.tcl
           EXPECT_WIDE=1 MKIT_BACKEND=studio tclsh8.6 tests/widefile.tcl
-      - name: A database file of 3.5 GB - commits across 2 GiB, every blob intact, one column refused at 2 GiB, commits killed in the middle
+      - name: A database file of 5 GB - commits across 2 GiB, every blob intact, one blob column past 2 GiB, 2 GiB uncommitted refused, commits killed in the middle
         run: MKIT_MK4TCL="$RUNNER_TEMP/mk4wide/build/Mk4tclS.so" tclsh8.6 tests/widebig.tcl
       - name: The 2 GiB-ceiling test knows this Metakit has none
         run: MKIT_MK4TCL="$RUNNER_TEMP/mk4wide/build/Mk4tclS.so" tclsh8.6 tests/bigfile.tcl

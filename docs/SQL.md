@@ -351,13 +351,17 @@ turned into the wide format) and sees whether the library finds its row - a beha
 risks data. Opening a file for writing also puts right an interrupted commit on a wide file (the commit record and the 24-byte frame check are wide-aware),
 and `-verify` reads the whole file in a helper process (it loads the same Mk4tcl as the caller).
 
-**The column limit.** In the 64-bit Metakit one column (and one memo) is still limited to 2^31-1 bytes whatever the size of the file, and
-when an edit grows a column past it Metakit **ends the program** (there is no way to report an error from the middle of an edit). With the file limit gone
-nothing else stops a big table first, so `INSERT` and `UPDATE` check the column before they write: the check costs nothing until the file plus
-what has been written since the last commit nears 2 GiB; then the column is counted once (fixed width: rows x width; text and blobs: one pass over the
-column, about a second per million rows) and kept up to date for the session (deletes are not subtracted, so the count only errs on the safe side; it is
-reset by `ROLLBACK`, a reopen and a layout change). When a column would pass the limit the statement fails with `{MKIT COLUMNFULL view column}` and
-the file is untouched. The remedy is the same as ever: split the table (by year, say) or keep large values outside the database.
+**The column limit.** In the 64-bit Metakit the **shared** column of a text or blob property is still limited to 2^31-1 bytes whatever the size of the file.
+What lives in it (from Metakit's source, checked on a real database): every value written since the last commit, and the committed values of at most 10,000 bytes -
+each commit moves every bigger value into a column of its own, which has the limit alone. A blob column can therefore hold many times 2 GiB as long as it is committed
+now and then (`tests/widebig.tcl` writes 2.1 GiB into one); what cannot be done is writing about 2 GiB into one column *between two commits*, or keeping 2 GiB of small
+values in one column. An edit that would pass the limit is refused by Metakit with an error (before 2e2e482 it ended the program) and the storage can then only be rolled
+back, so `INSERT`, `UPDATE` and `ALTER ... TYPE` check first: the check costs nothing until the file plus what has been written since the last commit nears 2 GiB; then the
+column is counted (fixed width: rows x width; text and blobs: the bytes written since the commit, plus the small committed values found by one pass over the column - about a
+second per million rows - and kept up to date for the session; deletes are not subtracted, so the count only errs on the safe side; it is dropped by `ROLLBACK`, a reopen and a
+layout change). When a column would pass the limit the statement fails with `{MKIT COLUMNFULL view column}` and the file is untouched; the message says to commit, and to split
+the table (by year, say) or keep large values outside the database if the column is full of small values. If Metakit itself refuses an edit the guard did not foresee, the
+same error is raised, the handle remembers that the storage can only be rolled back, and `COMMIT` fails at once with `{MKIT TAINTED}` until `ROLLBACK`.
 
 **On stock Metakit a file cannot be larger than 2 GiB (2,147,483,647 bytes)** - it keeps its size in one 32-bit word (measured on real
 Metakit 2.4.9.7: a commit that would take the file past it fails with "I/O error during commit" and, if it was a large one, leaves
@@ -368,13 +372,13 @@ handle is reopened (the changes since the last commit are discarded, as `ROLLBAC
 can be open at once and their tables are addressed `dbtag.table` - and watch `::mkitsql::db::fileHeadroom $tag` / `::mkitsql::db::nearLimit $tag 0.9`
 to archive or split before a commit has to be undone.
 
-**Do not mix the two Metakits on one wide file.** A program with a stock Mk4tcl that is not mkit-sql (MK Studio's own store, `tclkit`, a script) sees a wide file as
-empty, and a commit from it would put a new, small database behind the existing bytes. mkit-sql refuses such a file under a stock Mk4tcl; other programs
-do not know. Keep wide files for programs that load the 64-bit Mk4tcl, and keep MK Studio's `integration/` patch for files under 2 GiB until MK Studio itself
-ships the 64-bit Metakit (a file only becomes wide when it outgrows 2 GiB: a small file is readable by everything).
+**Do not mix the two Metakits on one wide file.** A program with a stock Mk4tcl that is not mkit-sql (an older MK Studio, `tclkit`, a script) sees a wide file as
+empty, and a commit from it would put a new, small database behind the existing bytes. mkit-sql refuses such a file under a stock Mk4tcl, and so does MK Studio
+1.0.0-rc.3 or later (its programs carry the 64-bit Metakit themselves); other programs do not know. Keep wide files for programs that load the 64-bit Mk4tcl
+(a file only becomes wide when it outgrows 2 GiB: a small file is readable by everything).
 
 Build the library: `tests/build_mk4tcl_wide.sh <dir>` (a pinned commit of the fork; needs `g++`, `make`, `tcl8.6-dev`). CI job `metakit-wide` runs the engine
-suites on it, `tests/widefile.tcl` (small files, any Mk4tcl) and `tests/widebig.tcl` (a 3.5 GB database: commits across 2 GiB, every blob intact,
+suites on it, `tests/widefile.tcl` (small files, any Mk4tcl) and `tests/widebig.tcl` (a 5 GB database: commits across 2 GiB, every blob intact, one blob column past 2 GiB,
 one column refused at 2 GiB, five commits killed in the middle).
 
 A query never has to fit in memory. Scans are read in chunks and every operator that has to hold rows (sort,
