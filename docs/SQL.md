@@ -400,7 +400,40 @@ engine is 5-10 us (`SUM/AVG` over 20,000 rows 160 ms, a `LIKE` prefix scan 100 m
 * A blob column that a scan's own conditions do not mention is read after the filter, only for the rows that pass, one row at a time:
   `LIMIT` and `EXISTS` stop before reading blobs they do not return. A condition that looks at the blob (`WHERE data = X'...'`, also
   from inside a subquery) reads it first, as it must.
-* A statement that returns a blob still returns all of it (a 1 GB value is 1 GB in the result): select `LENGTH()` or a `SUBSTR()` instead.
+* A statement that returns a blob returns all of it by default (a 1 GB value is 1 GB in the result). A program that only shows or
+  streams big values can have them **by reference** instead (0.6.0):
+
+```tcl
+::mkitsql::blobLimit 4096                    ;# default -1: whole values, as always
+set r [::mkitsql::query {SELECT name, data FROM files WHERE kind = 'video'} $db]
+foreach row [dict get $r rows] {
+    lassign $row name data
+    set ref [::mkitsql::blobRef $data]       ;# "" when `data` is the value itself (4096 bytes or fewer)
+    if {$ref eq ""} { puts "$name: [string length $data] bytes" ; continue }
+    binary scan [dict get $ref head] H16 hex                  ;# the head: the first 4096 bytes
+    puts "$name: [dict get $ref size] bytes, starts $hex"
+    set part [::mkitsql::blobRead $data 1048576 65536]       ;# 64 KiB from offset 1 MiB (0-based), through mk::channel
+    set out [open $name.bin wb] ; ::mkitsql::blobCopy $data $out ; close $out     ;# all of it, 1 MiB at a time
+}
+```
+
+  * With a limit of 0 or more, a stored blob column that the **outermost** `SELECT` returns *as it is* - a bare select item (also
+    through `*`), from a table or subview of its own `FROM` clause, that nothing else in the statement mentions (no condition, join,
+    `ORDER BY`, other item or subquery), in a `SELECT` without `DISTINCT`, `GROUP BY` or aggregates - comes back as itself when it has
+    at most `limit` bytes and otherwise as a **reference**: its size (`mk::get -size`) and its first `limit` bytes (a ranged read),
+    without the value being read. `WHERE` and `ORDER BY` on other columns, joins, `LIMIT`, spilling sorts and `::mkitsql::stream`
+    carry references unchanged; the column type stays `B`.
+  * Anything that looks at the value reads it whole, as before: a condition, `ORDER BY` or `DISTINCT` on the blob, expressions
+    (`data || X'00'`, `COALESCE(data, ...)`), derived tables, CTEs, `UNION`, scalar subqueries, and every statement that stores what it
+    selects (`INSERT ... SELECT`, `CREATE TABLE ... AS`, `UPDATE`, `MERGE`) - those always get values, never references.
+  * `::mkitsql::blobRef value` is `""` for an ordinary value, else a dict `db path row column size head`. A reference begins with
+    U+FDD1 and a blob value is bytes (every character below U+0100), so the two cannot be mistaken for each other in a blob column.
+  * `::mkitsql::blobRead ref ?offset? ?count?` (offset 0-based, count -1 or left out = to the end) and `::mkitsql::blobCopy ref channel`
+    (returns the size) read the value from the database. A reference is good while its database stays open and **unchanged**: after
+    any write, `ROLLBACK`, a reopen or a close they refuse it with `-errorcode {MKIT BLOBSTALE db}` - run the query again (a row may
+    have moved). A value that is not a reference: `{MKIT BLOBREF}`.
+  * MK Studio's query window uses this with a limit of 10 (its grid shows a bytes cell as its size and first 10 bytes): selecting a
+    1 GB value there no longer loads it.
 
 **Can the 2 GiB limit be lifted? Yes - with a Metakit built for it; not with the Metakit inside today's MK Studio and tclkits.**
 Stock Metakit stores every file position as a signed 32-bit integer (`t4_i32`), so a database file cannot pass 2 GiB. The Metakit fork
