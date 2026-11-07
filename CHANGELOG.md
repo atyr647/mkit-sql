@@ -3,6 +3,39 @@
 All notable changes to mkit-sql. The versioning and compatibility rules are in
 [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md). Dates are omitted on purpose: the version is the identity.
 
+## 0.6.0 - big blobs by reference; checksums of files without a header; the kitfmt pin checked without Ribbon
+
+* **Big blobs by reference** (new, off by default). `::mkitsql::blobLimit N` (N >= 0) makes a stored blob that the outermost `SELECT`
+  returns as it is - a bare item or `*`, from a table or subview of its own `FROM` clause, mentioned nowhere else in the statement, in a
+  `SELECT` without `DISTINCT`, `GROUP BY` or aggregates - come back as itself when it has at most N bytes and otherwise as a
+  *reference* holding its size and first N bytes, read with `mk::get -size` and `mk::channel` (the 0.5.0 machinery) instead of the
+  value. `::mkitsql::blobRef`, `blobRead ref ?offset? ?count?` and `blobCopy ref channel` (1 MiB at a time) read the rest. Joins,
+  `WHERE` / `ORDER BY` on other columns, `LIMIT`, spilling sorts and `::mkitsql::stream` carry references; a reference becomes stale
+  (`{MKIT BLOBSTALE db}`) when its database changes, rolls back, reopens or closes. Everything that looks at the value - conditions,
+  `ORDER BY`/`DISTINCT` on the blob, expressions, derived tables, CTEs, `UNION`, subqueries - and every statement that stores what it
+  selects (`INSERT ... SELECT`, `CREATE TABLE AS`, `UPDATE`, `MERGE`) gets values as before. **Unchanged by default** (`blobLimit` -1:
+  whole values), so callers that rely on the value keep it. The storage layers gained `db::generation` (a change counter; MK Studio's
+  `::store::generation` in the studio layer). docs/SQL.md ("Large tables and memory"), docs/COMPATIBILITY.md (stable surface).
+* **MK Studio uses it** (`mkitsql/engine_studio.tcl`): with a MK Studio whose `engine.tcl` declares `::engine::blobPreview` (10 bytes:
+  what its grid shows of a bytes cell) the limit is set to that and `::engine::blobRef` answers for references, so a query that selects
+  a 1 GB value no longer loads it. An older MK Studio keeps whole values.
+* **Fixed: a commit of a file without a Metakit header left its old checksum behind.** `db::beginCommit` returned before removing
+  `<file>.sum` when no commit record can describe the file (no header at offset 0), and `commit` wrote no new one, so a stale checksum
+  sat beside every later commit of such a file (next to a newer file of the same size and second it would call that file damaged). The
+  sum is now removed before every commit and rewritten after it, record or not. (The same fix as MK Studio's store; found there by its
+  UI tests on the stand-in Mk4tcl, whose files have no Metakit header.)
+* **The pinned kitfmt is checked without Ribbon.** Ribbon is private, so CI could not compare `tests/vendor/kitfmt` with it.
+  `tests/sync-kitfmt.sh` now records, in `SOURCE`, each vendored file's git blob id at the pinned commit and its SHA-256; `--verify`
+  checks the copies against them with no Ribbon at all (CI job `kitfmt`, every push), `--check RIBBON` compares with any clone that has
+  the commit, `--upstream RIBBON` warns when Ribbon's kitfmt has moved on, and `--compare SOURCE` compares two pins. CI runs `--check` and
+  `--upstream` when the secret `RIBBON_READ_TOKEN` can read atyr647/ribbon (otherwise a visible warning, never a pass), and the `mkstudio`
+  job compares this pin with the kitfmt MK Studio carries and runs `tests/kittables.tcl` on MK Studio's copy (`KITFMT_DIR`). The pin
+  moved to ribbon `49fd4b0` (the commit MK Studio carries; kitfmt gained `extract -progress`).
+* Tests: `tests/blobs.tcl` 29 -> 89 (references: inline and referenced values, head and size, ranged and whole reads, copy, every
+  form that passes a reference and every one that must read the value, the storing statements, a spilling sort, stream, stale and
+  forged references, limit 0, both storage layers, the stand-in); `tests/kittables.tcl` checks it read with the kitfmt it was given.
+  Verified with tclkit 8.6.3 and 8.5.17 (built-in Mk4tcl), Tcl 8.6.14 with the fork's Mk4tcl, both storage layers and the stand-in.
+
 ## 0.5.0 - virtual tables, the kit.* tables, big blobs read only when needed
 
 * **Virtual tables.** `::mkitsql::registerVirtual schema table columns rowsCmd` adds a read-only table whose rows come from Tcl code;

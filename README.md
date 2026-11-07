@@ -31,7 +31,9 @@ Queries with every join type (hash joins, filter pushdown, `LATERAL`), subquerie
 TABLE` (also `AS SELECT`), transactions, `information_schema`, parameters, and Metakit's nested tables
 (*subviews*) as first-class citizens. Programs can add read-only **virtual tables** (`::mkitsql::registerVirtual`); the
 `kit.*` tables show a Ribbon kit file (manifest, files, chunks, embedded image, verification) through Ribbon's kitfmt reader.
-Big blob values are read only when a statement needs them (`LENGTH` and literal `SUBSTR` ranges never read the whole value). Writes are all-or-nothing and range-checked. Syntax errors carry a character
+Big blob values are read only when a statement needs them (`LENGTH` and literal `SUBSTR` ranges never read the whole value), and a
+program can have big blobs in results **by reference** - their size and first bytes, read on demand with `::mkitsql::blobRead` /
+`blobCopy` (`::mkitsql::blobLimit`; off by default, docs/SQL.md). Writes are all-or-nothing and range-checked. Syntax errors carry a character
 position for editor underlining; a UI can cancel any long query.
 
 ## What it does not have
