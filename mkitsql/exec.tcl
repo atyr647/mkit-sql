@@ -650,7 +650,11 @@ proc ::mkitsql::mergeJoin {node outer sink bs} {
             } elseif {![llength $lg]} { set takeLeft 0
             } elseif {$lnull} { set takeLeft 1
             } elseif {$rnull} { set takeLeft 0
-            } else { set takeLeft [expr {[string compare $lk $rk] < 0}] }
+            } else {
+                # the order the sorter used (lsort -ascii), which is not always [string compare]'s: two byte arrays compare as
+                # bytes there, but lsort orders a NUL byte after all others, and a merge that disagrees with its sort misses matches
+                set takeLeft [expr {[lindex [lsort -ascii [list $lk $rk]] 0] eq $lk}]
+            }
             if {$takeLeft} {
                 if {$type in {left full}} { foreach rec [lindex $lg 1] { lappend out [::mkitsql::rt::sk [list {*}[lindex $rec 1] {*}$nullR]] } }
                 set lg [readerGroup $lr]

@@ -83,7 +83,11 @@ check filter_on_blob [lindex [reads "SELECT id FROM img WHERE data = X'616263'"]
 check filter_on_blob_late [reads "SELECT id, LENGTH(data) FROM img WHERE data = X'00FF'"] {5 {{4 2}}}
 # correlated: the subquery's filter mentions the outer blob, so the outer scan reads it before filtering
 check correlated [rows "SELECT a.id FROM img a WHERE EXISTS (SELECT 1 FROM img b WHERE b.id = 1 AND b.data = a.data) ORDER BY a.id"] 1
-check join [rows "SELECT a.id, b.id FROM img a JOIN (SELECT * FROM img WHERE id <> 3) b ON a.data = b.data WHERE a.id = 4"] {{4 4}}
+check join [rows "SELECT a.id, b.id FROM img a JOIN img b ON a.data = b.data WHERE a.id = 4"] {{4 4}}
+# the 4 MB row makes the right side bigger than a small budget: a sort-merge join, whose merge must order keys as its sort does
+set saved $::mkitsql::memBytes ; set ::mkitsql::memBytes 1000000
+check join_merge_nul [rows "SELECT a.id, b.id FROM img a JOIN img b ON a.data = b.data WHERE a.id IN (1, 4, 5) ORDER BY a.id"] {{1 1} {4 4} {5 5}}
+set ::mkitsql::memBytes $saved
 check join_late [lindex [reads "SELECT a.name, b.data FROM img a JOIN img b ON a.id = b.id WHERE a.id = 2"] 1] {{empty {}}}
 check group_by_blob [rows "SELECT COUNT(*) FROM (SELECT data FROM img GROUP BY data) x"] 5
 # the whole value, when asked for, is exactly the stored one
