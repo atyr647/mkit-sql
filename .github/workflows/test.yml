@@ -44,7 +44,7 @@ jobs:
       - name: package require (standalone, and next to MK Studio's store), tclkit 8.5.17
         run: for m in standalone studio; do $T85 tests/pkg_check.tcl $m; done
       - name: Engine tests on the pure-Tcl stand-in (system Tcl)
-        run: sudo apt-get install -y tcl8.6 && tclsh8.6 tests/run.tcl
+        run: sudo apt-get install -y tcl8.6 && tclsh8.6 tests/run.tcl && tclsh8.6 tests/blobs.tcl
       - name: Tcl 8.5 / 8.6.3 list bug - identical results on the old runtimes and on a healthy Tcl, every budget, both storage layers
         run: |
           for seed in 1 2 3; do
@@ -71,7 +71,7 @@ jobs:
       - name: Both storage layers (standalone db.tcl, and MK Studio's ::store through db_studio.tcl), tclkit 8.6.3
         run: |
           for b in standalone studio; do
-            for t in run real_metakit doc_examples injection nullforge codegen_audit; do
+            for t in run real_metakit doc_examples injection nullforge codegen_audit blobs; do
               echo "== $b / $t"; MKIT_BACKEND=$b MKIT_MK4TCL=builtin $T86 tests/$t.tcl
             done
           done
