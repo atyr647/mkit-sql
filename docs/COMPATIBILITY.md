@@ -8,6 +8,7 @@ can rely on and how changes are announced, so a program or MK Studio can depend 
 | Surface | Stability |
 | --- | --- |
 | `package require mkitsql`; `::mkitsql::run`, `::mkitsql::query`, `::mkitsql::stream` (arguments and result shape) | stable within a minor version |
+| The virtual-table registry: `::mkitsql::registerVirtual`, `::mkitsql::unregisterVirtual`, `::mkitsql::virtualTables` (arguments, the `ctx` dict, the checks on rows); the `kit.*` tables and their columns | stable within a minor version |
 | The documented configuration variables: `memBytes`, `chunk`, `tempDir`, `maxRows`, `maxRecursion`, `maxBinds`, `autocommit`, `session`, `nullText`, `ignoreConstraints`, `pushdown`, `pushMin`, `bulkMin`, `progressHook` | stable within a minor version |
 | The storage interface `::mkitsql::db::*` (`openFile closeFile tags views layout size rows rowsAt subSize appendRow setCell deleteRows deleteRange clearView createView dropView restructure rebuildColumn commit rollback dirty readonly lockedBy holdsLock`) | the contract between the engine and its two storage layers; changes only together with `db.tcl`, `db_studio.tcl` and a version bump |
 | The SQL accepted and its results, as written in docs/SQL.md | additions are compatible; behaviour that docs/SQL.md states changes only in a minor version, listed under *Breaking* in the changelog |

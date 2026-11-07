@@ -281,9 +281,66 @@ INSERT INTO people[0].pets (pet, age) VALUES ('Rex', 3);   -- UPDATE / DELETE wo
 ## Introspection
 
 `information_schema.tables` (table_catalog, table_name, table_type, row_count) and `information_schema.columns`
-(table_catalog, table_name, column_name, ordinal_position, data_type, metakit_type). MK Studio extras:
+(table_catalog, table_name, column_name, ordinal_position, data_type, metakit_type), and any table a program registers (next section). MK Studio extras:
 `SHOW TABLES [db]`, `SHOW DATABASES`, `DESCRIBE table`, `USE db`. `_rowid` is a pseudo-column holding a row's
 Metakit index.
+
+## Virtual tables
+
+A program can add read-only tables whose rows come from Tcl code instead of a Metakit view (`mkitsql/vtab.tcl`):
+
+```tcl
+::mkitsql::registerVirtual app sessions {{id int} {user text} {started int}} ::myapp::sessionRows
+proc ::myapp::sessionRows {ctx} { return {{1 ada 1700000000} {2 grace 1700000400}} }
+::mkitsql::query {SELECT user FROM app.sessions WHERE started > 1700000100} $db     ;# -> grace
+::mkitsql::unregisterVirtual app ;# or: app sessions
+::mkitsql::virtualTables         ;# {schema table columns} of every registered table
+```
+
+* Columns are `{name type}` with type `text`, `int`, `real` or `blob`. The command is called as `{*}cmd ctx`, where `ctx` is a dict
+  with `schema`, `table` and `db` (the statement's default database, "" if none), and returns every row as a list of values in column order.
+* The rows are checked: the width must match, an `int` or `real` column holds a number or `""` (NULL), and text can never carry the
+  engine's NULL marker (as for stored text, see "Safety"). An error the command raises fails the statement with its message.
+* The tables can be used wherever a table can be read (joins, subqueries, CTEs, `WHERE`, `ORDER BY`, aggregates); `INSERT`, `UPDATE` and
+  `DELETE` refuse them. They are produced in full each time a statement reads them.
+* Names: `information_schema` always means its two tables (they are registered this way now). Another schema is used only when no open
+  database has that tag, so registering a schema can never hide a database's tables.
+
+### Kits: the `kit.*` tables
+
+The first user of the registry. A Ribbon **kit** (`.kit`, a Metakit starkit with chunked, hashed, signed contents; the format is
+`docs/KIT-FORMAT.md` in atyr647/ribbon) is a Metakit file, so its raw views can be queried like any other; these tables show it the way the
+kit reader sees it:
+
+| Table | Columns |
+|---|---|
+| `kit.info` | `key`, `value`: format, requires, kind, name, version, root, root_state (`ok` / `mismatch`), signature (`unsigned`, `unchecked`, `untrusted`, `valid`, `invalid`), signer (key id), header (bytes in front of the seal), store_start, entries, bytes, stored, chunks, image, writer, path |
+| `kit.manifest` | `key`, `value` |
+| `kit.needs`, `kit.provides` | `name`, `range` / `name`, `version` |
+| `kit.perms` | `name`, `value` (what the kit *requests*) |
+| `kit.entries`, `kit.effects` | `name`, `path`, `args`, `type` / `type`, `value` |
+| `kit.files` | `path`, `type` (file, dir, link), `size`, `mode` (decimal), `date`, `codec`, `csize`, `chunks`, `stored`, `link` (NULLs for directories) |
+| `kit.chunks` | `path`, `idx`, `stored`, `hash` (SHA-256 of the stored chunk) |
+| `kit.image` | `fs`, `file_offset`, `length`, `pad`, `seg`, `segments`, `verity`, `salt` (a system kit's embedded image; no row otherwise) |
+| `kit.verify` | `part` (header, root, image, signature, file), `path`, `ok`, `detail` - **reads and hashes every chunk**, so it costs a full pass |
+
+```sql
+SELECT path, size, chunks, stored FROM kit.files WHERE type = 'file' ORDER BY size DESC LIMIT 10;
+SELECT f.path, COUNT(*) FROM kit.files f JOIN kit.chunks c ON c.path = f.path GROUP BY f.path;
+SELECT part, path, detail FROM kit.verify WHERE ok = 0;
+```
+
+* The kit is the statement's default database when its file is a kit, otherwise the one open database that is a kit (two open kits and
+  no default: an error says to pick one).
+* They need **kitfmt**, Ribbon's reference reader (`kit/kitfmt` in atyr647/ribbon), which mkit-sql does **not** carry: it is loaded with
+  `package require kitfmt` the first time a `kit.*` table is read, and without it the statement fails saying so. MK Studio carries it;
+  elsewhere put its directory on `auto_path`. (A library that bundled its own copy would put two copies of kitfmt into a program that also
+  uses it directly; the program pins both, as MK Studio pins mkit-sql. The tests use a pinned copy in `tests/vendor/kitfmt`.)
+* kitfmt opens the kit on its own, read-only (no lock, no checksum file), checks its seal and root hash first, and never fetches a chunk
+  whole without knowing its size. A kit whose content does not match its seal is still shown (`root_state` says `mismatch`, and
+  `kit.verify` fails), so a damaged kit can be examined. The signature state is `unchecked` unless the program has told kitfmt which keys
+  it trusts (`kitfmt configure -keys`); there is no key infrastructure yet.
+* Open a kit read-only (`-readonly`): installed kits live in directories only kit writes.
 
 ## Parameters
 
@@ -331,6 +388,19 @@ engine is 5-10 us (`SUM/AVG` over 20,000 rows 160 ms, a `LIKE` prefix scan 100 m
   the schema, so entries would rarely be reused and invalidating them is where the bugs would be) and compiled (C) kernels (the engine stays pure Tcl).
 
 ## Large tables and memory
+
+**Big blob values are read only when a statement needs them** (0.5.0). Measured on a view holding a 300 MB blob: `SELECT name, LENGTH(data)`,
+`SELECT * ... WHERE n = 1` (the big row filtered out) and `SELECT * ... LIMIT 1` took about 5 s each, reading the whole value; now about 1 ms.
+
+* `LENGTH`, `CHAR_LENGTH` and `OCTET_LENGTH` of a blob **column** come from Metakit's stored size (`mk::get -size`), wherever they
+  appear (select list, `WHERE`, `ORDER BY`, aggregates). `OCTET_LENGTH` of a blob column is its size in bytes; on a computed blob value
+  the function still counts the UTF-8 form of its text, as before.
+* `SUBSTR(b, start, len)` and `SUBSTRING(b FROM start FOR len)` with literal whole numbers read just that range (`mk::channel`): the
+  cheap way to look at the first bytes of a large value.
+* A blob column that a scan's own conditions do not mention is read after the filter, only for the rows that pass, one row at a time:
+  `LIMIT` and `EXISTS` stop before reading blobs they do not return. A condition that looks at the blob (`WHERE data = X'...'`, also
+  from inside a subquery) reads it first, as it must.
+* A statement that returns a blob still returns all of it (a 1 GB value is 1 GB in the result): select `LENGTH()` or a `SUBSTR()` instead.
 
 **Can the 2 GiB limit be lifted? Yes - with a Metakit built for it; not with the Metakit inside today's MK Studio and tclkits.**
 Stock Metakit stores every file position as a signed 32-bit integer (`t4_i32`), so a database file cannot pass 2 GiB. The Metakit fork

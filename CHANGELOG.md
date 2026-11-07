@@ -3,6 +3,33 @@
 All notable changes to mkit-sql. The versioning and compatibility rules are in
 [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md). Dates are omitted on purpose: the version is the identity.
 
+## 0.5.0 - virtual tables, the kit.* tables, big blobs read only when needed
+
+* **Virtual tables.** `::mkitsql::registerVirtual schema table columns rowsCmd` adds a read-only table whose rows come from Tcl code;
+  `unregisterVirtual` and `virtualTables` go with it (docs/SQL.md, "Virtual tables"; on the stable surface, docs/COMPATIBILITY.md).
+  Rows are checked (width, numbers in number columns, no forged NULL). `information_schema.tables` / `columns` are now its first two
+  tables (same rows; the list in the "unknown table" message is sorted). Another schema never hides an open database's tables.
+* **`kit.*` tables** over a Ribbon kit (`kit.info`, `manifest`, `needs`, `provides`, `perms`, `entries`, `effects`, `files`, `chunks`,
+  `image`, `verify`), through Ribbon's reference reader **kitfmt**, which mkit-sql loads with `package require` when a `kit.*` table is
+  read and does not carry (MK Studio does). The kit is the statement's default database or the only open kit; kitfmt opens it read-only
+  on its own, checks seal and root first, and never fetches a chunk whole without its size. `kit.verify` hashes every chunk.
+* **Big blob values are read only when a statement needs them.** On a view with a 300 MB blob, `SELECT name, LENGTH(data)`,
+  `SELECT * ... WHERE n = 1` and `SELECT * ... LIMIT 1` went from about 5 s to about 1 ms (a 953 MB blob had taken 29 s):
+  `LENGTH` / `CHAR_LENGTH` / `OCTET_LENGTH` of a blob column use Metakit's stored size, literal `SUBSTR` ranges are read through
+  `mk::channel`, blobs a scan's filter does not look at are read only for the rows that pass, one at a time, and the column guard
+  measures committed values by their size. **Changed:** `OCTET_LENGTH` of a blob column is its size in bytes (it counted bytes above 127
+  twice); on a computed value it is unchanged.
+* **Fixed: the sort-merge join missed matches on keys with a NUL byte.** An equality join whose right side passes the memory budget
+  sorted with `lsort -ascii` and merged with `[string compare]`, which order byte arrays differently (a NUL byte sorts last for lsort,
+  first for string compare); blob keys such as `X'00FF'` found no partner. The merge now uses the sort's own order.
+* Removed the stray empty file `&1` from the repository again (it came back in c9c0f45).
+* Tests: `tests/blobs.tcl` (29: every rewritten form against the plain function on the whole value, whole-value reads counted by
+  wrapping `mk::get`, the merge-join regression), `tests/kittables.tcl` (50: the registry's checks and name rules, `information_schema`,
+  every `kit.*` table on Ribbon's golden kits incl. a damaged one, read-only and no side files, the error without kitfmt). The pinned kitfmt
+  and three golden kits are in `tests/vendor/kitfmt` (`tests/sync-kitfmt.sh`, `SOURCE` names the commit). The stand-in Mk4tcl answers
+  `mk::get -size`. Verified with tclkit 8.6.3 and 8.5.17 (built-in Mk4tcl), Tcl 8.6.14 with the fork's Mk4tcl (`kit-fixes`), both
+  storage layers, and the stand-in; lint, fuzz, the SQLite differentials (diff, dml) and the review regressions pass.
+
 ## 0.4.2 - the column guard counts what Metakit really keeps in a column; the 64-bit Metakit's size errors
 
 * **A blob or text column can hold far more than 2 GiB** (the 64-bit Metakit). The column guard added in 0.4.0 counted every value of a column against

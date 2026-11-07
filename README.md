@@ -29,7 +29,9 @@ Queries with every join type (hash joins, filter pushdown, `LATERAL`), subquerie
 (`DISTINCT`, `FILTER`), **`GROUP BY ROLLUP / CUBE / GROUPING SETS`**, **window functions** (ranking, `LAG/LEAD`, running totals,
 `ROWS/RANGE/GROUPS` frames with `EXCLUDE`, `IGNORE NULLS`, named windows), `SIMILAR TO`, `COLLATE NOCASE`, ~60 functions, **dates and intervals**, `INSERT/UPDATE/DELETE`, **`MERGE`**, `CREATE/DROP/ALTER
 TABLE` (also `AS SELECT`), transactions, `information_schema`, parameters, and Metakit's nested tables
-(*subviews*) as first-class citizens. Writes are all-or-nothing and range-checked. Syntax errors carry a character
+(*subviews*) as first-class citizens. Programs can add read-only **virtual tables** (`::mkitsql::registerVirtual`); the
+`kit.*` tables show a Ribbon kit file (manifest, files, chunks, embedded image, verification) through Ribbon's kitfmt reader.
+Big blob values are read only when a statement needs them (`LENGTH` and literal `SUBSTR` ranges never read the whole value). Writes are all-or-nothing and range-checked. Syntax errors carry a character
 position for editor underlining; a UI can cancel any long query.
 
 ## What it does not have
@@ -245,6 +247,9 @@ python3 tests/differential/strings.py     # string functions / LIKE
 python3 tests/differential/dates.py       # dates and intervals vs Python's calendar
 tclsh tests/fuzz.tcl 40000 1              # mutated SQL must fail cleanly
 MKIT_MK4TCL=builtin tclkit/tclkit-8.6.3 tests/realworld.tcl tclkit/tclkit-8.5.17    # a Metakit file we did not create
+tclsh tests/blobs.tcl                     # big blobs: sizes, ranges, late reads; whole-value reads counted
+MKIT_MK4TCL=builtin tclkit/tclkit-8.6.3 tests/kittables.tcl   # the virtual-table registry and the kit.* tables (golden kits)
+tests/sync-kitfmt.sh --check /path/to/ribbon                  # tests/vendor/kitfmt is the pinned commit of Ribbon's kit/kitfmt
 
 tests/build_mk4tcl.sh /tmp/mk4build       # build the real Metakit + Mk4tcl (git, cmake, g++, tcl8.6-dev)
 export LD_LIBRARY_PATH=/tmp/mk4build/build/src MKIT_MK4TCL=/tmp/mk4build/build/tcl/libMk4tcl.so
@@ -259,7 +264,7 @@ MKSTUDIO_DIR=/path/to/mkstudio xvfb-run wish tests/studio_integration.tcl       
 
 `MKIT_MK4TCL` selects the Mk4tcl used by every script: unset = stand-in, `builtin` = the running tclkit's, or a path
 to a shared library. `.github/workflows/test.yml` runs all of the above.
-`tests/vendor/` holds copies of MK Studio's `store.tcl` and the Mk4tcl stand-in (used only by tests).
+`tests/vendor/` holds copies of MK Studio's `store.tcl`, the Mk4tcl stand-in, and Ribbon's kitfmt with three golden kits (used only by tests).
 
 ## Layout
 
