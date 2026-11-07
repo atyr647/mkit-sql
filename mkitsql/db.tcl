@@ -394,8 +394,8 @@ proc ::mkitsql::db::markTaint {tag} { variable taint ; set taint($tag) 1 }
 proc ::mkitsql::db::commit {tag} {
     variable dirty ; variable file ; variable taint
     if {[info exists taint($tag)]} { taintedError $tag }
-    set record 0
-    if {$dirty($tag) > 0} { set record [beginCommit $file($tag)] }
+    set record 0 ; set began 0
+    if {$dirty($tag) > 0} { set record [beginCommit $file($tag)] ; set began 1 }
     if {[catch {mk::file commit $tag} err]} {
         if {!$record} { return -code error $err }
         lassign [commitFailed $tag $err] code msg
@@ -403,7 +403,9 @@ proc ::mkitsql::db::commit {tag} {
     }
     set dirty($tag) 0
     guardReset $tag
-    if {$record} { endCommit $file($tag) ; catch {sumWrite $file($tag)} }
+    if {$record} { endCommit $file($tag) }
+    # the checksum of the finished file, also when no record could describe it (beginCommit removed the old one either way)
+    if {$began} { catch {sumWrite $file($tag)} }
 }
 # Metakit stores a file's size in ONE 32-bit word and stops at 2 GiB: a commit that would cross it fails ("I/O error during
 # commit"), and - measured on real Metakit - may first have appended part of its data and even written the new header, leaving a
@@ -528,6 +530,10 @@ proc ::mkitsql::db::beginCommit {path} {
     } elseif {![::file exists $path] || [::file size $path] == 0} {
         set line "empty 0"
     } else {
+        # no record can describe this file (no Metakit header at offset 0), but the old sum must not outlive the commit either:
+        # next to a newer file of the same size and modification second it would call that file damaged (commit writes a new one)
+        catch {::file delete [sumPath $path]}
+        syncDisk $path
         return 0
     }
     set rec [commitRecord $path]

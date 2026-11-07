@@ -146,5 +146,16 @@ catch {mkitsql::db::nearLimit [lindex [mkitsql::db::tags] 0] abc} hm ; check "ne
 # a failed or interrupted commit does not leave a sum that vouches for the wrong bytes: after the file is put back the sum is "changed" or ok, never "damaged"
 mkitsql::db::closeFile [lindex [mkitsql::db::tags] 0] 
 foreach x [list $f $f.sum $f.lock $f.commit $f.sum.tmp] { file delete $x }
+# a file no commit record can describe (no Metakit header at offset 0): its old sum does not outlive a commit either (0.6.0: it used to stay)
+if {!$studio} {
+    set g $tmp/mkitsql_att_foreign_[pid].bin
+    spit $g "no Metakit header here, just bytes"
+    mkitsql::db::sumWrite $g
+    check "foreign file: a sum to begin with" [file exists $g.sum] 1
+    check "foreign file: no commit record" [mkitsql::db::beginCommit $g] 0
+    check "foreign file: the old sum is gone once the commit begins" [file exists $g.sum] 0
+    check "foreign file: no record file" [file exists $g.commit] 0
+    foreach x [list $g $g.sum $g.commit] { file delete $x }
+}
 puts "attest: $pass passed, $fail failed"
 exit [expr {$fail ? 1 : 0}]
