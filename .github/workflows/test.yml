@@ -254,6 +254,44 @@ jobs:
       - name: The 2 GiB-ceiling test knows this Metakit has none
         run: MKIT_MK4TCL="$RUNNER_TEMP/mk4wide/build/Mk4tclS.so" tclsh8.6 tests/bigfile.tcl
 
+  # Ribbon's kitfmt (the reader behind the kit.* tables) is a pinned test fixture in tests/vendor/kitfmt (tests/sync-kitfmt.sh).
+  # atyr647/ribbon is PRIVATE: this workflow can read it only with a read-only token in the secret RIBBON_READ_TOKEN (a
+  # fine-grained token with Contents: read on atyr647/ribbon).  Always, without Ribbon: every vendored file has the git blob id and
+  # SHA-256 that SOURCE recorded.  With the token: those are the pinned commit's files, and a warning when Ribbon's kitfmt moved on.
+  # Without it the Ribbon half is skipped with a visible warning, never reported as a pass.  (The mkstudio job below compares this
+  # pin with the kitfmt MK Studio carries.)
+  kitfmt:
+    runs-on: ubuntu-latest
+    env:
+      RIBBON_READ_TOKEN: ${{ secrets.RIBBON_READ_TOKEN }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: The pinned kitfmt has the hashes it was pinned with (no Ribbon needed)
+        run: tests/sync-kitfmt.sh --verify
+      - name: Check out Ribbon (read-only, needs the secret RIBBON_READ_TOKEN)
+        id: ribbon
+        if: env.RIBBON_READ_TOKEN != ''
+        continue-on-error: true
+        uses: actions/checkout@v7
+        with:
+          repository: atyr647/ribbon
+          token: ${{ secrets.RIBBON_READ_TOKEN }}
+          path: ribbon
+          fetch-depth: 0
+          sparse-checkout: kit/kitfmt
+      - name: Ribbon could not be read - the comparison with Ribbon itself is SKIPPED
+        if: steps.ribbon.outcome != 'success'
+        run: echo "::warning title=kitfmt not compared with Ribbon::atyr647/ribbon is private and not readable by this workflow, so only the recorded hashes were checked. Add a read-only token as the secret RIBBON_READ_TOKEN to compare tests/vendor/kitfmt with Ribbon's pinned commit."
+      - name: The pinned kitfmt is byte for byte the pinned Ribbon commit
+        if: steps.ribbon.outcome == 'success'
+        run: tests/sync-kitfmt.sh --check ribbon
+      - name: Ribbon's newest kitfmt (early warning - re-sync when it has moved on)
+        if: steps.ribbon.outcome == 'success'
+        run: |
+          rc=0; tests/sync-kitfmt.sh --upstream ribbon || rc=$?
+          [ $rc -eq 2 ] && echo "::warning title=kitfmt has moved on in Ribbon::re-sync with tests/sync-kitfmt.sh"
+          [ $rc -le 2 ]
+
   # Reads (never writes) the mkstudio repository.  If that repository cannot be read by this workflow (it is
   # private: add a read-only token as the secret MKSTUDIO_READ_TOKEN) the steps are skipped and a visible
   # warning is printed - a skipped job is never reported as a pass.  If it can be read, a failure is a failure.
@@ -281,6 +319,18 @@ jobs:
       - name: Fetch the tclkit runtimes (SHA1-verified)
         if: steps.ms.outcome == 'success'
         run: tests/fetch-tclkit.sh
+      - name: The kitfmt MK Studio carries is the one the kit.* tests here use (both pins name their files' hashes)
+        if: steps.ms.outcome == 'success'
+        run: |
+          [ -f mkstudio/mkstudio.vfs/lib/kitfmt/SOURCE ] || { echo "::notice title=no kitfmt in MK Studio::this MK Studio commit carries no kitfmt (older than its Kit tab)"; exit 0; }
+          rc=0; tests/sync-kitfmt.sh --compare mkstudio/mkstudio.vfs/lib/kitfmt/SOURCE || rc=$?
+          [ $rc -eq 2 ] && echo "::warning title=two kitfmt pins::MK Studio carries another kitfmt commit than tests/vendor/kitfmt: sync one of them"
+          [ $rc -le 2 ]
+      - name: The kit.* tables on the kitfmt MK Studio carries, tclkit 8.6.3
+        if: steps.ms.outcome == 'success'
+        run: |
+          [ -f mkstudio/mkstudio.vfs/lib/kitfmt/kitfmt.tcl ] || { echo "(this MK Studio commit carries no kitfmt)"; exit 0; }
+          MKIT_MK4TCL=builtin KITFMT_DIR=$PWD/mkstudio/mkstudio.vfs/lib/kitfmt $T86 tests/kittables.tcl
       - name: mkstudio's own engine contract, tclkit 8.6.3, real Metakit
         if: steps.ms.outcome == 'success'
         run: MKIT_MK4TCL=builtin MKSTUDIO_DIR=$PWD/mkstudio $T86 tests/studio_contract.tcl

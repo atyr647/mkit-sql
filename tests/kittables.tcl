@@ -1,12 +1,15 @@
 # The virtual-table registry (vtab.tcl) and its first user, the kit.* tables (kit.tcl), on REAL Metakit:
 #   MKIT_MK4TCL=builtin tclkit/tclkit-8.6.3 tests/kittables.tcl        (MKIT_BACKEND as for the other tests)
 # The kits are Ribbon's golden test kits and the reader is Ribbon's kitfmt, both pinned in tests/vendor/kitfmt
-# (tests/sync-kitfmt.sh; SOURCE names the commit).
+# (tests/sync-kitfmt.sh; SOURCE names the commit).  KITFMT_DIR=<dir> reads with another copy of kitfmt instead (CI: the one MK
+# Studio carries); the golden kits stay the pinned ones.
 set here [file dirname [file normalize [info script]]]
 if {![info exists ::env(MKIT_MK4TCL)] || $::env(MKIT_MK4TCL) eq ""} { puts "set MKIT_MK4TCL to the Mk4tcl shared library, or to 'builtin' inside a tclkit" ; exit 2 }
 source $here/mk4load.tcl
 source $here/loadengine.tcl
-lappend auto_path $here/vendor/kitfmt
+set kitfmtDir [expr {[info exists ::env(KITFMT_DIR)] && $::env(KITFMT_DIR) ne "" ? $::env(KITFMT_DIR) : "$here/vendor/kitfmt"}]
+if {![file exists $kitfmtDir/kitfmt.tcl]} { puts "no kitfmt.tcl in $kitfmtDir" ; exit 2 }
+lappend auto_path $kitfmtDir
 set tmp [expr {[info exists ::env(TMPDIR)] ? $::env(TMPDIR) : "/tmp"}]/mkitsql_kit_[pid]
 file delete -force $tmp ; file mkdir $tmp
 set pass 0 ; set fail 0
@@ -118,5 +121,6 @@ chk kit_needs_kitfmt [string match "*the kit.* tables need the kitfmt package*" 
 
 mkitsql::kit::forget
 file delete -force $tmp
-puts "kit tables: $pass passed, $fail failed"
+chk kitfmt_is_the_one_asked_for [expr {[info exists ::kitfmt::dir] && [file normalize $::kitfmt::dir] eq [file normalize $kitfmtDir]}] 1
+puts "kit tables: $pass passed, $fail failed (kitfmt from $kitfmtDir)"
 exit [expr {$fail ? 1 : 0}]

@@ -11,7 +11,7 @@
 #   kitfmt stat    h path                type size mode date codec csize chunks stored link
 #   kitfmt chunks  h path                {index stored-size sha256} for each chunk of a file
 #   kitfmt read    h path ?offset? ?length?   bytes, each chunk checked against its hash first
-#   kitfmt extract h path destdir        file, link or folder ("" = everything) into destdir
+#   kitfmt extract h path destdir ?-progress cmd?   file, link or folder ("" = everything) into destdir
 #   kitfmt verify  h ?-progress cmd? ?-paths list?   every chunk, the image, the header, the root, the signature
 #   kitfmt image   h                     the embedded image of a system kit ("" if none)
 #   kitfmt close   h
@@ -23,7 +23,7 @@
 # not match is an error, never data; the limits of section 10 are enforced.
 #
 # Errors carry -errorcode {KITFMT <CODE> ...}: NOTKIT TRUNCATED SEAL VERSION FEATURE STRUCTURE
-# LIMIT ROOT STATEMENT HASH CODEC NOENT TYPE EXISTS PATH SIGNATURE CONFIG.
+# LIMIT ROOT STATEMENT HASH CODEC NOENT TYPE EXISTS PATH SIGNATURE CONFIG CANCELLED.
 #
 # Tcl 8.5 to 9 compatible, ASCII only, no command of the package shadows a Tcl command.
 
@@ -1018,8 +1018,13 @@ proc ::kitfmt::Read {h path {offset 0} {length -1}} {
 # ============================================================================
 #  Extracting
 # ============================================================================
-proc ::kitfmt::Extract {h path dest} {
+proc ::kitfmt::Extract {h path dest args} {
     Handle $h ; variable H
+    set progress ""
+    foreach {k v} $args {
+        if {$k ne "-progress"} { Fail CONFIG "extract: unknown option $k (-progress)" }
+        set progress $v
+    }
     set path [string trim $path /]
     if {![file isdirectory $dest]} { Fail CONFIG "destination $dest is not a directory" }
     set dest [file normalize $dest]
@@ -1033,7 +1038,8 @@ proc ::kitfmt::Extract {h path dest} {
         }
         set strip [Up $path]
     }
-    set links {} ; set dirs {} ; set n 0
+    set links {} ; set dirs {} ; set n 0 ; set done 0 ; set total 0
+    foreach p $todo { set e [dict get $H($h,entries) $p] ; if {[dict get $e type] eq "file"} { incr total [dict get $e size] } }
     foreach p $todo {
         set rel [expr {$strip eq "" ? $p : [string range $p [expr {[string length $strip] + 1}] end]}]
         set target $dest/$rel
@@ -1041,11 +1047,12 @@ proc ::kitfmt::Extract {h path dest} {
     }
     foreach p $todo {
         set e [dict get $H($h,entries) $p]
+        if {$progress ne "" && [uplevel #0 [concat $progress [list $done $total]]] eq "stop"} { Fail CANCELLED "extraction stopped after $n entries" $n }
         set rel [expr {$strip eq "" ? $p : [string range $p [expr {[string length $strip] + 1}] end]}]
         set target $dest/$rel
         switch -- [dict get $e type] {
             dir { file mkdir $target ; lappend dirs $target [dict get $e mode] }
-            file { WriteFile $h $p $e $target ; incr n }
+            file { WriteFile $h $p $e $target ; incr n ; incr done [dict get $e size] }
             link { lappend links $p $e $target $rel }
         }
     }
