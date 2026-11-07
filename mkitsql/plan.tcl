@@ -685,7 +685,7 @@ proc ::mkitsql::cfLeaf {s pushable stVar {latmap {}}} {
             set plan [dict create kind wref tid [dict get $s tid] filter $filter]
         }
         info {
-            set plan [dict create kind info which [dict get $s which] filter $filter]
+            set plan [dict create kind info which [dict get $s which] db [dict get $s db] filter $filter]
         }
         default { error "cfLeaf: [dict get $s kind]" }
     }
@@ -779,7 +779,7 @@ proc ::mkitsql::letterSqlName {l} {
     }
     return $l
 }
-proc ::mkitsql::infoRows {which} {
+proc ::mkitsql::infoRows {which {ctx {}}} {
     set rows {}
     foreach tag [::mkitsql::db::tags] {
         foreach v [::mkitsql::db::views $tag] {
@@ -1033,7 +1033,7 @@ proc ::mkitsql::explainSource {n depth} {
         lateral - lateralouter { lappend out "${ind}SUBVIEW [dict get $n sub] of each row" }
         derived - latderived { lappend out "${ind}SUBQUERY:" ; lappend out {*}[explainPlan [dict get $n sub] [expr {$depth + 1}]] }
         wref { lappend out "${ind}CTE result (computed once)" }
-        info { lappend out "${ind}information_schema.[dict get $n which]" }
+        info { lappend out "${ind}[dict get $n which]" }
     }
     return $out
 }

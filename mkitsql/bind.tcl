@@ -417,9 +417,9 @@ proc ::mkitsql::bindSource {node} {
                     }
                     incr k
                 }
-                if {[string equal -nocase $p0 information_schema]} {
-                    return [infoSource [lindex $parts 1] $alias]
-                }
+                # a virtual table (vtab.tcl): information_schema.*, kit.*, or one a program registered
+                set vs [virtualSource $p0 [lindex $parts 1] $alias]
+                if {$vs ne ""} { return $vs }
             }
             # ---- a real table
             lassign [resolveTable $parts] tag view
@@ -498,22 +498,6 @@ proc ::mkitsql::derivedCols {names types bq} {
         incr i
     }
     return $cols
-}
-
-# information_schema.tables / columns
-proc ::mkitsql::infoSource {which alias} {
-    set which [string tolower $which]
-    switch -- $which {
-        tables {
-            set cols {{table_catalog text "" 0 {}} {table_name text "" 0 {}} {table_type text "" 0 {}} {row_count int "" 0 {}}}
-        }
-        columns {
-            set cols {{table_catalog text "" 0 {}} {table_name text "" 0 {}} {column_name text "" 0 {}}
-                      {ordinal_position int "" 0 {}} {data_type text "" 0 {}} {metakit_type text "" 0 {}}}
-        }
-        default { fail "Unknown information_schema table '$which'.  Available: tables, columns" }
-    }
-    return [newSource info [pickName $alias $which] $cols which $which]
 }
 
 # ============================================================================

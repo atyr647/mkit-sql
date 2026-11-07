@@ -66,6 +66,9 @@ jobs:
           for seed in 4 5; do python3 tests/differential/diff.py --kind window --n 1500 --seed $seed; done
           python3 tests/differential/diff.py --file tests/differential/recursive.sql
           python3 tests/differential/diff.py --file tests/differential/using.sql
+      - name: Virtual tables and the kit.* tables (Ribbon's golden kits, the pinned kitfmt), both storage layers, tclkit 8.6.3 and 8.5.17
+        run: |
+          for k in $T86 $T85; do for b in standalone studio; do MKIT_BACKEND=$b MKIT_MK4TCL=builtin $k tests/kittables.tcl; done; done
       - name: Scale test, tclkit 8.6.3, REAL Metakit
         run: MKIT_MK4TCL=builtin $T86 tests/scale.tcl 100000
       - name: Both storage layers (standalone db.tcl, and MK Studio's ::store through db_studio.tcl), tclkit 8.6.3

@@ -314,7 +314,7 @@ proc ::mkitsql::srcStream {node outer sink} {
             if {$f ne ""} { set sink [list ::mkitsql::stFilter $f $outer $sink] }
             return [streamPlan [dict get $node sub] $outer $sink]
         }
-        info { return [emitAll $sink [filterRows [infoRows [dict get $node which]] [dict get $node filter] $outer]] }
+        info { return [emitAll $sink [filterRows [virtualRows [dict get $node which] [dict get $node db]] [dict get $node filter] $outer]] }
         wref {
             variable wtable
             return [emitAll $sink [filterRows $wtable([dict get $node tid]) [dict get $node filter] $outer]]
