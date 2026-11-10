@@ -402,7 +402,9 @@ proc ::mkitsql::db::commit {tag} {
     variable dirty ; variable file ; variable taint
     if {[info exists taint($tag)]} { taintedError $tag }
     set record 0 ; set began 0
+    commitStep start
     if {$dirty($tag) > 0} { set record [beginCommit $file($tag)] ; set began 1 }
+    commitStep record-written
     if {[catch {mk::file commit $tag} err]} {
         if {!$record} { return -code error $err }
         lassign [commitFailed $tag $err] code msg
@@ -410,10 +412,16 @@ proc ::mkitsql::db::commit {tag} {
     }
     set dirty($tag) 0
     guardReset $tag
+    commitStep committed
     if {$record} { endCommit $file($tag) }
     # the checksum of the finished file, also when no record could describe it (beginCommit removed the old one either way)
     if {$began} { catch {sumWrite $file($tag)} }
+    commitStep checksum-written
 }
+# test hook: a script prefix called with the name of each step of a commit (tests exit or raise an error there to see what a crash at
+# that point leaves).  In order: start record-written committed data-synced record-tmp-written record-rewritten record-deleted checksum-written
+namespace eval ::mkitsql::db { variable commitHook "" }
+proc ::mkitsql::db::commitStep {name} { variable commitHook ; if {$commitHook ne ""} { {*}$commitHook $name } }
 # Metakit stores a file's size in ONE 32-bit word and stops at 2 GiB: a commit that would cross it fails ("I/O error during
 # commit"), and - measured on real Metakit - may first have appended part of its data and even written the new header, leaving a
 # file that crashes Metakit when it is opened.  The record written before the commit says what to put back.  The file is restored,
@@ -459,8 +467,10 @@ proc ::mkitsql::db::commitFailed {tag err} {
 # database without any error (a plain `kill` rarely lands in that few milliseconds, a deterministic one does every time), and after a
 # POWER CUT the pages may reach the disk in any order.  Two repairs make both recoverable:
 #   * before a commit starts, <file>.commit records the committed header and size (forced to disk where the system has `sync`); after
-#     the commit the file is forced to disk and the record removed.  If the record is found when the file is opened for writing, the
-#     commit never finished (or was never confirmed): header and size are put back - the database is exactly what it was before it.
+#     the commit the file is forced to disk, the record rewritten to describe the finished file (and forced to disk), and only then
+#     removed (see endCommit: a deletion lost in a power cut must not bring back a record that undoes a finished commit).  If a record
+#     that describes the OLD file is found when the file is opened for writing, the commit never finished (or was never confirmed):
+#     header and size are put back - the database is exactly what it was before it.
 #   * without a record, a file longer than its header says (an unfinished append) is cut back to the header's offset.
 # Not covered: a disk that loses data it said was written, or a system with no way to force data out (Windows has no `sync`
 # command: there, kills are covered and power loss is as safe as the operating system's own write ordering).
@@ -546,11 +556,11 @@ proc ::mkitsql::db::beginCommit {path} {
     }
     set rec [commitRecord $path]
     catch {::file delete [sumPath $path]}               ;# a commit rewrites bytes in place: the old sum must not outlive it, whatever happens next
-    if {[catch { set h [open $rec w] ; puts -nonewline $h $line ; close $h }]} {
+    if {[catch {recordPut $rec $line}]} {
         # no record can be written (a read-only folder, a full disk): the commit would run unprotected.  Remove what is left of a partial
         # record, and let the caller see it (commitUnprotected); it still goes ahead, because a database in a folder that cannot hold
         # a lock file must stay writable
-        catch {close $h} ; catch {::file delete $rec}
+        catch {::file delete $rec}
         variable unprotected ; set unprotected($path) 1
         return 0
     }
@@ -559,17 +569,41 @@ proc ::mkitsql::db::beginCommit {path} {
 }
 # 1 when a commit of this file ran without a commit record (the record could not be written): an interrupted one could not be undone
 proc ::mkitsql::db::commitUnprotected {tag} { variable unprotected ; variable file ; return [info exists unprotected($file($tag))] }
+proc ::mkitsql::db::recordPut {rec text} {
+    set h [open $rec w]
+    if {[catch {puts -nonewline $h $text ; close $h} err opts]} { catch {close $h} ; return -options $opts $err }
+}
+# The record says "if you find me, undo the commit that follows".  Deleting it must not be the only thing between a finished commit and
+# being undone: on Windows a virus scanner or an indexer can hold the file so the delete fails, and on Linux the unlink can be lost in a
+# power cut after the data reached the disk (the old record then reverts a commit that was reported as done - or, for the first commit of
+# a new database, empties it).  So, in this order:
+#   1. the database file is forced to disk;
+#   2. the record is rewritten (new file, renamed over it; in place where the rename fails) to describe the file AS IT NOW IS - found later
+#      it finds nothing to undo (a file with no Metakit header gets an empty record, which is harmless too) - and forced to disk;
+#   3. only then is it deleted.
+# A crash before 2 is finished leaves the old record: the commit was never reported as done, so undoing it is correct.  A crash after
+# leaves a record that undoes nothing.  (The same ordering as MK Studio's store.tcl.)
 proc ::mkitsql::db::endCommit {path} {
     syncDisk $path
+    commitStep data-synced
     set rec [commitRecord $path]
-    catch {::file delete $rec}
-    if {[::file exists $rec]} {
-        # The commit is complete and confirmed, but its record cannot be removed (on Windows a virus scanner or an indexer may hold a
-        # fresh file open).  A record left behind would make the next writer undo this commit, so make it harmless: an empty record means
-        # nothing to undo.  If even that fails the caller must know.
-        if {[catch { set h [open $rec w] ; close $h }]} {
-            return -code error -errorcode [list MKIT RECORDSTUCK $rec] "The commit succeeded, but its safety record could not be removed or emptied:\n$rec\nDelete that file before the database is opened again, or the next open would undo this commit."
-        }
+    set info [headerInfo $path]
+    set line [expr {$info ne "" ? "[dict get $info header] [dict get $info size]" : ""}]
+    set neutral 0
+    if {![catch {recordPut $rec.tmp $line}]} {
+        commitStep record-tmp-written
+        if {![catch {::file rename -force $rec.tmp $rec}]} { set neutral 1 }
+    }
+    if {!$neutral && ![catch {recordPut $rec $line}]} { set neutral 1 }         ;# (the rename can fail where the file is held open)
+    catch {::file delete $rec.tmp}
+    if {$neutral} { syncDisk $rec }
+    commitStep record-rewritten
+    set gone [expr {![catch {::file delete $rec}] && ![::file exists $rec]}]
+    commitStep record-deleted
+    if {!$gone && !$neutral} {
+        # the data IS saved, but the record still describes the state before it and would undo it the next time the file is opened
+        # for writing: the caller must know
+        return -code error -errorcode [list MKIT RECORDSTUCK $rec] "The commit succeeded, but its safety record could not be removed or rewritten:\n$rec\nDelete that file before the database is opened again, or the next open would undo this commit."
     }
 }
 # ---- integrity: a checksum of the whole file (the same <file>.sum MK Studio writes) ------------------------------------------------

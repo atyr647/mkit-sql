@@ -5,11 +5,9 @@
 # power cut can leave the file as it was written but bring the record back (an unlink that had not reached the disk).  If the record
 # still describes the file BEFORE the commit, the next writer undoes a commit that was reported as done.
 #
-# This is a model, not a real power cut (none can be pulled from a test).  It tracks what is durable for the record file only:
-#   * a flush of the record file itself makes its current text durable;
-#   * any flush at all syncs the folder, so a record that is gone at that moment is durably gone.
-# When the commit returns, the disk is put into the state the model says is durable (the record comes back if its deletion was never
-# flushed), the handle is dropped, and the file is opened for writing again, which repairs an interrupted commit.
+# This is a model, not a real power cut (none can be pulled from a test): tests/commit_model.tcl says what it assumes.  When the commit
+# returns, the disk is put into the state the model says is durable (the record comes back if its deletion was never flushed), the
+# handle is dropped, and the file is opened for writing again, which repairs an interrupted commit.
 # Whether the commit is covered then depends on whether anything flushed the folder AFTER the record was deleted:
 #   * the new checksum does (sumWrite flushes its own file and the folder) - but only for files it covers (sumLimit, zlib);
 #   * so with the checksum switched off (a file over sumLimit, `sumLimit 0`, a runtime without zlib) nothing does.
@@ -20,28 +18,11 @@ source $here/loadengine.tcl
 source $here/mkutil.tcl
 set pass 0 ; set fail 0
 proc check {n got want} { global pass fail ; if {$got eq $want} {incr pass} else {incr fail ; puts "FAIL $n\n  got:  [string range $got 0 200]\n  want: [string range $want 0 200]"} }
-set mkitsql::db::durable 1
 set area [tmp mkitsql_ack_[pid]] ; file delete -force $area ; file mkdir $area
 set f $area/a.mk ; set rec $f.commit
 
-# what is durable for the record: {exists text}
-set ::dur {0 {}}
-rename ::mkitsql::db::syncDisk ::mkitsql::db::syncDiskReal
-proc ::mkitsql::db::syncDisk {args} {
-    set r [syncDiskReal {*}$args]
-    set rec $::rec
-    if {![file exists $rec]} {
-        set ::dur [list 0 {}]
-    } elseif {[lsearch -exact $args $rec] >= 0} {
-        set h [open $rec rb] ; set t [read $h] ; close $h
-        set ::dur [list 1 $t]
-    }
-    return $r
-}
-proc powerCut {} {
-    lassign $::dur exists text
-    if {$exists} { set h [open $::rec wb] ; puts -nonewline $h $text ; close $h } else { file delete $::rec }
-}
+source $here/commit_model.tcl
+set ::modelRec $rec
 proc clean {} { foreach x [glob -nocomplain $::f $::f.*] { file delete -force $x } }
 proc rowsAfterReopen {} {
     set t [mkitsql::db::openFile $::f]

@@ -127,6 +127,8 @@ jobs:
           for k in $T86 $T85; do LOCK_ROUNDS=60 MKIT_MK4TCL=builtin $k tests/lock_crash.tcl; done
       - name: Lock takeover - the stale lock is moved aside and judged (not deleted by name); starved and wrongly judging processes; two reapers of one abandoned guard (both kits)
         run: for k in $T86 $T85; do MKIT_MK4TCL=builtin $k tests/lock_takeover.tcl; done
+      - name: Commit steps - an acknowledged commit survives a lost record deletion; a stop at every step of a commit (exit, power-cut model, raised error) leaves the old or the new database (both kits)
+        run: for k in $T86 $T85; do for t in commit_ack commit_crash; do MKIT_MK4TCL=builtin $k tests/$t.tcl; done; done
       - name: Performance guard - a lost pushdown or an accidental quadratic step fails (generous ceilings), both kits
         run: for k in $T86 $T85; do PERF_SCALE=2 MKIT_MK4TCL=builtin $k tests/perf_guard.tcl; done
       - name: SQL added in 0.5 - correlated subqueries remembered per key, EXCLUDE / DISTINCT / IGNORE NULLS, interval aggregates, SIMILAR TO, duplicate column names, ROLLUP / CUBE / GROUPING SETS, COLLATE; both kits, tiny budget too
@@ -487,6 +489,10 @@ jobs:
         run: MKIT_MK4TCL=builtin "$T86" tests/damage.tcl
       - name: Commit-record leftovers
         run: MKIT_MK4TCL=builtin "$T86" tests/commitfail.tcl
+      - name: Commit steps (a stop at every step of a commit)
+        run: |
+          MKIT_MK4TCL=builtin "$T86" tests/commit_ack.tcl
+          MKIT_MK4TCL=builtin "$T86" tests/commit_crash.tcl
       - name: The 2 GiB limit (a commit that would cross it is undone)
         run: MKIT_MK4TCL=builtin "$T86" tests/bigfile.tcl
       - name: Temp files and locking
