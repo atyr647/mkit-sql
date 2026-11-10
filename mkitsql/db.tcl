@@ -478,17 +478,44 @@ proc ::mkitsql::db::commitFailed {tag err} {
 # forcing every commit to disk - a PowerShell start on Windows - would only make a long test run longer)
 namespace eval ::mkitsql::db { variable durable [expr {[info exists ::env(MKIT_DURABLE)] && $::env(MKIT_DURABLE) eq "0" ? 0 : 1}] ; variable repaired ; array set repaired {} }
 # force the files (and the folder entry) to disk where the system can:
-#   Linux/BSD  coreutils `sync FILE...`, else a plain `sync`
-#   macOS      `sync` (flushes the OS cache; the drive's own cache is out of reach from Tcl)
-#   Windows    FlushFileBuffers through PowerShell (.NET FileStream.Flush($true)), if PowerShell can be started
-# Returns 1 when something was asked to force the data out, 0 when nothing could be.  (Same as MK Studio's store.tcl.)
+#   native     the mksync library (MK Studio's native/mksync), when this Tcl can load it: fsync on Linux and BSD (files and their folders),
+#              fcntl(F_FULLFSYNC) on macOS - the call that also empties the drive's own cache -, FlushFileBuffers on Windows.  Nothing is
+#              needed for it: it is used when `package require mksync` works (or ::mksync::flush already exists) and otherwise not.
+#   otherwise  Linux/BSD  coreutils `sync FILE...`, else a plain `sync`
+#              macOS      `sync` (flushes the OS cache; the drive's own cache is out of reach from Tcl)
+#              Windows    FlushFileBuffers through PowerShell (.NET FileStream.Flush($true)), if PowerShell can be started
+# Returns 1 when something was asked to force the data out, 0 when nothing could be.  A refusal from the native call (the system or the
+# disk reported a failure) is a failure and is reported as 0, not retried through a program: the same request would fail the same way.
+# (the environment variable MKIT_NATIVE=0 never looks for the library: for tests of the fallbacks)
+namespace eval ::mkitsql::db { variable native -1 }
+proc ::mkitsql::db::nativeFlush {} {
+    variable native
+    if {$native == -1} {
+        set native 0
+        if {!([info exists ::env(MKIT_NATIVE)] && $::env(MKIT_NATIVE) eq "0")} {
+            if {![llength [info commands ::mksync::flush]]} { catch {package require mksync} }
+            if {[llength [info commands ::mksync::flush]]} { set native 1 }
+        }
+    }
+    return $native
+}
+# what the next flush will use: "native (fsync)", "sync", "PowerShell", "none", "off"
+proc ::mkitsql::db::flushMethod {} {
+    variable durable
+    if {!$durable} { return "off" }
+    if {[nativeFlush]} { return "native ([expr {[llength [info commands ::mksync::method]] ? [::mksync::method] : {flush}}])" }
+    if {$::tcl_platform(platform) eq "windows"} { return [expr {[winTool powershell] ne "" ? "PowerShell" : "none"}] }
+    return "sync"
+}
 proc ::mkitsql::db::syncDisk {args} {
     variable durable
     if {!$durable} { return 0 }
-    if {$::tcl_platform(platform) eq "windows"} { return [syncWindows {*}$args] }
     set paths {}
     foreach p $args { lappend paths $p ; lappend paths [::file dirname $p] }
-    if {[catch {exec sync {*}[lsort -unique $paths]}] && [catch {exec sync}]} { return 0 }
+    set paths [lsort -unique $paths]
+    if {[nativeFlush]} { return [expr {![catch {::mksync::flush {*}$paths}]}] }
+    if {$::tcl_platform(platform) eq "windows"} { return [syncWindows {*}$args] }
+    if {[catch {exec sync {*}$paths}] && [catch {exec sync}]} { return 0 }
     return 1
 }
 namespace eval ::mkitsql::db { variable psOk -1 }
