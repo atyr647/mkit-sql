@@ -591,14 +591,15 @@ like a recycled pid, because the check compares its start time with the lock's m
 property); file names are compared as spelled, so on Windows and macOS (case-insensitive) always open a file under one spelling; mkit-sql resolves symbolic links before it names the lock, MK Studio's store does not, so **open a database through the same real path from both programs** or they will not exclude each other.
 A file in a folder where no lock file can be created opens unlocked (see `requireLock`) and is then **not repaired** (another writer
 may be mid-commit); likewise a commit whose record cannot be written still runs, and `::mkitsql::db::commitUnprotected $tag` says so.
-* **A Metakit that refuses.** A Metakit with its own OS-level write lock and stale-write check (the 64-bit fork is being given both; not part of this repository yet) says no
-  from `mk::file open` or `mk::file commit`. mkit-sql recognises that (an `-errorcode` `{METAKIT|MK4|MK4TCL LOCKED|STALE ...}`, or words
-  such as "locked", "already open for writing", "changed by" in the message; the words are `::mkitsql::db::refusalWords`) and reports it
-  as `{MKIT LOCKED 0 unknown {} {}}` (open or commit: another program holds Metakit's lock) or `{MKIT STALEWRITE}` (the file was changed
-  by another program since it was read here), with the usual `MKQL ERROR` in front at SQL level. A refusal is taken to mean that
-  nothing was written: no rollback, the commit record is dropped (it must never undo another writer's commit), the changes stay pending,
-  so `COMMIT` can be repeated or `ROLLBACK` discards them. Without a lock in Metakit nothing changes; this is detected, never required.
-  Tested with a simulated refusal (`tests/metakit_refusal.tcl`), not yet with the real fork.
+* **A Metakit that refuses.** The Metakit fork with its own write lock (`doc/safety.md` of atyr647/metakit) holds the system's lock on a
+  file for as long as it is open for writing and refuses a commit when another program committed first. mkit-sql believes only Mk4tcl's
+  `-errorcode`: `{MK LOCKED}` from `mk::file open` becomes `{MKIT LOCKED 0 unknown {} {}}` (like every "another program is writing"
+  refusal; `openFile` raises it, and a program that ignores the lock file gets it too), `{MK CHANGED}` from `mk::file commit` becomes
+  `{MKIT CHANGED}` (with `MKQL ERROR` in front at SQL level). A refusal is a promise that nothing was written: no rollback, the commit record
+  is dropped (it must never undo another writer's commit), the changes stay pending, so `COMMIT` can be repeated or `ROLLBACK` discards them
+  and reads what the other program committed. With an older Metakit nothing changes; this is detected, never required. Metakit's own
+  `METAKIT_NOLOCK` (or `-nolock`) switches the lock off for a program, and with it this protection.
+  Tested with real processes (`tests/metakit_lock.tcl`) and by simulation (`tests/metakit_refusal.tcl`).
 * **Readers are not locked.** `openFile -readonly` always works, notes who holds the write lock
   (`::mkitsql::db::lockedBy`), and write statements on it say so. A reader that is open while a writer commits can see a
   half-written state: that is Metakit, not something advisory locks can fix. Keep readers short, or have the writing

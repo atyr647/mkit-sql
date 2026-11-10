@@ -97,15 +97,20 @@ engine contract and its 41 UI-logic checks all pass.
   does **not** inherit any locking from MK Studio: it has its own, compatible one. Details and limits in
   [docs/SQL.md](docs/SQL.md#concurrency-locking-and-transactions).
 * **One writer at a time - the honest limit.** The lock file keeps out every program that follows its protocol (mkit-sql, MK Studio),
-  and one process cannot open a file twice. It does **not** stop a program that ignores it, and Metakit itself has no protection:
-  two handles that both write one file lose data silently - the second commit wins, the first one's rows are gone, and both commits
-  report success (reproduced on the shipped Metakit fork in the 2026-11 survey of MK Studio and mkit-sql). So today: **let exactly one process own each database file** (a server or a script
-  that opens it for writing and runs every write, one statement at a time, in a queue), and let everything else read through that
-  process, or open the file with `-readonly`. Never copy or edit the file while it is open for writing. If a Metakit that has its
-  own write lock and stale-write check is loaded, mkit-sql passes its refusal on as a clear error (`{MKIT LOCKED ...}` for the lock,
-  `{MKIT STALEWRITE}` for a file that changed under the writer; the commit writes nothing and the changes stay pending) instead of
-  reporting a failed disk; it detects this by the refusal and needs nothing from Metakit. That path is tested with a simulated
-  refusal only, because no such Metakit is part of this repository yet.
+  and one process cannot open a file twice. It does **not** stop a program that ignores it, and an ordinary Metakit has no protection of
+  its own: two handles that both write one file lose data silently - the second commit wins, the first one's rows are gone, and both
+  commits report success (reproduced on the shipped Metakit fork in the 2026-11 survey of MK Studio and mkit-sql). So: **let exactly one
+  process own each database file** (a server or a script that opens it for writing and runs every write, one statement at a time, in a
+  queue), and let everything else read through that process, or open the file with `-readonly`. Never copy or edit the file while it is
+  open for writing.
+  **With the newer Metakit** (the fork branch that documents its write lock, `doc/safety.md`: the system's own lock for as long as a
+  file is open for writing, and a commit refused when another program committed first) mkit-sql needs nothing and passes the refusals on
+  as clear errors: a second writer, even one that ignores the lock file, gets `{MKIT LOCKED 0 unknown {} {}}` from `openFile`; a
+  `COMMIT` over another program's commit gets `{MKIT CHANGED}` (`MKQL ERROR` in front), writes nothing, keeps the changes pending
+  and the other program's rows safe; `ROLLBACK` loads them and the changes can be repeated. mkit-sql keeps a file open for writing for
+  as long as it is open, so it holds the lock all that time: others wait (`mk::transaction`) or are refused until it is closed. The
+  refusals are recognised by Mk4tcl's `-errorcode` (`{MK LOCKED}`, `{MK CHANGED}`) only; an older Metakit never raises them and nothing
+  changes. Tested with real processes (`tests/metakit_lock.tcl`, which skips itself on a Metakit without the lock) and by simulation.
 * **Temporary files.** Spill files go into a private 0700 folder with random names and exclusive 0600 files, are removed
   after every statement, and folders abandoned by crashed runs are swept safely at the next run.
 

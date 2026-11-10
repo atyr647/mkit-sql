@@ -20,14 +20,23 @@ All notable changes to mkit-sql. The versioning and compatibility rules are in
   `::mkitsql::db::flushMethod` reports the choice. A refusal by the native call is "not flushed", never raised and not retried by program.
   `tests/native_flush.tcl`: no library, a command, a package, a package without the command, a broken one, a refusal, durable 0, and a real
   mksync when installed.
-* **A Metakit that refuses to write is reported as such.** A refusal of `mk::file open` / `mk::file commit` by a Metakit's own write lock or
-  stale-write check is now `{MKIT LOCKED 0 unknown {} {}}` or the new `{MKIT STALEWRITE}` (`MKQL ERROR` in front), not "the commit failed, most
-  likely a full disk". Nothing is rolled back, the commit record is dropped (it must never undo another writer's commit), the changes stay
-  pending. Detected by `-errorcode {METAKIT|MK4|MK4TCL LOCKED|STALE}` or by words in the message (`::mkitsql::db::refusalWords`); a Metakit
-  without the lock behaves as before. **Simulated only**: `tests/metakit_refusal.tcl` wraps `mk::file`; the real fork's wording is not
-  known yet. README: the honest limit (one writer at a time; let one process own the file).
+* **A Metakit that refuses to write is reported as such.** The Metakit fork with its own write lock (branch of atyr647/metakit,
+  `doc/safety.md`) refuses `mk::file open` of a file another writer has open (`-errorcode {MK LOCKED}`) and a commit that would replace
+  another program's data (`{MK CHANGED}`, nothing written). mkit-sql now reports them as `{MKIT LOCKED 0 unknown {} {}}` and the new
+  `{MKIT CHANGED}` (`MKQL ERROR` in front at SQL level), not "the commit failed, most likely a full disk" - which also rolled the changes back
+  and could put an old commit record over the other writer's data. Nothing is rolled back, the commit record is dropped (it must never undo
+  another writer's commit), the changes stay pending (`COMMIT` again, or `ROLLBACK`, which loads what the other program committed). Only
+  Mk4tcl's `-errorcode` is believed; an older Metakit never raises it and behaves as before, nothing is required. `tests/metakit_lock.tcl`
+  runs real processes against the fork (a holder and a second writer, a second writer that ignores the lock file, a killed holder, another
+  program committing first, mkit-sql's own second handle on a hard link) and skips itself on a Metakit without the lock;
+  `tests/metakit_refusal.tcl` simulates the two refusals on any Mk4tcl. README: the honest limit (one writer at a time; let one process own
+  the file; the newer Metakit's lock is held as long as the file is open for writing).
+* **The flush stays on top of the new Metakit's own forced writes.** That Metakit (fsync by default, `METAKIT_NOSYNC` turns it off) forces
+  the data before and after the commit tail but not the 8-byte header written last, and knows nothing of mkit-sql's commit record, so
+  mkit-sql's flush after the commit (header, then the rewritten record) is still what makes a finished commit safe; it is cheap (little
+  is dirty by then). No Tcl-visible way to tell whether a Metakit forces its writes exists, so nothing is skipped.
 * **Not done:** a backup copy of the file in standalone mkit-sql (README, "What it does not have").
-* Tests: `tests/commit_ack.tcl` 10, `commit_crash.tcl` 150, `native_flush.tcl` 30 (34 with a real mksync), `metakit_refusal.tcl` 34; the lint
+* Tests: `tests/commit_ack.tcl` 10, `commit_crash.tcl` 150, `native_flush.tcl` 30 (34 with a real mksync), `metakit_refusal.tcl` 23 (19 on the stand-in), `metakit_lock.tcl` 28 (real fork only); the lint
   inventory of `open` calls in `db.tcl` is 13 (was 14). Verified with Tcl 8.6.14 and the fork's Mk4tcl (`kit-fixes`), the stand-in, both
   storage layers where they apply; tclkit 8.6.3 / 8.5.17 are exercised by CI only.
 

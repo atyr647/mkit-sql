@@ -259,6 +259,8 @@ jobs:
         run: MKIT_MK4TCL="$RUNNER_TEMP/mk4wide/build/Mk4tclS.so" tclsh8.6 tests/widebig.tcl
       - name: The 2 GiB-ceiling test knows this Metakit has none
         run: MKIT_MK4TCL="$RUNNER_TEMP/mk4wide/build/Mk4tclS.so" tclsh8.6 tests/bigfile.tcl
+      - name: Metakit's own write lock and stale-commit check, real processes (skips itself on a fork pin without the lock; METAKIT_WIDE_REF moves the pin)
+        run: MKIT_MK4TCL="$RUNNER_TEMP/mk4wide/build/Mk4tclS.so" tclsh8.6 tests/metakit_lock.tcl
 
   # Ribbon's kitfmt (the reader behind the kit.* tables) is a pinned test fixture in tests/vendor/kitfmt (tests/sync-kitfmt.sh).
   # atyr647/ribbon is PRIVATE: this workflow can read it only with a read-only token in the secret RIBBON_READ_TOKEN (a
