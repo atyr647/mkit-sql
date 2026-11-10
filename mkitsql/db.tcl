@@ -354,7 +354,13 @@ proc ::mkitsql::db::openFile {path args} {
     set tag [makeTag $path]
     set opts {-nocommit}
     if {$readonly} { lappend opts -readonly }
-    if {[catch {mk::file open $tag $path {*}$opts}]} {
+    if {[catch {mk::file open $tag $path {*}$opts} err eopts]} {
+        # Metakit's own write lock refused the open: say so, whatever else this Mk4tcl would have been asked
+        set kind [refusal $err $eopts]
+        if {$kind ne ""} {
+            if {$mine ne ""} { releaseLock $path $mine }
+            refusedError $kind $path $err open
+        }
         # a very old Mk4tcl without -nocommit
         if {[catch {mk::file open $tag $path {*}[expr {$readonly ? {-readonly} : {}}]} err]} {
             if {$mine ne ""} { releaseLock $path $mine }
@@ -405,7 +411,14 @@ proc ::mkitsql::db::commit {tag} {
     commitStep start
     if {$dirty($tag) > 0} { set record [beginCommit $file($tag)] ; set began 1 }
     commitStep record-written
-    if {[catch {mk::file commit $tag} err]} {
+    if {[catch {mk::file commit $tag} err copts]} {
+        set kind [refusal $err $copts]
+        if {$kind ne ""} {
+            # refused before anything was written: the record must not be left to undo what another writer committed, and nothing here
+            # is rolled back - the changes are still pending
+            if {$record} { catch {::file delete [commitRecord $file($tag)]} }
+            refusedError $kind $file($tag) $err commit
+        }
         if {!$record} { return -code error $err }
         lassign [commitFailed $tag $err] code msg
         return -code error -errorcode $code $msg
@@ -422,6 +435,39 @@ proc ::mkitsql::db::commit {tag} {
 # that point leaves).  In order: start record-written committed data-synced record-tmp-written record-rewritten record-deleted checksum-written
 namespace eval ::mkitsql::db { variable commitHook "" }
 proc ::mkitsql::db::commitStep {name} { variable commitHook ; if {$commitHook ne ""} { {*}$commitHook $name } }
+# ---- a Metakit that refuses to write: its own lock, its check that the file changed under us ------------------------------------------
+# The Metakit fork can take an OS-level write lock and refuse a commit when the file was changed by somebody else since it was read.
+# mkit-sql does not require it.  When it is there and says no - from `mk::file open` or `mk::file commit` - the refusal must reach the
+# caller as what it is, not be folded into "the commit failed, most likely a full disk" (which would also roll back and put an old
+# commit record over the other writer's data).  A refusal is recognised by its -errorcode ({METAKIT|MK4|MK4TCL LOCKED|STALE ...}), else by
+# words in its message (`refusalWords`: one place to adjust to what the fork really says).  It is assumed to mean "nothing was written".
+# Raised as {MKIT LOCKED 0 unknown {} {}} (the code of every "somebody else is writing" refusal here) or {MKIT STALEWRITE}.
+namespace eval ::mkitsql::db {
+    variable refusalWords [dict create \
+        LOCKED {(?i)(\mlocked\M|lock (is )?held|another (process|program|writer)|already open for writing|(can ?not|could not|unable to) lock)} \
+        STALE  {(?i)(\mstale\M|(changed|modified) (by|since|under|on disk)|file has changed|file was changed)}]
+}
+proc ::mkitsql::db::refusal {err opts} {
+    variable refusalWords
+    set code [expr {[dict exists $opts -errorcode] ? [dict get $opts -errorcode] : ""}]
+    if {[lindex $code 0] in {METAKIT MK4 MK4TCL} && [lindex $code 1] in {LOCKED STALE}} { return [lindex $code 1] }
+    dict for {kind re} $refusalWords { if {[regexp $re $err]} { return $kind } }
+    return ""
+}
+proc ::mkitsql::db::refusedError {kind path err stage} {
+    if {$kind eq "LOCKED"} {
+        set code [list MKIT LOCKED 0 unknown {} {}]
+        if {$stage eq "open"} {
+            set msg "This database cannot be opened for writing: another program holds Metakit's write lock on it ($err):\n$path\nNothing was changed. Open it read-only, or wait until the other program has closed it."
+        } else {
+            set msg "The commit was refused: another program holds Metakit's write lock on this database ($err):\n$path\nNothing was written. The changes made since the last commit are still pending: COMMIT again when the other program is done, or ROLLBACK to discard them."
+        }
+    } else {
+        set code [list MKIT STALEWRITE]
+        set msg "The commit was refused: this database file was changed by another program after it was read here ($err):\n$path\nCommitting would overwrite that program's changes, so nothing was written. ROLLBACK discards the changes made here and reads the file again; then repeat them."
+    }
+    return -code error -errorcode $code $msg
+}
 # Metakit stores a file's size in ONE 32-bit word and stops at 2 GiB: a commit that would cross it fails ("I/O error during
 # commit"), and - measured on real Metakit - may first have appended part of its data and even written the new header, leaving a
 # file that crashes Metakit when it is opened.  The record written before the commit says what to put back.  The file is restored,

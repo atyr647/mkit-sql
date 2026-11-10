@@ -131,6 +131,8 @@ jobs:
         run: for k in $T86 $T85; do for t in commit_ack commit_crash; do MKIT_MK4TCL=builtin $k tests/$t.tcl; done; done
       - name: Disk flush - the native mksync library when there is one (stand-ins for it, and a real one when installed), a program when there is not
         run: for k in $T86 $T85; do MKIT_MK4TCL=builtin $k tests/native_flush.tcl; done
+      - name: A Metakit that refuses to write (simulated lock and stale-write refusals) reaches the caller as a clear error, both kits
+        run: for k in $T86 $T85; do MKIT_MK4TCL=builtin $k tests/metakit_refusal.tcl; done
       - name: Performance guard - a lost pushdown or an accidental quadratic step fails (generous ceilings), both kits
         run: for k in $T86 $T85; do PERF_SCALE=2 MKIT_MK4TCL=builtin $k tests/perf_guard.tcl; done
       - name: SQL added in 0.5 - correlated subqueries remembered per key, EXCLUDE / DISTINCT / IGNORE NULLS, interval aggregates, SIMILAR TO, duplicate column names, ROLLUP / CUBE / GROUPING SETS, COLLATE; both kits, tiny budget too
@@ -496,6 +498,7 @@ jobs:
           MKIT_MK4TCL=builtin "$T86" tests/commit_ack.tcl
           MKIT_MK4TCL=builtin "$T86" tests/commit_crash.tcl
           MKIT_MK4TCL=builtin "$T86" tests/native_flush.tcl
+          MKIT_MK4TCL=builtin "$T86" tests/metakit_refusal.tcl
       - name: The 2 GiB limit (a commit that would cross it is undone)
         run: MKIT_MK4TCL=builtin "$T86" tests/bigfile.tcl
       - name: Temp files and locking
