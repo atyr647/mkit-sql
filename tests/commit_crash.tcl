@@ -11,6 +11,8 @@ set ::env(MKIT_BACKEND) standalone
 source $here/mk4load.tcl
 source $here/loadengine.tcl
 source $here/mkutil.tcl
+# the stand-in Mk4tcl writes files with no Metakit header, so no commit record describes them and a commit has no steps after the commit itself
+if {$::mk4kind eq "stand-in"} { puts "skipped: needs a real Mk4tcl" ; exit 0 }
 set pass 0 ; set fail 0
 proc check {n got want} { global pass fail ; if {$got eq $want} {incr pass} else {incr fail ; puts "FAIL $n\n  got:  [string range $got 0 200]\n  want: [string range $want 0 200]"} }
 set area [tmp mkitsql_crash_[pid]] ; file delete -force $area ; file mkdir $area

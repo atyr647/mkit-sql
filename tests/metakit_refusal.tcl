@@ -95,6 +95,8 @@ check "open refused: the file is untouched and no record" [file exists $f.commit
 set ::refuse ""
 set db [mkitsql::db::openFile $f] ; check "open works once the refusal is gone" [rows $db] 10 ; mkitsql::db::closeFile $db
 
+# (needs a commit record, which the stand-in's header-less files do not get)
+if {$::mk4kind ne "stand-in"} {
 # ---- an ordinary commit failure is still handled as one (restored, reopened, MKIT COMMITFAILED) ----
 set db [prepare] ; mkitsql::run "INSERT INTO t VALUES (100)" $db
 refuseWith commit "I/O error during commit"
@@ -102,6 +104,8 @@ lassign [sql COMMIT $db] code msg
 check "ordinary failure: still COMMITFAILED" [lrange $code 0 3] {MKQL ERROR MKIT COMMITFAILED}
 check "ordinary failure: the database is back at its last commit" [rows $db] 10
 set ::refuse "" ; mkitsql::db::closeFile $db
+
+}
 
 # ---- a refusal never needs a Metakit that has the lock: the normal path is unchanged ----
 set ::refuse ""

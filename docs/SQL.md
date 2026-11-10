@@ -637,14 +637,20 @@ A Metakit commit appends the new data and a new tail to the file and writes the 
 calls fsync. A process killed between the appends and the header leaves the OLD header and a LONGER file, which Metakit opens as
 an *empty* database without any error - and a later `COMMIT` would then overwrite the real data. After a power cut the pages
 can also reach the disk in any order. mkit-sql therefore writes `<file>.commit` (the committed header and size) before every
-commit, forces the file to disk after it where the system has `sync`, and removes the record; opening a file *for writing* (the
+commit and, after it, forces the file to disk, **rewrites the record to describe the finished file** (and forces that to disk), and only then
+deletes it - so a deletion lost in a power cut brings back a record that undoes nothing, never one that undoes a commit already reported as
+done (before 0.6.1 the record was simply deleted, and with the checksum off - files over `sumLimit`, runtimes without zlib - that case was
+open); opening a file *for writing* (the
 write lock is held, so nobody else is mid-commit) puts an unfinished commit back, so the database is exactly what it was before
 that commit (`::mkitsql::db::repairedNote $tag` says what was done). Without a record, a file longer than its header says is cut
 back to the header's offset. Both repairs happen only if a valid Metakit footer ends exactly where the restored state would
 end, so a damaged header can never make them throw data away; read-only opens cannot repair and refuse such a file. The file
 names and formats are MK Studio's (`store.tcl` does the same), so either program can repair what the other left behind. The record of the very first commit of a brand-new file reads `empty 0`: an interrupted first commit is put back to an
-empty file (tested by killing a first commit after each of 14 different writes). On Windows the file is flushed through
-PowerShell (not testable on the CI runner's stand-in, so best effort). MK Studio's `.sum` / `.bak` sidecar files are left alone.
+empty file (tested by killing a first commit after each of 14 different writes). Files are forced to disk by the native `mksync` library
+(MK Studio's `native/mksync`: fsync, `F_FULLFSYNC` on macOS, `FlushFileBuffers` on Windows) when `package require mksync` works or
+`::mksync::flush` exists, and otherwise by coreutils `sync` (macOS: `sync`, which does not empty the drive's own cache; Windows:
+PowerShell, best effort); `::mkitsql::db::flushMethod` says which, `MKIT_NATIVE=0` never looks for the library. The library is not
+needed, only faster and, on macOS, stronger. MK Studio's `.sum` / `.bak` sidecar files are left alone.
 `set ::mkitsql::db::durable 0` turns the `sync` calls off. **Limits:** a disk that loses data it said was written; Windows, which has
 no `sync` command (kills are covered, power loss is as safe as the operating system's own write ordering); a commit that was
 confirmed to the caller only counts as durable after the file has been forced out, so a crash after `mk::file commit` but before

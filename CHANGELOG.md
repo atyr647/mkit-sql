@@ -3,6 +3,34 @@
 All notable changes to mkit-sql. The versioning and compatibility rules are in
 [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md). Dates are omitted on purpose: the version is the identity.
 
+## 0.6.1 - a finished commit can no longer be undone by a lost record deletion; the native flush; a Metakit that refuses to write
+
+* **Fixed: an acknowledged commit could be undone after a power cut** (standalone storage layer; MK Studio's own store already had the
+  fix). `db::endCommit` flushed the file and deleted the commit record. A deletion that had not reached the disk brought the old record
+  back, which described the file *before* the commit, and the next writer put that state back: the commit had returned, its rows were
+  gone. Reproduced by `tests/commit_ack.tcl` with a model of a lost deletion (not a real power cut): with the checksum off (`sumLimit 0`,
+  files over `sumLimit`, runtimes without `zlib`) 25 of 75 rows were lost; with the checksum on the default setup was covered only by
+  accident, because `sumWrite` flushes the folder after the deletion. `endCommit` now follows MK Studio's `store.tcl`: flush the file,
+  **rewrite the record to describe the finished file** (temp file and rename, in place where the rename fails), flush it, then delete it.
+  `::mkitsql::db::commitHook` (a test hook, like `lockHook`) names each step of a commit; `tests/commit_crash.tcl` stops a commit at each
+  of the 8 steps three ways (a process that exits, the same with the lost-deletion model, a raised error) and checks the next writer finds
+  the old or the new database, no record, a later commit working.
+* **The native flush is used when there is one.** `syncDisk` calls `::mksync::flush` (MK Studio's `native/mksync`) when that command exists or
+  `package require mksync` works, and otherwise runs `sync` as before. Nothing is required; `MKIT_NATIVE=0` never looks;
+  `::mkitsql::db::flushMethod` reports the choice. A refusal by the native call is "not flushed", never raised and not retried by program.
+  `tests/native_flush.tcl`: no library, a command, a package, a package without the command, a broken one, a refusal, durable 0, and a real
+  mksync when installed.
+* **A Metakit that refuses to write is reported as such.** A refusal of `mk::file open` / `mk::file commit` by a Metakit's own write lock or
+  stale-write check is now `{MKIT LOCKED 0 unknown {} {}}` or the new `{MKIT STALEWRITE}` (`MKQL ERROR` in front), not "the commit failed, most
+  likely a full disk". Nothing is rolled back, the commit record is dropped (it must never undo another writer's commit), the changes stay
+  pending. Detected by `-errorcode {METAKIT|MK4|MK4TCL LOCKED|STALE}` or by words in the message (`::mkitsql::db::refusalWords`); a Metakit
+  without the lock behaves as before. **Simulated only**: `tests/metakit_refusal.tcl` wraps `mk::file`; the real fork's wording is not
+  known yet. README: the honest limit (one writer at a time; let one process own the file).
+* **Not done:** a backup copy of the file in standalone mkit-sql (README, "What it does not have").
+* Tests: `tests/commit_ack.tcl` 10, `commit_crash.tcl` 150, `native_flush.tcl` 30 (34 with a real mksync), `metakit_refusal.tcl` 34; the lint
+  inventory of `open` calls in `db.tcl` is 13 (was 14). Verified with Tcl 8.6.14 and the fork's Mk4tcl (`kit-fixes`), the stand-in, both
+  storage layers where they apply; tclkit 8.6.3 / 8.5.17 are exercised by CI only.
+
 ## 0.6.0 - big blobs by reference; checksums of files without a header; the kitfmt pin checked without Ribbon
 
 * **Big blobs by reference** (new, off by default). `::mkitsql::blobLimit N` (N >= 0) makes a stored blob that the outermost `SELECT`

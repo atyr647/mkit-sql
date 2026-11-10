@@ -21,7 +21,7 @@
 package require Tcl 8.5-10
 
 namespace eval ::mkitsql {
-    variable version 0.6.0
+    variable version 0.6.1
     variable dir [file dirname [file normalize [info script]]]
 }
 foreach f {parser expr datetime verify bind plan spill exec window stmt dbcheck vtab kit} { source -encoding utf-8 [file join $::mkitsql::dir $f.tcl] }
